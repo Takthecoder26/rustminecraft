@@ -140,6 +140,18 @@ impl Hook {
 fn triangle(r: &mut impl RandomSource, mode: f64, deviation: f64) -> f64 {
     mode + deviation * (f64::from(r.next_float()) - f64::from(r.next_float()))
 }
+fn cast_velocity(r: &mut impl RandomSource, direction: Vec3) -> Vec3 {
+    let len = (direction.x * direction.x + direction.y * direction.y + direction.z * direction.z)
+        .sqrt()
+        .max(1.0e-9);
+    let spread = 0.017_227_5;
+    let speed = 1.5;
+    Vec3::new(
+        (direction.x / len + r.triangle(0.0, spread)) * speed,
+        (direction.y / len + r.triangle(0.0, spread)) * speed,
+        (direction.z / len + r.triangle(0.0, spread)) * speed,
+    )
+}
 /// `FishingHook.onHitBlock`: `getDeltaMovement().normalize().scale(hit.distanceTo(this))`,
 /// where `HitResult.distanceTo` is the *squared* distance to the hook: the bobber
 /// springs back a little off a wall instead of stopping dead.
@@ -216,13 +228,7 @@ impl Game<'_> {
                 f64::from((-(x_sin / x_cos)).clamp(-5.0, 5.0)),
                 f64::from(-y_cos),
             );
-            let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
-            let r = &mut self.world.random;
-            v = Vec3::new(
-                v.x * (0.6 / len + triangle(r, 0.5, 0.0103365)),
-                v.y * (0.6 / len + triangle(r, 0.5, 0.0103365)),
-                v.z * (0.6 / len + triangle(r, 0.5, 0.0103365)),
-            );
+            v = cast_velocity(&mut self.world.random, v);
             // A spawned hook's start position is its feet: centre the box on the eye.
             let start = Vec3::new(start.x, start.y - SIZE / 2.0, start.z);
             self.next_entity += 1;
@@ -1474,9 +1480,22 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{entity_hit_margin, first_entity_hit, pull_item, rebound};
+    use super::{cast_velocity, entity_hit_margin, first_entity_hit, pull_item, rebound};
     use horizon_client::{entities::ItemEntity, items::ItemStack};
-    use horizon_core::geometry::{Aabb, Vec3};
+    use horizon_core::{
+        geometry::{Aabb, Vec3},
+        random::LegacyRandom,
+    };
+
+    #[test]
+    fn a_cast_uses_the_vanilla_projectile_speed() {
+        let mut random = LegacyRandom::new(1);
+        let velocity = cast_velocity(&mut random, Vec3::new(0.0, 0.0, -1.0));
+        let speed =
+            (velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z).sqrt();
+        assert!((1.45..=1.55).contains(&speed), "cast speed was {speed}");
+        assert!(velocity.z < -1.45, "forward velocity was {}", velocity.z);
+    }
 
     /// `HitResult.distanceTo` is squared: a hit 0.5 away rebounds at 0.25.
     #[test]
