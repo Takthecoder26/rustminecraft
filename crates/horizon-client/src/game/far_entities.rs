@@ -259,12 +259,14 @@ impl Game<'_> {
     }
 
     /// The start of a frame's entity geometry: whether impostors are drawn and how big a block is on
-    /// the screen, and the last frame's mobs handed over are forgotten.
+    /// the screen, and the last frame's mobs handed over are forgotten. Off until a server announces
+    /// the feed (`far_entities_offered`): no mob gives way to a picture, and nothing is baked, on a
+    /// server or in a world that doesn't send far entities.
     pub(super) fn begin_far_entities(&self, size: [u32; 2], fov_degrees: f32) {
         let g = &self.settings.horizon;
         self.far
             .enabled
-            .set(g.far_entities && self.player.is_some());
+            .set(g.far_entities && self.far.offered > 0 && self.player.is_some());
         self.far.range.set(f64::from(g.far_entity_range));
         self.far
             .pixels_per_block

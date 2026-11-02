@@ -22,8 +22,9 @@ pub const CHANNEL: &str = "horizon:far_entities";
 /// The format's version, first in every payload. A payload of another
 /// version is ignored.
 pub const VERSION: u8 = 1;
-/// The range a server sends to by default, in blocks, and the most it ever does.
-pub const DEFAULT_RANGE: u32 = 2048;
+/// The range a server sends to by default, in blocks (none: its owner opts in), and the most it
+/// ever does.
+pub const DEFAULT_RANGE: u32 = 0;
 pub const MAX_RANGE: u32 = 4000;
 /// Records in one snapshot at most.
 pub const MAX_MOBS: usize = 4000;

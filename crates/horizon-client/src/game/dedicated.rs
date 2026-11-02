@@ -877,7 +877,7 @@ impl Game<'_> {
                 .raw
                 .get(horizon_client::lan::HORIZON_CLIENTS_ONLY)
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("true")),
-            // Far players and mobs for Horizon clients: 2048 blocks unless set, 4000 at most.
+            // Far players and mobs for Horizon clients: none unless set, 4000 blocks at most.
             far_entity_range: props
                 .raw
                 .get(horizon_client::lan::FAR_ENTITY_RANGE)

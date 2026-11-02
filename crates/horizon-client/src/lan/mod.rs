@@ -141,7 +141,7 @@ pub struct NetLog {
 /// The server.properties key that lets only the Horizon client join (off unless "true").
 pub const HORIZON_CLIENTS_ONLY: &str = "horizon-clients-only";
 /// The server.properties key for the farthest a Horizon client is sent far entities (players and
-/// mobs past the entity tracking range), in blocks; 0 turns them off (2048 unless set, 4000 at most).
+/// mobs past the entity tracking range), in blocks; 0 turns them off (off unless set, 4000 at most).
 pub const FAR_ENTITY_RANGE: &str = "horizon-far-entity-range";
 /// What another client is told.
 pub const HORIZON_CLIENTS_ONLY_REASON: &str =
