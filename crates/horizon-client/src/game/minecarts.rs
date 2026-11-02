@@ -204,6 +204,10 @@ const PASSENGER_Y: f64 = 0.1875;
 pub(super) const SEAT: f64 = PASSENGER_Y - 0.6;
 /// The placeholder container key under which an open cart's items live.
 pub(super) const CART_KEY_Y: i32 = horizon_client::lan::menu::VEHICLE_KEY_Y;
+/// The placeholder block entity key where a vehicle's slots live while its menu is open (`ContainerEntity`).
+pub(super) fn cart_container_key(cart_id: u32) -> (i32, i32, i32) {
+    (i32::MAX - 15, CART_KEY_Y, cart_id as i32)
+}
 
 /// `OldMinecartBehavior.pushAndPickupEntities`: living entities the cart
 /// offers `startRiding` instead of `Entity.push`. Players click to board;
@@ -1919,11 +1923,7 @@ impl Game<'_> {
     pub(super) fn cart_slots(&mut self, id: u32) -> Option<&mut Vec<Option<ItemStack>>> {
         let c = self.carts.iter_mut().find(|c| c.id == id)?;
         c.loot = None;
-        match self
-            .world
-            .block_entities
-            .get_mut(&(i32::MAX - 15, CART_KEY_Y, id as i32))
-        {
+        match self.world.block_entities.get_mut(&cart_container_key(id)) {
             Some(BlockEntity::Chest(open)) => Some(open),
             _ => Some(&mut c.items),
         }
@@ -2013,7 +2013,7 @@ impl Game<'_> {
     pub(super) fn open_cart_container(&mut self, i: usize) {
         self.unpack_cart_loot(i);
         let c = self.carts[i].clone();
-        let key = (i32::MAX - 15, CART_KEY_Y, c.id as i32);
+        let key = cart_container_key(c.id);
         self.world
             .block_entities
             .insert(key, BlockEntity::Chest(c.items.clone()));
@@ -2047,7 +2047,7 @@ impl Game<'_> {
     /// with it, and the menu's stand-in leaves the level. A menu that is
     /// still open over it then has nothing left to take.
     pub(super) fn release_vehicle_container(&mut self, id: u32) {
-        let key = (i32::MAX - 15, CART_KEY_Y, id as i32);
+        let key = cart_container_key(id);
         self.store_cart_items(key);
         self.world.block_entities.remove(&key);
         if self.container == Some(key) {
@@ -2858,5 +2858,27 @@ mod tests {
         assert_eq!(saved.get("PushZ"), Some(&Tag::Double(0.25f64.to_bits())));
         let loaded = Minecart::from_nbt(&saved, 1, CartKind::Furnace).unwrap();
         assert_eq!(loaded.push, Vec3::new(0.5, 0.0, 0.25));
+    }
+
+    /// `AbstractMinecartContainer.interact` / `MinecartChest.interact`:
+    /// right-clicking a chest minecart consumes interaction (does not pass)
+    /// to open its 27-slot chest menu. The cart's items are placed under
+    /// `cart_container_key` (`(i32::MAX - 15, CART_KEY_Y, id as i32)`).
+    #[test]
+    fn chest_minecart_opens_container_with_twenty_seven_slots() {
+        assert_eq!(CartKind::Chest.slots(), 27);
+        // Interaction does not pass to held items: consumes action to open menu.
+        assert!(!CartKind::Chest.interact_passes(false, false, false));
+        assert!(!CartKind::Chest.interact_passes(true, false, false));
+        assert!(!CartKind::Chest.interact_passes(false, true, false));
+
+        let id = 42;
+        let cart = Minecart::new(id, CartKind::Chest, Vec3::ZERO);
+        assert_eq!(cart.items.len(), 27);
+        assert!(cart.items.iter().all(Option::is_none));
+
+        let key = cart_container_key(id);
+        assert_eq!(key, (i32::MAX - 15, CART_KEY_Y, id as i32));
+        assert_eq!(key.1, horizon_client::lan::menu::VEHICLE_KEY_Y);
     }
 }
