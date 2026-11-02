@@ -320,6 +320,10 @@ pub struct PlayerMotion {
     pub pitch: f32,
     /// Gliding (shared flag 7) and LivingEntity.fallFlyTicks.
     pub fall_flying: bool,
+    /// The horizontal glide speed prior to wall collision, so a crash tick whose
+    /// client displacement was truncated to the distance to the wall still deals
+    /// damage matching the speed the player flew at (`handleFallFlyingCollisions`).
+    pub fall_fly_speed: f64,
     /// Asleep in a bed (`LivingEntity.isSleeping`): the sleeping pose.
     pub sleeping: bool,
     pub fall_fly_ticks: i32,
@@ -437,9 +441,32 @@ impl PlayerMotion {
     /// as the speed the glide had (`LivingEntity.handleFallFlyingCollisions`'s
     /// moveHorLength); a copy whose travels start from its own last velocity
     /// otherwise keeps a few hundredths there, and no hit reaches the damage.
+    /// When crashing into a wall, the client's single-tick displacement is
+    /// truncated to the distance remaining to the wall, so we preserve the prior
+    /// glide speed for kinetic impact damage.
     pub fn carry_client_movement(&mut self, movement: Vec3) {
         if self.fall_flying {
-            self.velocity = movement;
+            let speed = (movement.x * movement.x + movement.z * movement.z).sqrt();
+            if self.fall_fly_speed == 0.0 || speed >= self.fall_fly_speed * 0.85 {
+                self.fall_fly_speed = speed;
+                self.velocity = movement;
+            } else if speed > 1e-7 {
+                let scale = self.fall_fly_speed / speed;
+                self.velocity = Vec3::new(movement.x * scale, movement.y, movement.z * scale);
+            } else {
+                if (self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z).sqrt()
+                    < 1e-7
+                    && self.fall_fly_speed > 0.0
+                {
+                    let look = horizon_world::view_direction::view_vector(self.pitch, self.yaw);
+                    let look_h = (look.x * look.x + look.z * look.z).sqrt();
+                    if look_h > 1e-7 {
+                        self.velocity.x = look.x / look_h * self.fall_fly_speed;
+                        self.velocity.z = look.z / look_h * self.fall_fly_speed;
+                    }
+                }
+                self.velocity.y = movement.y;
+            }
         }
     }
     /// `Player.isSweepAttack`, using the resident player's known horizontal velocity.
@@ -558,6 +585,7 @@ impl PlayerMotion {
             glider: false,
             pitch: 0.0,
             fall_flying: false,
+            fall_fly_speed: 0.0,
             sleeping: false,
             fall_fly_ticks: 0,
             glide_ending: false,
@@ -1082,6 +1110,7 @@ impl MotionWorld<'_, '_, '_> {
         // friction, so a jump then keeps the speed (the elytra hop).
         if std::mem::take(&mut self.player.glide_ending) {
             self.player.fall_flying = false;
+            self.player.fall_fly_speed = 0.0;
         }
         // Player.tryToStartFallFlying (canGlide: airborne, not flying, a glider;
         // never from inside a liquid).
@@ -1346,6 +1375,7 @@ impl MotionWorld<'_, '_, '_> {
             if self.climbable()? {
                 self.travel_in_air(input)?;
                 self.player.fall_flying = false;
+                self.player.fall_fly_speed = 0.0;
             } else {
                 self.travel_fall_flying()?;
             }
@@ -1971,7 +2001,9 @@ impl MotionWorld<'_, '_, '_> {
         let look = horizon_world::view_direction::view_vector(self.player.pitch, self.player.yaw);
         let lean = self.player.pitch * trig::DEG_TO_RAD;
         let look_h = (look.x * look.x + look.z * look.z).sqrt();
-        let move_h = (v.x * v.x + v.z * v.z).sqrt();
+        let move_h = (v.x * v.x + v.z * v.z)
+            .sqrt()
+            .max(self.player.fall_fly_speed);
         let gravity = living_motion::effective_gravity(self)?;
         let lift = horizon_core::jmath::cos(f64::from(lean)).powi(2);
         let mut m = Vec3::new(v.x, v.y + gravity * (-1.0 + lift * 0.75), v.z);
@@ -2012,7 +2044,8 @@ impl MotionWorld<'_, '_, '_> {
                 let v = self.player.velocity;
                 (v.x * v.x + v.z * v.z).sqrt()
             };
-            let dmg = ((move_h - new_h) * 10.0 - 3.0) as f32;
+            let speed_before = move_h.max(self.player.fall_fly_speed);
+            let dmg = ((speed_before - new_h) * 10.0 - 3.0) as f32;
             if dmg > 0.0 {
                 let first = self.player.events.len();
                 // getFallDamageSound((int) dmg)
@@ -2041,6 +2074,10 @@ impl MotionWorld<'_, '_, '_> {
                     self.player.wall_hit_events = Some(first..self.player.events.len());
                 }
             }
+            self.player.fall_fly_speed = new_h;
+        } else if !self.player.client_side {
+            let v = self.player.velocity;
+            self.player.fall_fly_speed = (v.x * v.x + v.z * v.z).sqrt();
         }
         Ok(())
     }
@@ -3509,6 +3546,61 @@ mod tests {
             player.hurt_log
         );
         assert!(player.health.health() < 20.0, "{}", player.health.health());
+    }
+
+    /// `LivingEntity.handleFallFlyingCollisions`: when crashing into a wall, the
+    /// client's movement packet displacement is truncated to the remaining distance
+    /// to the wall (e.g. 0.2 blocks), rather than the actual flight velocity
+    /// (e.g. 2.0 blocks/tick). The damage calculation must use the pre-collision
+    /// glide speed (fixes #6583).
+    #[test]
+    fn a_glide_wall_crash_with_truncated_tick_movement_hurts_by_prior_speed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = Assets::load(&root).unwrap();
+        let render = assets.reload(&root).unwrap();
+        let binding = crate::collisions::load(&root, assets.registry).unwrap();
+        let resources = MotionResources::load(&root, &assets).unwrap();
+        let mut scene = World::test_scene(&assets, &render, 1).unwrap();
+        let stone = assets.registry.default_state("minecraft:stone").unwrap();
+        for y in 4..=5 {
+            for z in 19..=21 {
+                scene.set(23, y, z, stone).unwrap();
+            }
+        }
+        // Player is at x=22.7 (against the stone wall at x=23.0).
+        let mut player = PlayerMotion::new(&resources, Vec3::new(22.7, 4.0, 20.5)).unwrap();
+        player.fall_flying = true;
+        player.yaw = -90.0;
+        player.pitch = 0.0;
+        // Prior tick flight speed was 2.0 blocks/tick.
+        player.fall_fly_speed = 2.0;
+        // Collision tick displacement was truncated by the wall to only 0.2 blocks.
+        player.carry_client_movement(Vec3::new(0.2, 0.0, 0.0));
+        MotionWorld {
+            entities: &[],
+            player: &mut player,
+            scene: &mut scene,
+            assets: &assets,
+            collision_binding: &binding,
+            resources: &resources,
+        }
+        .server_travel()
+        .unwrap();
+        assert!(
+            player
+                .hurt_log
+                .last()
+                .is_some_and(|hurt| hurt.source == "minecraft:fly_into_wall"),
+            "{:?}",
+            player.hurt_log
+        );
+        // Prior speed 2.0: dmg = 2.0 * 10 - 3 = 17. Health drops from 20 to 3.
+        assert_eq!(player.health.health(), 3.0);
     }
 
     #[test]

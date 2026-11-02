@@ -446,6 +446,9 @@ impl Game<'_> {
         motion.flying_speed = g.flying_speed;
         // FireworkRocketItem.use boosts only a gliding player.
         motion.fall_flying = g.fall_flying;
+        if !g.fall_flying {
+            motion.fall_fly_speed = 0.0;
+        }
         motion.invulnerable = motion.may_fly;
         // `ServerPlayer.isInvulnerableTo`'s connection term, as of now.
         motion.client_loaded = g.client_loaded();
@@ -994,6 +997,7 @@ impl Game<'_> {
             if let Some(m) = g.motion.as_mut() {
                 m.position = Vec3::new(at[0], at[1], at[2]);
                 m.velocity = Vec3::ZERO;
+                m.fall_fly_speed = 0.0;
             }
         }
         if new_mode != g.game_mode {
@@ -3842,6 +3846,7 @@ impl Game<'_> {
         if let Some(m) = g.motion.as_mut() {
             m.position = stand;
             m.velocity = Vec3::ZERO;
+            m.fall_fly_speed = 0.0;
             m.yaw = yaw;
             m.pitch = 0.0;
             let _ = m.set_sleeping(false);
@@ -4393,6 +4398,7 @@ impl Game<'_> {
         if !g.fall_flying {
             if let Some(m) = g.motion.as_mut() {
                 m.fall_fly_ticks = 0;
+                m.fall_fly_speed = 0.0;
             }
             return;
         }
@@ -4406,6 +4412,9 @@ impl Game<'_> {
         if self.guest_can_glide(host, conn) != Some(true) {
             if let Some(g) = host.hub.guest_mut(conn) {
                 g.fall_flying = false;
+                if let Some(m) = g.motion.as_mut() {
+                    m.fall_fly_speed = 0.0;
+                }
             }
             return;
         }

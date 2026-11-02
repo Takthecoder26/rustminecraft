@@ -200,6 +200,7 @@ impl MotionWorld<'_, '_, '_> {
         self.player.ground.supporting_block = None;
         self.player.swimming = false;
         self.player.fall_flying = false;
+        self.player.fall_fly_speed = 0.0;
         self.player.fall_fly_ticks = 0;
         self.update_player_pose()?;
         // A cushion's seat puts the feet in the support block, so neither
