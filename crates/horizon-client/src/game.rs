@@ -8177,7 +8177,7 @@ impl Game<'_> {
             // the locator bar above the hotbar.
             let has_experience = !self.creative && !spectator;
             let contextual = horizon_client::locator_bar::ContextualBar::next(
-                self.waypoints.has_waypoints(),
+                self.waypoints.has_waypoints() && self.ui.rules.bool("locator_bar"),
                 !spectator && self.jumpable_mount(),
                 self.mount_jumping(),
                 has_experience,
