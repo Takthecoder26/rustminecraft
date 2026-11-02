@@ -5113,6 +5113,7 @@ impl Game<'_> {
         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id as u32) {
             // Squid.aiStep derives its body pitch and roll from network motion.
             m.velocity = v;
+        } else if super::minecarts::set_remote_cart_motion(&mut self.carts, id as u32, v) {
         } else if let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
             d.velocity = v;
         } else if let Some(f) = self.falling.iter_mut().find(|f| f.id == id as u32) {

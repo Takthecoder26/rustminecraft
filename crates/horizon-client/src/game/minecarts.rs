@@ -140,23 +140,24 @@ pub(super) struct Minecart {
     pub synced_command: String,
     pub synced_output: String,
 }
+
+pub(super) fn set_remote_cart_motion(carts: &mut [Minecart], id: u32, velocity: Vec3) -> bool {
+    let Some(cart) = carts.iter_mut().find(|cart| cart.id == id) else {
+        return false;
+    };
+    cart.velocity = velocity;
+    true
+}
+
 pub(super) const WIDTH: f64 = 0.98;
 pub(super) const HEIGHT: f64 = 0.7;
 /// AbstractMinecart.getDefaultDisplayOffset, in sixteenths of a block.
 fn display_offset(kind: CartKind) -> f64 {
     if kind == CartKind::Hopper { 1.0 } else { 6.0 }
 }
-/// `MinecartSoundInstance.tick`: remote carts move by interpolation, which
-/// does not update their delta movement on every client tick.
-fn sound_speed(cart: &Minecart, remote: bool) -> f64 {
-    let velocity = (cart.velocity.x * cart.velocity.x + cart.velocity.z * cart.velocity.z).sqrt();
-    if remote {
-        let interpolated =
-            (cart.position.x - cart.previous.x).hypot(cart.position.z - cart.previous.z) * 3.0;
-        velocity.max(interpolated)
-    } else {
-        velocity
-    }
+/// `MinecartSoundInstance.tick`: `getDeltaMovement().horizontalDistance()`.
+fn sound_speed(cart: &Minecart) -> f64 {
+    cart.velocity.horizontal_distance()
 }
 /// `MinecartFurnace.calculateNewPushAlong`: the push turned onto the
 /// movement's direction, at the push's own length (3D, so it holds from tick
@@ -1313,7 +1314,7 @@ impl Game<'_> {
             .map(|c| CartSound {
                 id: c.id,
                 position: [c.position.x, c.position.y, c.position.z],
-                speed: sound_speed(c, self.remote.is_some()),
+                speed: sound_speed(c),
             })
             .collect();
         self.cart_sounds
@@ -2188,13 +2189,17 @@ mod tests {
     }
 
     #[test]
-    fn remote_cart_sound_uses_interpolated_movement_when_velocity_is_missing() {
+    fn remote_cart_sound_uses_received_horizontal_motion() {
         let mut cart = Minecart::new(1, CartKind::Rideable, Vec3::ZERO);
         cart.previous = Vec3::ZERO;
         cart.position = Vec3::new(0.1, 0.0, 0.0);
+        assert!(set_remote_cart_motion(
+            std::slice::from_mut(&mut cart),
+            1,
+            Vec3::new(0.03, 1.0, 0.04)
+        ));
 
-        assert!((sound_speed(&cart, true) - 0.3).abs() < 1.0e-12);
-        assert_eq!(sound_speed(&cart, false), 0.0);
+        assert!((sound_speed(&cart) - 0.05).abs() < 1.0e-12);
     }
 
     /// `MinecartSpawner`: its `BaseSpawner` is saved and loaded with the cart (the delay, the
