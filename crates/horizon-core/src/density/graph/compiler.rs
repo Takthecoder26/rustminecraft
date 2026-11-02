@@ -1,4 +1,5 @@
 use super::*;
+use crate::density::fused;
 
 /// A compiler and cache-ID namespace for one immutable set of density inputs.
 /// Share resulting samplers across workers, with a separate SamplerContext per
@@ -303,7 +304,7 @@ impl DensityCompiler {
                 }
             }
             GraphNode::Binary { kind, left, right } => {
-                return self.compile_binary(kind, left, right);
+                return self.compile_binary(kind, left, right).map(fused::wrap);
             }
             GraphNode::Clamp { input, min, max } => Arc::new(UnarySampler {
                 input: self.compile_raw(input)?,
@@ -421,7 +422,7 @@ impl DensityCompiler {
                 height,
             )?),
         };
-        Ok(sampler)
+        Ok(fused::wrap(sampler))
     }
     fn compile_binary(
         &self,

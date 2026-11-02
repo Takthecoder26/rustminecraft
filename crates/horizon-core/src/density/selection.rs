@@ -14,6 +14,9 @@ impl RangeChoiceSampler {
     }
 }
 impl DensitySampler for RangeChoiceSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,
@@ -102,7 +105,7 @@ pub struct LerpSampler {
     pub first: DensityValue,
     pub second: DensityValue,
 }
-fn interpolate(alpha: f32, first: f32, second: f32) -> f32 {
+pub(super) fn interpolate(alpha: f32, first: f32, second: f32) -> f32 {
     if alpha == 0.0 {
         first
     } else if alpha == 1.0 {
@@ -112,6 +115,9 @@ fn interpolate(alpha: f32, first: f32, second: f32) -> f32 {
     }
 }
 impl DensitySampler for LerpSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,
@@ -160,9 +166,9 @@ impl std::error::Error for InvalidIntervals {}
 /// and equal thresholds; sorting and codec validation belong to the compiler.
 #[derive(Clone, Debug)]
 pub struct IntervalSelectSampler {
-    input: Arc<dyn DensitySampler>,
-    thresholds: Vec<f32>,
-    branches: Vec<Arc<dyn DensitySampler>>,
+    pub(super) input: Arc<dyn DensitySampler>,
+    pub(super) thresholds: Vec<f32>,
+    pub(super) branches: Vec<Arc<dyn DensitySampler>>,
 }
 impl IntervalSelectSampler {
     pub fn new(
@@ -187,6 +193,9 @@ impl IntervalSelectSampler {
     }
 }
 impl DensitySampler for IntervalSelectSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,

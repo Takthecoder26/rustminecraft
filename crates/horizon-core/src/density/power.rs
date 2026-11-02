@@ -7,6 +7,9 @@ pub struct PowerSampler {
     pub exponent: Arc<dyn DensitySampler>,
 }
 impl DensitySampler for PowerSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,

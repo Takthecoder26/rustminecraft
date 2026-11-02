@@ -20,6 +20,7 @@ pub use world_fields::{
 };
 mod end_islands;
 pub use end_islands::EndIslandSampler;
+mod fused;
 pub mod graph;
 pub use cache::CachingDensitySampler;
 mod arithmetic;
@@ -146,6 +147,13 @@ pub trait DensitySampler: std::fmt::Debug + Send + Sync {
             Ok(())
         })
     }
+
+    /// Identity for compiler-internal optimization passes. `None` marks a
+    /// sampler opaque to the fused-program builder (a leaf), which is also
+    /// the right default for implementations outside this module.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 fn check_buffer(buffer: &[f32], volume: DensityVolume) -> Result<(), SampleError> {
     if buffer.len() < volume.size() {
@@ -184,6 +192,9 @@ fn visit(
 #[derive(Clone, Copy, Debug)]
 pub struct ConstantSampler(pub f32);
 impl DensitySampler for ConstantSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(&self, _: &mut SamplerContext, _: [i32; 3]) -> Result<f32, SampleError> {
         Ok(self.0)
     }

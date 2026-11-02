@@ -148,7 +148,7 @@ impl UnaryOp {
     }
     /// Dispatch once per volume so each loop has one fixed arithmetic operation.
     /// Keep the scalar expression shared, including the bulk min/max behavior.
-    fn apply_bulk(self, buffer: &mut [f32]) {
+    pub(super) fn apply_bulk(self, buffer: &mut [f32]) {
         // Specialization can reverse which NaN operand supplies the payload.
         // Retain the original dispatch for non-finite constant operands.
         let non_finite = match self {
@@ -227,6 +227,9 @@ pub struct UnarySampler {
     pub operation: UnaryOp,
 }
 impl DensitySampler for UnarySampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,
@@ -283,7 +286,7 @@ impl BinaryOp {
             }
         }
     }
-    fn apply_bulk(self, buffer: &mut [f32], right: &[f32]) {
+    pub(super) fn apply_bulk(self, buffer: &mut [f32], right: &[f32]) {
         macro_rules! apply {
             ($operation:expr) => {
                 for (left, &right) in buffer.iter_mut().zip(right) {
@@ -308,6 +311,9 @@ pub struct BinarySampler {
     pub operation: BinaryOp,
 }
 impl DensitySampler for BinarySampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,

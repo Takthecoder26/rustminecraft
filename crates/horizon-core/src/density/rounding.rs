@@ -37,7 +37,7 @@ impl RoundMode {
             }
         }
     }
-    fn apply(self, input: f32, multiple: f32) -> f32 {
+    pub(super) fn apply(self, input: f32, multiple: f32) -> f32 {
         if multiple == 0.0 {
             input
         } else {
@@ -55,6 +55,9 @@ pub struct RoundSampler {
     pub multiple: Option<Arc<dyn DensitySampler>>,
 }
 impl DensitySampler for RoundSampler {
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,
