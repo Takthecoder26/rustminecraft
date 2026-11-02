@@ -848,7 +848,7 @@ impl Hub {
         let now = g.effects.tick_count;
         let mut sent = Vec::with_capacity(g.effects.list.len());
         let mut changes = Vec::new();
-        for e in &g.effects.list {
+        for e in g.effects.list.iter().filter(|e| e.infinite() || e.duration > 0) {
             match g.sent_effects.iter().find(|s| s.id == e.id) {
                 None => changes.push((e.clone(), true)),
                 Some(s) => {

@@ -700,9 +700,7 @@ impl Game<'_> {
     /// `MobEffectInstance.tickClient`): they count down, and the server
     /// removes them. Their modifiers and flags move the predicted player.
     pub(super) fn tick_client_effects(&mut self) {
-        for e in &mut self.potions.effects.list {
-            e.tick_client();
-        }
+        self.potions.effects.list.retain_mut(|e| e.tick_client());
         self.apply_effect_status();
     }
     /// Add an active effect to the player and update attributes / absorption.
@@ -1306,7 +1304,7 @@ impl Game<'_> {
     }
     pub(super) fn effects_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "active": self.potions.effects.list.iter().map(|e| serde_json::json!({ "id": e.id, "duration": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
+            "active": self.potions.effects.list.iter().filter(|e| e.infinite() || e.duration > 0).map(|e| serde_json::json!({ "id": e.id, "duration": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
             "thrown": self.potions.thrown.iter().map(|t| [t.position.x, t.position.y, t.position.z]).collect::<Vec<_>>(),
         })
     }

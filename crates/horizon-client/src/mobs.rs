@@ -2272,7 +2272,7 @@ impl Mob {
         v
     }
     pub fn has_effect(&self, effect: &str) -> bool {
-        self.extra.effects.iter().any(|e| e.0 == effect)
+        self.extra.effects.iter().any(|e| e.0 == effect && (e.1 == -1 || e.1 > 0))
     }
     /// `LivingEntity.isCurrentlyGlowing`: the Glowing effect or the `Glowing` tag (on a
     /// server's client, `glowing` holds shared flag 6 instead).
@@ -2280,6 +2280,9 @@ impl Mob {
         self.glowing || self.has_effect("minecraft:glowing")
     }
     pub fn add_effect(&mut self, effect: &'static str, ticks: i32, amplifier: i32) {
+        if ticks == 0 {
+            return;
+        }
         if let Some(e) = self.extra.effects.iter_mut().find(|e| e.0 == effect) {
             // MobEffectInstance.update: a stronger effect replaces with its
             // own duration, an equal one only extends it; a weaker one is

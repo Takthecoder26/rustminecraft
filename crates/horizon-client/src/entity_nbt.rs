@@ -189,27 +189,29 @@ pub fn mob_to_nbt(m: &Mob, uuid: [i32; 4], raw: Option<&Tag>) -> Tag {
     // LivingEntity.addAdditionalSaveData: `active_effects` only when there are
     // any (MobEffectInstance.CODEC; a mob's effects are never ambient, and one
     // given with `hideParticles` shows neither particles nor its icon).
-    if m.extra.effects.is_empty() {
+    let effects: Vec<_> = m
+        .extra
+        .effects
+        .iter()
+        .filter(|e| e.1 == -1 || e.1 > 0)
+        .map(|&(effect, duration, amplifier)| {
+            let shown = !m.extra.hidden_effects.contains(&effect);
+            let mut e = vec![
+                ("id", string(crate::brewing::namespaced(effect))),
+                ("amplifier", Tag::Byte(amplifier.clamp(0, 255) as u8 as i8)),
+                ("duration", Tag::Int(duration)),
+            ];
+            if !shown {
+                e.push(("show_particles", Tag::Byte(0)));
+            }
+            e.push(("show_icon", Tag::Byte(i8::from(shown))));
+            Tag::compound(e)
+        })
+        .collect();
+    if effects.is_empty() {
         map.remove(&horizon_world::nbt::JavaString::from("active_effects"));
     } else {
-        let effects = m
-            .extra
-            .effects
-            .iter()
-            .map(|&(effect, duration, amplifier)| {
-                let shown = !m.extra.hidden_effects.contains(&effect);
-                let mut e = vec![
-                    ("id", string(crate::brewing::namespaced(effect))),
-                    ("amplifier", Tag::Byte(amplifier.clamp(0, 255) as u8 as i8)),
-                    ("duration", Tag::Int(duration)),
-                ];
-                if !shown {
-                    e.push(("show_particles", Tag::Byte(0)));
-                }
-                e.push(("show_icon", Tag::Byte(i8::from(shown))));
-                Tag::compound(e)
-            });
-        map.insert("active_effects".into(), Tag::List(effects.collect()));
+        map.insert("active_effects".into(), Tag::List(effects));
     }
     map.insert(
         "Invulnerable".into(),

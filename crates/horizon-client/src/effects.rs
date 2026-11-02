@@ -26,8 +26,12 @@ impl EffectInstance {
             hidden: None,
         }
     }
-    fn infinite(&self) -> bool {
+    pub fn infinite(&self) -> bool {
         self.duration == -1
+    }
+    /// Whether this effect is still active (infinite or duration > 0).
+    pub fn is_active(&self) -> bool {
+        self.infinite() || self.duration > 0
     }
     /// `MobEffectInstance.endsWithin`.
     pub fn ends_within(&self, ticks: i32) -> bool {
@@ -73,12 +77,14 @@ impl EffectInstance {
         changed
     }
     /// `MobEffectInstance.tickClient`: a client counts its effects down
-    /// (the server removes them).
-    pub fn tick_client(&mut self) {
+    /// (the server removes them). Returns whether the effect still has
+    /// remaining duration.
+    pub fn tick_client(&mut self) -> bool {
         if self.infinite() || self.duration > 0 {
             self.tick_down();
             self.downgrade();
         }
+        self.infinite() || self.duration > 0
     }
     fn tick_down(&mut self) {
         if let Some(h) = self.hidden.as_mut() {
@@ -165,13 +171,18 @@ pub struct PlayerEffects {
 }
 impl PlayerEffects {
     pub fn get(&self, id: &str) -> Option<&EffectInstance> {
-        self.list.iter().find(|e| e.id == id)
+        self.list
+            .iter()
+            .find(|e| e.id == id && (e.infinite() || e.duration > 0))
     }
     pub fn amplifier(&self, id: &str) -> Option<i32> {
         self.get(id).map(|e| e.amplifier)
     }
     /// `LivingEntity.addEffect`; returns whether anything changed.
     pub fn add(&mut self, effect: EffectInstance) -> bool {
+        if !(effect.infinite() || effect.duration > 0) {
+            return false;
+        }
         match self.list.iter_mut().find(|e| e.id == effect.id) {
             Some(existing) => existing.update(&effect),
             None => {
@@ -188,7 +199,9 @@ impl PlayerEffects {
     pub fn from_saved(saved: &[(String, i32, i32, bool, bool)]) -> Self {
         let mut effects = Self::default();
         for (id, duration, amplifier, ambient, particles) in saved {
-            if let Some(def) = potions::effect(id) {
+            if (*duration == -1 || *duration > 0)
+                && let Some(def) = potions::effect(id)
+            {
                 let mut e = EffectInstance::new(def.id, *duration, *amplifier);
                 e.ambient = *ambient;
                 e.visible = *particles;
@@ -201,6 +214,7 @@ impl PlayerEffects {
     pub fn saved(&self) -> Vec<(String, i32, i32, bool, bool)> {
         self.list
             .iter()
+            .filter(|e| e.infinite() || e.duration > 0)
             .map(|e| {
                 (
                     format!("minecraft:{}", e.id),
@@ -345,7 +359,9 @@ impl PlayerEffects {
     pub fn modifiers(&self) -> Vec<(&'static str, &'static str, f64, &'static str)> {
         let mut out = Vec::new();
         for e in &self.list {
-            if let Some((a, id, amount, op)) = effect_modifier(e.id) {
+            if (e.infinite() || e.duration > 0)
+                && let Some((a, id, amount, op)) = effect_modifier(e.id)
+            {
                 out.push((a, id, amount * f64::from(e.amplifier + 1), op));
             }
         }
@@ -582,5 +598,46 @@ mod tests {
                 "add_value",
             )]
         );
+    }
+
+    #[test]
+    fn expired_status_effects_are_purged_and_never_queried() {
+        let mut fx = PlayerEffects::default();
+        // Add an effect with duration 1 tick
+        assert!(fx.add(EffectInstance::new("speed", 1, 0)));
+        assert!(fx.get("speed").is_some());
+        assert_eq!(fx.get("speed").unwrap().duration, 1);
+        assert_eq!(fx.amplifier("speed"), Some(0));
+        assert_eq!(fx.saved().len(), 1);
+        assert_eq!(fx.modifiers().len(), 1);
+
+        // Tick once: duration decrements from 1 to 0 and is immediately purged
+        fx.tick();
+        assert!(fx.get("speed").is_none());
+        assert_eq!(fx.amplifier("speed"), None);
+        assert!(fx.saved().is_empty());
+        assert!(fx.modifiers().is_empty());
+
+        // Zero or negative duration cannot be added as an active effect
+        assert!(!fx.add(EffectInstance::new("speed", 0, 0)));
+        assert!(!fx.add(EffectInstance::new("speed", -2, 0)));
+        assert!(fx.get("speed").is_none());
+    }
+
+    #[test]
+    fn client_effects_tick_purges_expired() {
+        let mut inst = EffectInstance::new("speed", 1, 0);
+        assert!(!inst.tick_client());
+        assert_eq!(inst.duration, 0);
+
+        let mut fx = PlayerEffects::default();
+        fx.add(EffectInstance::new("speed", 2, 0));
+        assert!(fx.list[0].tick_client());
+        assert_eq!(fx.list[0].duration, 1);
+        assert!(!fx.list[0].tick_client());
+        assert_eq!(fx.list[0].duration, 0);
+        assert!(fx.get("speed").is_none());
+        assert!(fx.saved().is_empty());
+        assert!(fx.modifiers().is_empty());
     }
 }

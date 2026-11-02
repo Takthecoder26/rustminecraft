@@ -491,7 +491,7 @@ impl Game<'_> {
                 "saturation": p.health.food.saturation,
                 "shield_cooldown": self.shield_cooldown,
                 "xp": { "level": self.experience.level, "progress": self.experience.progress, "total": self.experience.total },
-                "effects": self.potions.effects.list.iter().map(|e| json!({ "id": e.id, "duration_ticks": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
+                "effects": self.potions.effects.list.iter().filter(|e| e.infinite() || e.duration > 0).map(|e| json!({ "id": e.id, "duration_ticks": e.duration, "amplifier": e.amplifier })).collect::<Vec<_>>(),
             })
         });
         json!({
