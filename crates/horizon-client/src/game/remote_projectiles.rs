@@ -322,6 +322,7 @@ impl Game<'_> {
                 previous: at,
                 velocity,
                 fuse: 80,
+                explosion_power: super::tnt::PrimedTnt::DEFAULT_EXPLOSION_POWER,
                 on_ground: false,
                 owner: None,
                 guest: None,

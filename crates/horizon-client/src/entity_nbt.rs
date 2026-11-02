@@ -2053,12 +2053,26 @@ pub fn item_entity_to_nbt(e: &ItemEntity, uuid: [i32; 4], raw: Option<&Tag>) -> 
     }
     tag
 }
-/// `PrimedTnt.addAdditionalSaveData`: its `fuse`.
+/// `PrimedTnt.readAdditionalSaveData`: `explosion_power` (clamped 0..128, default 4.0).
+pub fn tnt_explosion_power(tag: &Tag) -> f32 {
+    match tag.get("explosion_power") {
+        Some(Tag::Float(bits)) => f32::from_bits(*bits).clamp(0.0, 128.0),
+        Some(Tag::Double(bits)) => (f64::from_bits(*bits) as f32).clamp(0.0, 128.0),
+        Some(Tag::Int(v)) => (*v as f32).clamp(0.0, 128.0),
+        Some(Tag::Short(v)) => (*v as f32).clamp(0.0, 128.0),
+        Some(Tag::Byte(v)) => (*v as f32).clamp(0.0, 128.0),
+        Some(Tag::Long(v)) => (*v as f32).clamp(0.0, 128.0),
+        _ => 4.0,
+    }
+}
+
+/// `PrimedTnt.addAdditionalSaveData`: its `fuse` and `explosion_power`.
 pub fn tnt_to_nbt(
     position: Vec3,
     motion: Vec3,
     on_ground: bool,
     fuse: i32,
+    explosion_power: f32,
     uuid: [i32; 4],
     raw: Option<&Tag>,
 ) -> Tag {
@@ -2073,6 +2087,11 @@ pub fn tnt_to_nbt(
     }
     .tag(raw);
     put(&mut tag, "fuse", Tag::Short(fuse as i16));
+    put(
+        &mut tag,
+        "explosion_power",
+        Tag::Float(explosion_power.clamp(0.0, 128.0).to_bits()),
+    );
     // PrimedTnt writes its block state (a summoned `block_state` is kept).
     if tag.get("block_state").is_none() {
         put(&mut tag, "block_state", string("minecraft:tnt"));
@@ -5047,5 +5066,41 @@ mod mod_thrown_nbt_tests {
         assert!(back.no_gravity);
         orb.no_gravity = false;
         assert!(orb_to_nbt(&orb, [1; 4]).get("NoGravity").is_none());
+    }
+
+    #[test]
+    fn tnt_nbt_serializes_and_parses_explosion_power() {
+        let pos = Vec3::new(10.5, 64.0, -5.5);
+        let vel = Vec3::new(0.0, 0.1, 0.0);
+        let uuid = [1, 2, 3, 4];
+
+        // Default 4.0
+        let tag_default = tnt_to_nbt(pos, vel, false, 80, 4.0, uuid, None);
+        assert_eq!(super::kind(&tag_default).as_deref(), Some("minecraft:tnt"));
+        assert_eq!(tag_default.get("fuse"), Some(&Tag::Short(80)));
+        assert_eq!(
+            tag_default.get("explosion_power"),
+            Some(&Tag::Float(4.0f32.to_bits()))
+        );
+        assert_eq!(tnt_explosion_power(&tag_default), 4.0);
+
+        // Custom value roundtrips
+        let tag_custom = tnt_to_nbt(pos, vel, false, 40, 10.5, uuid, None);
+        assert_eq!(
+            tag_custom.get("explosion_power"),
+            Some(&Tag::Float(10.5f32.to_bits()))
+        );
+        assert_eq!(tnt_explosion_power(&tag_custom), 10.5);
+
+        // Default when missing
+        let empty = Tag::Compound(Compound::new());
+        assert_eq!(tnt_explosion_power(&empty), 4.0);
+
+        // Clamping 0..128
+        let negative = Tag::compound([("explosion_power", Tag::Float((-5.0f32).to_bits()))]);
+        assert_eq!(tnt_explosion_power(&negative), 0.0);
+
+        let huge = Tag::compound([("explosion_power", Tag::Float(200.0f32.to_bits()))]);
+        assert_eq!(tnt_explosion_power(&huge), 128.0);
     }
 }

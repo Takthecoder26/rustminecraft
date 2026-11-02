@@ -20,6 +20,7 @@ pub(super) struct PrimedTnt {
     pub previous: Vec3,
     pub velocity: Vec3,
     pub fuse: i32,
+    pub explosion_power: f32,
     pub on_ground: bool,
     pub owner: Option<Who>,
     pub guest: Option<u32>,
@@ -27,6 +28,7 @@ pub(super) struct PrimedTnt {
     pub no_gravity: bool,
 }
 impl PrimedTnt {
+    pub(super) const DEFAULT_EXPLOSION_POWER: f32 = 4.0;
     pub(super) const SIZE: f64 = 0.98;
     pub(super) fn bounds(&self) -> Aabb {
         let h = Self::SIZE / 2.0;
@@ -208,6 +210,7 @@ impl Game<'_> {
             previous: position,
             velocity: Vec3::new(-rot.sin() * 0.02, f64::from(0.2f32), -rot.cos() * 0.02),
             fuse,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
             on_ground: false,
             owner,
             guest,
@@ -245,6 +248,7 @@ impl Game<'_> {
                 ];
                 let bounds = t.bounds();
                 let (owner, guest) = (t.owner, t.guest);
+                let power = t.explosion_power;
                 let in_water = self.bounds_in_water(bounds);
                 self.tnts.remove(i);
                 count -= 1;
@@ -262,7 +266,7 @@ impl Game<'_> {
                     Some(Who::Mob(_)) | None => None,
                 };
                 let result = self.with_hive_emptying_blast(|g| {
-                    g.server_explode(center, 4.0, interaction, false)
+                    g.server_explode(center, power, interaction, false)
                 });
                 self.combat.blast_owner = None;
                 self.combat.blast_guest = None;
@@ -630,6 +634,7 @@ mod tests {
             previous: Vec3::new(0.5, 1.0, 0.5),
             velocity: Vec3::ZERO,
             fuse: 80,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
             on_ground: true,
             owner: None,
             guest: None,
@@ -673,6 +678,7 @@ mod tests {
             previous: at,
             velocity: Vec3::ZERO,
             fuse: 80,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
             on_ground: false,
             owner: None,
             guest: None,
@@ -768,6 +774,7 @@ mod tests {
             previous: at,
             velocity: Vec3::ZERO,
             fuse: 80,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
             on_ground: false,
             owner: None,
             guest: None,
@@ -842,6 +849,7 @@ mod tests {
             previous: at,
             velocity: Vec3::ZERO,
             fuse: 80,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
             on_ground: false,
             owner: None,
             guest: None,
@@ -866,5 +874,22 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn primed_tnt_default_explosion_power_is_four() {
+        let tnt = PrimedTnt {
+            no_gravity: false,
+            id: 1,
+            position: Vec3::ZERO,
+            previous: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            fuse: 80,
+            explosion_power: PrimedTnt::DEFAULT_EXPLOSION_POWER,
+            on_ground: false,
+            owner: None,
+            guest: None,
+        };
+        assert_eq!(tnt.explosion_power, 4.0);
     }
 }

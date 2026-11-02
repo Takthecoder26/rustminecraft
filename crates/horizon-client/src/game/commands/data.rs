@@ -195,6 +195,7 @@ impl Game<'_> {
                     t.velocity,
                     t.on_ground,
                     t.fuse,
+                    t.explosion_power,
                     uuid,
                     self.persist.raw.get(&id),
                 )

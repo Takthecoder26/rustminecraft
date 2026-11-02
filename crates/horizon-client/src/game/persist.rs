@@ -524,6 +524,7 @@ impl Game<'_> {
                                 Some(Tag::Short(f)) => i32::from(*f),
                                 _ => 80,
                             };
+                            let explosion_power = entity_nbt::tnt_explosion_power(&tag);
                             self.tnts.push(super::tnt::PrimedTnt {
                                 no_gravity: entity_nbt::flag(&tag, "NoGravity"),
                                 id,
@@ -531,6 +532,7 @@ impl Game<'_> {
                                 previous: position,
                                 velocity: entity_nbt::motion(&tag),
                                 fuse,
+                                explosion_power,
                                 on_ground: matches!(tag.get("OnGround"), Some(Tag::Byte(1))),
                                 owner: None,
                                 guest: None,
@@ -1268,6 +1270,7 @@ impl Game<'_> {
                     t.velocity,
                     t.on_ground,
                     t.fuse,
+                    t.explosion_power,
                     uuid,
                     self.persist.raw.get(&id),
                 );
