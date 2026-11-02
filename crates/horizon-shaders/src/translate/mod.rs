@@ -31,6 +31,7 @@ mod anonymous_structs;
 mod atomic_vectors;
 mod geometry;
 mod image_parameters;
+mod initializers;
 mod integer_bounds;
 mod interface_blocks;
 mod ordering;
@@ -103,6 +104,24 @@ pub struct Uniform {
     /// The type the pack declared (`float`, `ivec2`, `mat4`; `bool` is stored as an `int`).
     pub ty: String,
     pub offset: u32,
+    /// The authored constant initializer in this member's uniform-block layout. Supplied
+    /// frame/custom values overwrite it; `None` starts at zero (GLSL 4.60, 4.3.5).
+    pub initializer: Option<Vec<u8>>,
+}
+
+impl Interface {
+    /// A new program's uniform block, before the application supplies any values.
+    pub fn uniform_block(&self) -> Vec<u8> {
+        let mut block = vec![0; self.uniform_size as usize];
+        for u in &self.uniforms {
+            if let Some(bytes) = &u.initializer
+                && let Some(dst) = block.get_mut(u.offset as usize..u.offset as usize + bytes.len())
+            {
+                dst.copy_from_slice(bytes);
+            }
+        }
+        block
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -513,6 +532,7 @@ fn translate(
         (Ok(v), Ok(f)) => (v, f),
         (a, b) => return Err(a.err().into_iter().chain(b.err()).flatten().collect()),
     };
+    let mut defaults = initializers::read(&[(&v, &vertex), (&f, &fragment)])?;
     let (uniform_size, offsets) = block_layout(&fragment);
     let uniforms = offsets
         .into_iter()
@@ -526,7 +546,13 @@ fn translate(
             } else {
                 uniforms.get(&name)?.clone()
             };
-            Some(Uniform { name, ty, offset })
+            let initializer = defaults.remove(&name);
+            Some(Uniform {
+                name,
+                ty,
+                offset,
+                initializer,
+            })
         })
         .collect();
     let outputs = f.outputs.iter().copied().collect();
@@ -589,6 +615,45 @@ fn bind_images(stages: [&Stage; 2], samplers: usize) -> Vec<Image> {
         .collect()
 }
 
+/// Naga reads array type dimensions backwards; declarations generated outside the token
+/// rewrite need the same reversal as the pack's array constructors (`type_dimensions`).
+fn uniform_declaration(ty: &str, name: &str) -> String {
+    let Some(start) = ty.find('[') else {
+        return format!("{ty} {name}");
+    };
+    let mut dimensions = Vec::new();
+    let mut well_formed = true;
+    let (mut depth, mut begin) = (0usize, start);
+    for (relative, c) in ty[start..].char_indices() {
+        let at = start + relative;
+        match c {
+            '[' => {
+                if depth == 0 {
+                    begin = at;
+                }
+                depth += 1;
+            }
+            ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    dimensions.push(begin..at + 1);
+                }
+            }
+            _ if depth == 0 => well_formed = false,
+            _ => {}
+        }
+    }
+    let mut declaration = format!("{} {name}", &ty[..start]);
+    if !well_formed || depth != 0 || dimensions.last().is_none_or(|d| d.end != ty.len()) {
+        declaration.push_str(&ty[start..]); // Keep malformed suffixes for naga's diagnostic.
+    } else {
+        for d in dimensions.into_iter().rev() {
+            declaration.push_str(&ty[d]);
+        }
+    }
+    declaration
+}
+
 /// `#version 450`, the uniform block at binding 0, each sampler as a texture and a sampler
 /// object, and the images.
 fn resources(
@@ -601,10 +666,7 @@ fn resources(
     for (name, ty) in uniforms {
         match ty.as_str() {
             "bool" => write!(h, " int hz_bool_{name};"),
-            _ => match ty.split_once('[') {
-                Some((base, size)) => write!(h, " {base} {name}[{size};"),
-                None => write!(h, " {ty} {name};"),
-            },
+            _ => write!(h, " {};", uniform_declaration(ty, name)),
         }
         .unwrap();
     }
@@ -721,6 +783,7 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
         errors.extend(e);
         std::mem::take(&mut errors)
     })?;
+    let mut defaults = initializers::read(&[(&c, &module)])?;
     let (uniform_size, offsets) = block_layout(&module);
     let mut interface = Interface {
         uniform_size,
@@ -736,7 +799,13 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
                 } else {
                     uniforms.get(&name)?.clone()
                 };
-                Some(Uniform { name, ty, offset })
+                let initializer = defaults.remove(&name);
+                Some(Uniform {
+                    name,
+                    ty,
+                    offset,
+                    initializer,
+                })
             })
             .collect(),
         samplers,

@@ -40,6 +40,8 @@ pub(super) struct Stage<'p> {
     pub(super) removed: Vec<std::ops::Range<usize>>,
     /// Name, type with its array suffix, token of the type.
     pub(super) uniforms: Vec<(String, String, usize)>,
+    /// Authored uniform name, constant mirror name, declaration token.
+    pub(super) uniform_defaults: Vec<(String, String, usize)>,
     pub(super) samplers: Vec<(String, String)>,
     pub(super) images: Vec<ImageDecl>,
     /// The bindings of the SSBOs (`buffer` blocks), in set 4.
@@ -253,6 +255,7 @@ impl<'p> Stage<'p> {
             tokens: lex(&pp.code),
             removed: Vec::new(),
             uniforms: Vec::new(),
+            uniform_defaults: Vec::new(),
             samplers: Vec::new(),
             images: Vec::new(),
             buffers: BTreeSet::new(),
@@ -277,12 +280,24 @@ impl<'p> Stage<'p> {
         };
         s.rename_vulkan_types();
         let (mut start, mut depth, mut parens) = (0, 0usize, 0usize);
+        let mut uniform_initializer = 0usize;
+        let mut global_assign = false;
         let mut own_inverse = false;
         let (mut own_dot, mut own_normalize) = (false, false);
         for i in 0..s.tokens.len() {
             match s.tokens[i] {
                 "(" => parens += 1,
                 ")" => parens = parens.saturating_sub(1),
+                "=" if depth == 0 && parens == 0 => global_assign = true,
+                "{" if uniform_initializer > 0 => uniform_initializer += 1,
+                "{" if depth == 0
+                    && parens == 0
+                    && s.tokens[start..i].contains(&"uniform")
+                    && global_assign =>
+                {
+                    uniform_initializer = 1
+                }
+                "}" if uniform_initializer > 0 => uniform_initializer -= 1,
                 "{" if depth == 0 && parens == 0 => {
                     s.global(start, i, true);
                     s.structure(start, i);
@@ -293,11 +308,13 @@ impl<'p> Stage<'p> {
                     depth -= 1;
                     if depth == 0 {
                         start = i + 1;
+                        global_assign = false;
                     }
                 }
                 ";" if depth == 0 && parens == 0 => {
                     s.global(start, i, false);
                     start = i + 1;
+                    global_assign = false;
                 }
                 "gl_FragData" | "gl_FragColor" if kind == ShaderStage::Fragment => {
                     let n = if s.tokens[i] == "gl_FragColor" {
@@ -500,41 +517,144 @@ impl<'p> Stage<'p> {
         };
         let Some(&ty_at) = words.get(k) else { return };
         let ty = self.tokens[ty_at].to_owned();
-        if words[k..].iter().any(|&i| self.tokens[i] == "{") {
+        if words[k..]
+            .iter()
+            .take_while(|&&i| self.tokens[i] != "=")
+            .any(|&i| self.tokens[i] == "{")
+        {
             return; // An interface block: left as the pack wrote it.
         }
         // Declarators: name [array] [= init], separated by commas.
-        let mut declarators: Vec<(String, String)> = Vec::new();
+        struct Declarator {
+            name: String,
+            array: String,
+            at: usize,
+            initializer: Option<std::ops::Range<usize>>,
+            end: usize,
+        }
+        let mut declarators = Vec::new();
         let mut j = k + 1;
+        // `float[3] a[2]` has the same type as `float a[2][3]` (GLSL 4.1.9).
+        let mut type_array = String::new();
+        if storage == "uniform" {
+            while words.get(j).is_some_and(|&at| self.tokens[at] == "[") {
+                let mut depth = 0;
+                loop {
+                    let Some(&at) = words.get(j) else {
+                        self.errors
+                            .push(self.error(ty_at, "unterminated uniform array type"));
+                        return;
+                    };
+                    let token = self.tokens[at];
+                    type_array.push_str(token);
+                    j += 1;
+                    match token {
+                        "[" => depth += 1,
+                        "]" => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
         while let Some(&n) = words.get(j) {
             let name = self.tokens[n].to_owned();
             let mut array = String::new();
+            let mut initializer = None;
             j += 1;
             let mut nesting = 0;
             while let Some(&t) = words.get(j) {
                 match self.tokens[t] {
                     "," if nesting == 0 => break,
-                    "(" | "[" => nesting += 1,
-                    ")" | "]" => nesting -= 1,
+                    "(" | "[" | "{" => nesting += 1,
+                    ")" | "]" | "}" => nesting -= 1,
                     _ => {}
                 }
                 if self.tokens[t] == "=" && nesting == 0 {
-                    // An initializer: uniforms are set by the game, so it is dropped.
-                    while words.get(j).is_some_and(|&t| self.tokens[t] != ",") {
+                    let begin = j + 1;
+                    j += 1;
+                    let mut depth = 0;
+                    while let Some(&t) = words.get(j) {
+                        match self.tokens[t] {
+                            "," if depth == 0 => break,
+                            "(" | "[" | "{" => depth += 1,
+                            ")" | "]" | "}" => depth -= 1,
+                            _ => {}
+                        }
                         j += 1;
                     }
+                    initializer = Some(
+                        words.get(begin).copied().unwrap_or(to)
+                            ..words.get(j).copied().unwrap_or(to),
+                    );
                     break;
                 }
                 array.push_str(self.tokens[t]);
                 j += 1;
             }
+            let end = words.get(j).copied().unwrap_or(to);
             j += 1;
-            declarators.push((name, array));
+            array.push_str(&type_array);
+            declarators.push(Declarator {
+                name,
+                array,
+                at: n,
+                initializer,
+                end,
+            });
         }
         let fragment = self.kind == ShaderStage::Fragment;
         let input = matches!(storage, "in" | "attribute") || (storage == "varying" && fragment);
-        self.removed.push(from..to + 1);
-        for (name, array) in declarators {
+        let opaque = is_sampler_type(&ty) || ty.contains("image") || ty == "atomic_uint";
+        if storage == "uniform" && !opaque {
+            let mut cursor = from;
+            for d in &declarators {
+                if let Some(init) = &d.initializer {
+                    // Only a mirror is constant: the actual uniform remains in HzUniforms,
+                    // and application-supplied values still overwrite these initial bytes.
+                    let mut serial = self.uniform_defaults.len();
+                    let mirror = loop {
+                        let candidate = format!("hz_uniform_default_{serial}");
+                        if !self.tokens.contains(&candidate.as_str())
+                            && !self
+                                .uniform_defaults
+                                .iter()
+                                .any(|(_, n, _)| n == &candidate)
+                        {
+                            break candidate;
+                        }
+                        serial += 1;
+                    };
+                    self.removed.push(cursor..init.start);
+                    cursor = init.end;
+                    self.replaced.insert(
+                        d.at,
+                        format!(
+                            "const {} =",
+                            super::uniform_declaration(&format!("{ty}{}", d.array), &mirror)
+                        ),
+                    );
+                    self.replaced.insert(d.end, ";".into());
+                    self.uniform_defaults.push((d.name.clone(), mirror, d.at));
+                }
+            }
+            self.removed.push(cursor..to + 1);
+        } else {
+            self.removed.push(from..to + 1);
+            if storage == "uniform" {
+                for d in &declarators {
+                    if d.initializer.is_some() {
+                        self.errors.push(self.error(
+                            d.at,
+                            &format!("`{}`: opaque uniforms cannot have an initializer", d.name),
+                        ));
+                    }
+                }
+            }
+        }
+        for Declarator { name, array, .. } in declarators {
             let decl = format!("{interpolation}{ty} @{array};");
             match storage {
                 "uniform" if is_sampler_type(&ty) => self.samplers.push((name, ty.clone())),

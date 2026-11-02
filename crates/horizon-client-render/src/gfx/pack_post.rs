@@ -1338,6 +1338,38 @@ fn image_format(qualifier: &str) -> Option<wgpu::TextureFormat> {
     })
 }
 
+/// The application's frame values take precedence over custom properties of the same name.
+fn uniform_index(name: &str, custom: &[String]) -> Option<usize> {
+    pack_uniforms::index(name).or_else(|| {
+        let k = custom.iter().position(|c| c == name)?;
+        Some(pack_uniforms::NAMES.len() + k)
+    })
+}
+
+fn uniform_fields(
+    interface: &horizon_shaders::Interface,
+    custom: &[String],
+) -> Vec<(Option<usize>, String, u32)> {
+    interface
+        .uniforms
+        .iter()
+        .map(|u| (uniform_index(&u.name, custom), u.ty.clone(), u.offset))
+        .collect()
+}
+
+/// Supplied values overwrite a program's initial block; unresolved fields retain their seed.
+fn write_uniform_values(
+    block: &mut [u8],
+    fields: &[(Option<usize>, String, u32)],
+    values: &[pack_uniforms::Value],
+) {
+    for (index, ty, offset) in fields {
+        if let Some(v) = index.and_then(|i| values.get(i)) {
+            v.write(ty, block, *offset as usize);
+        }
+    }
+}
+
 /// The pass of program `p`: a quad, or `geometry` drawn by the game. `None` (with a note) when
 /// wgpu refuses it or it writes nothing. `formats` are its buffers' (for a program of the shadow
 /// buffers, buffer n is shadowcolor n); `shadow` the shadowcolor formats when the shadow pass
@@ -1357,12 +1389,7 @@ fn build_pass(
 ) -> Option<Pass> {
     let features = device.features();
     // The frame's uniforms, then the pack's custom ones.
-    let index = |name: &str| {
-        pack_uniforms::index(name).or_else(|| {
-            let k = custom.iter().position(|c| c == name)?;
-            Some(pack_uniforms::NAMES.len() + k)
-        })
-    };
+    let index = |name: &str| uniform_index(name, custom);
     let mask = |flips: &[(u32, bool)]| flips.iter().filter(|f| f.1).fold(0u16, |m, f| m | 1 << f.0);
     let mut p = p;
     let program = p.program.take()?;
@@ -1531,7 +1558,9 @@ fn build_pass(
     let missing: Vec<&str> = interface
         .uniforms
         .iter()
-        .filter(|u| !u.name.starts_with("hz_") && index(&u.name).is_none())
+        .filter(|u| {
+            !u.name.starts_with("hz_") && index(&u.name).is_none() && u.initializer.is_none()
+        })
         .map(|u| u.name.as_str())
         .collect();
     if !missing.is_empty() {
@@ -1545,12 +1574,8 @@ fn build_pass(
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }),
-        block: vec![0; interface.uniform_size as usize],
-        uniforms: interface
-            .uniforms
-            .iter()
-            .map(|u| (index(&u.name), u.ty.clone(), u.offset))
-            .collect(),
+        block: interface.uniform_block(),
+        uniforms: uniform_fields(interface, custom),
         name: p.name,
         group: p.group,
         pipeline: Pipeline::Render(pipeline),
@@ -1603,12 +1628,6 @@ fn build_compute(
     custom: &[String],
     pack: &Resources<'_>,
 ) -> Option<Pass> {
-    let index = |name: &str| {
-        pack_uniforms::index(name).or_else(|| {
-            let k = custom.iter().position(|c| c == name)?;
-            Some(pack_uniforms::NAMES.len() + k)
-        })
-    };
     let interface = &c.interface;
     let (entries, samplers, slots, reads, shadow_reads, images) = bindings(
         device.features(),
@@ -1672,12 +1691,8 @@ fn build_compute(
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }),
-        block: vec![0; interface.uniform_size as usize],
-        uniforms: interface
-            .uniforms
-            .iter()
-            .map(|u| (index(&u.name), u.ty.clone(), u.offset))
-            .collect(),
+        block: interface.uniform_block(),
+        uniforms: uniform_fields(interface, custom),
         name,
         group,
         pipeline: Pipeline::Compute {
@@ -2529,11 +2544,7 @@ impl PackPost {
         let head: &[u8] = bytemuck::cast_slice(&ours);
         let n = head.len().min(pass.block.len());
         pass.block[..n].copy_from_slice(&head[..n]);
-        for (index, ty, offset) in &pass.uniforms {
-            if let Some(v) = index.and_then(|i| self.uniforms.values.get(i)) {
-                v.write(ty, &mut pass.block, *offset as usize);
-            }
-        }
+        write_uniform_values(&mut pass.block, &pass.uniforms, &self.uniforms.values);
         if !pass.block.is_empty() {
             queue.write_buffer(&pass.ubo, 0, &pass.block);
         }
@@ -4383,3 +4394,11 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_post/tests/uniform_defaults.rs"]
+mod uniform_default_tests;
+
+#[cfg(test)]
+#[path = "pack_post/tests/uniform_defaults_gpu.rs"]
+mod uniform_default_gpu_tests;
