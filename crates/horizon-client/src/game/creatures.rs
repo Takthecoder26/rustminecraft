@@ -1512,7 +1512,12 @@ impl Game<'_> {
                         from_loot(&stack)
                     },
                 ),
-                drops::Drop::Stack(stack) => stacks.push(stack),
+                drops::Drop::Stack(mut stack) => {
+                    if raider && &*stack.item == horizon_client::mobs::raider::BANNER {
+                        stack = horizon_client::mobs::raider::ominous_banner();
+                    }
+                    stacks.push(stack);
+                }
                 other => rest.push(other),
             }
         }
