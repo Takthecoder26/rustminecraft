@@ -170,6 +170,66 @@ impl Game<'_> {
         self.swing_arm();
         true
     }
+    /// The entities besides mobs, players and dropped items that a hook can
+    /// catch: those `Entity.canBeHitByProjectile` (alive and pickable) lets a
+    /// projectile hit, so primed TNT, boats, minecarts, armor stands (a marker
+    /// is not pickable) and falling blocks, with their ids and boxes.
+    fn hookable_entities(&self) -> Vec<(u32, Aabb)> {
+        let tnts = self.tnts.iter().map(|e| (e.id, e.bounds()));
+        let boats = self.boats.iter().map(|e| (e.id, e.bounds()));
+        let carts = self.carts.iter().map(|e| (e.id, e.bounds()));
+        let stands = self
+            .armor_stands
+            .iter()
+            .filter(|e| !e.marker)
+            .map(|e| (e.id, e.bounds()));
+        let falling = self
+            .falling
+            .iter()
+            .map(|e| (e.id, horizon_client::falling_block::bounds(e.position)));
+        tnts.chain(boats)
+            .chain(carts)
+            .chain(stands)
+            .chain(falling)
+            // Not the one the owner rides (`isPassengerOfSameVehicle`).
+            .filter(|(id, _)| *id != 0 && Some(*id) != self.riding)
+            .collect()
+    }
+    /// A hookable entity's feet and height, for `updateHookedEntity`.
+    fn hookable_entity(&self, id: u32) -> Option<(Vec3, f64)> {
+        self.hookable_entities()
+            .into_iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, b)| {
+                let (lo, hi) = (b.min_position(), b.max_position());
+                (
+                    Vec3::new((lo.x + hi.x) / 2.0, lo.y, (lo.z + hi.z) / 2.0),
+                    hi.y - lo.y,
+                )
+            })
+    }
+    /// `FishingHook.pullEntity` on one of those: its velocity moves by
+    /// `pulled`. False when `id` is none of them.
+    fn pull_hookable(&mut self, id: u32, pulled: impl Fn(Vec3) -> Vec3) -> bool {
+        if let Some(e) = self.tnts.iter_mut().find(|e| e.id == id) {
+            e.velocity = pulled(e.velocity);
+        } else if let Some(e) = self.boats.iter_mut().find(|e| e.id == id) {
+            e.velocity = pulled(e.velocity);
+        } else if let Some(e) = self.carts.iter_mut().find(|e| e.id == id) {
+            e.velocity = pulled(e.velocity);
+        } else if let Some(e) = self
+            .armor_stands
+            .iter_mut()
+            .find(|e| e.id == id && !e.marker)
+        {
+            e.velocity = pulled(e.velocity);
+        } else if let Some(e) = self.falling.iter_mut().find(|e| e.id == id) {
+            e.velocity = pulled(e.velocity);
+        } else {
+            return false;
+        }
+        true
+    }
     /// `FishingHook.retrieve`: the rod damage it costs.
     fn retrieve_hook(&mut self, rod: &ItemStack) -> u32 {
         let Some(hook) = self.hook.take() else {
@@ -194,6 +254,7 @@ impl Game<'_> {
             } else if let Some(item) = self.dropped.iter_mut().find(|i| i.id == id) {
                 item.velocity = pulled(item.velocity);
                 hooked_item = true;
+            } else if self.pull_hookable(id, pulled) {
             } else if self.creatures.hook_targets.iter().any(|t| t.id == id) {
                 // A player: the hub moves them when the tick ends.
                 self.creatures
@@ -553,7 +614,8 @@ impl Game<'_> {
                     return;
                 }
                 // checkCollision: hook the first living mob or other player it
-                // touches, or (via `canHitEntity`) a dropped item.
+                // touches, a dropped item (via `canHitEntity`), or any other entity
+                // a projectile can hit (`canBeHitByProjectile`).
                 let bb = bounds(h.position);
                 let (lo, hi) = (bb.min_position(), bb.max_position());
                 let touches = |b: Aabb| {
@@ -578,6 +640,12 @@ impl Game<'_> {
                             .iter()
                             .find(|i| touches(i.bounds()))
                             .map(|i| i.id)
+                    })
+                    .or_else(|| {
+                        self.hookable_entities()
+                            .into_iter()
+                            .find(|(_, b)| touches(*b))
+                            .map(|(id, _)| id)
                     });
                 if let Some(id) = hit {
                     // Projectile.onHit on an entity: PROJECTILE_LAND.
@@ -645,7 +713,8 @@ impl Game<'_> {
                             .iter()
                             .find(|i| i.id == id)
                             .map(|i| (i.position, horizon_client::entities::ItemEntity::WIDTH))
-                    });
+                    })
+                    .or_else(|| self.hookable_entity(id));
                 match hooked {
                     Some((at, height)) => h.position = Vec3::new(at.x, at.y + height * 0.8, at.z),
                     None => h.state = State::Flying,
@@ -1243,6 +1312,7 @@ impl Game<'_> {
                                 .find(|i| i.id == id)
                                 .map(|i| (i.position, horizon_client::entities::ItemEntity::WIDTH))
                         })
+                        .or_else(|| self.hookable_entity(id))
                 };
                 return match hooked {
                     Some((at, height)) => (
