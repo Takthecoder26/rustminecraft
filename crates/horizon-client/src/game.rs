@@ -410,6 +410,39 @@ const AUTO_UPLOAD_TIME: Duration = Duration::from_millis(2);
 /// A frame's finished meshes up to this many upload at once, unqueued.
 const AUTO_UPLOADS_AT_ONCE: usize = 8;
 
+/// The next wake-up for a window event loop after it has requested a frame.
+/// Offscreen windows have no redraw callback, so they must keep driving frames.
+fn idle_flow(offscreen: bool) -> ControlFlow {
+    idle_flow_at(offscreen, Instant::now())
+}
+
+fn idle_flow_at(offscreen: bool, now: Instant) -> ControlFlow {
+    if offscreen {
+        ControlFlow::Poll
+    } else {
+        ControlFlow::WaitUntil(now + Duration::from_millis(50))
+    }
+}
+
+#[cfg(test)]
+mod idle_flow_tests {
+    use super::*;
+
+    #[test]
+    fn offscreen_idle_keeps_driving_frames() {
+        assert_eq!(idle_flow_at(true, Instant::now()), ControlFlow::Poll);
+    }
+
+    #[test]
+    fn windowed_idle_waits_for_bounded_time() {
+        let now = Instant::now();
+        assert_eq!(
+            idle_flow_at(false, now),
+            ControlFlow::WaitUntil(now + Duration::from_millis(50)),
+        );
+    }
+}
+
 #[derive(Clone)]
 struct Options {
     resources: PathBuf,
@@ -17974,7 +18007,9 @@ impl Game<'_> {
             self.handle_window_event(event_loop, WindowId::dummy(), WindowEvent::RedrawRequested);
             return;
         }
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // A hidden surface may receive no compositor callbacks. Wake periodically
+        // to service control and shutdown requests without busy-polling.
+        event_loop.set_control_flow(idle_flow(self.options.offscreen));
     }
 }
 /// clouds.png as filled cells (`CloudRenderer.prepare`: alpha 10 or more).
@@ -20237,7 +20272,11 @@ impl Loading {
                 w.request_redraw();
             }
         }
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // A hidden surface may receive no compositor callbacks. Wake periodically
+        // to process shutdown requests without busy-polling.
+        event_loop.set_control_flow(idle_flow(
+            self.options.as_ref().is_some_and(|o| o.offscreen),
+        ));
     }
     fn draw(&mut self) {
         let Some(size) = self
