@@ -743,8 +743,14 @@ mod tests {
         let has_waypoints = true;
         let locator_bar_rule = false;
         let show_locator = has_waypoints && locator_bar_rule;
-        assert_eq!(B::next(show_locator, false, false, true, false), B::Experience);
-        assert_eq!(B::next(show_locator, true, false, true, false), B::JumpableVehicle);
+        assert_eq!(
+            B::next(show_locator, false, false, true, false),
+            B::Experience
+        );
+        assert_eq!(
+            B::next(show_locator, true, false, true, false),
+            B::JumpableVehicle
+        );
         assert_eq!(B::next(show_locator, false, false, false, false), B::Empty);
     }
 }
