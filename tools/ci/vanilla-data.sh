@@ -111,11 +111,12 @@ fi
 languages="$shared/languages/$version/assets"
 if [ -d "$languages/minecraft/lang" ] && [ -d "$assets" ]; then
   mkdir -p "$assets/lang"
-  if [ "$(uname)" = Darwin ]; then
-    cp -cRn "$languages/minecraft/lang/." "$assets/lang/"
-  else
-    cp -R --reflink=auto -n "$languages/minecraft/lang/." "$assets/lang/"
-  fi
+  # One file at a time, only the missing ones: `cp -n` exits 1 when it skips a file (macOS, GNU coreutils 9.2+),
+  # and every preparation already has en_us.json, so `set -e` would end the job here.
+  for file in "$languages/minecraft/lang/"*; do
+    [ -e "$assets/lang/${file##*/}" ] && continue
+    if [ "$(uname)" = Darwin ]; then cp -c "$file" "$assets/lang/"; else cp --reflink=auto "$file" "$assets/lang/"; fi
+  done
   if [ ! -e "$assets/../pack.mcmeta" ]; then
     if [ "$(uname)" = Darwin ]; then
       cp -c "$languages/pack.mcmeta" "$assets/../"
