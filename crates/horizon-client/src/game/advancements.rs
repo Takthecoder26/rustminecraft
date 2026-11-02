@@ -1862,7 +1862,10 @@ impl Game<'_> {
             .filter_map(|t| t.slot)
             .chain(packs)
             .chain(self.narrator_toast.as_ref().and_then(|t| t.slot))
-            .fold(self.tutorial_toast_slots(), |used, slot| used | 1 << slot)
+            .fold(
+                self.tutorial_toast_slots() | self.online.toast_slots(),
+                |used, slot| used | 1 << slot,
+            )
     }
     /// The `AdvancementToast` or `RecipeToast` at `index` in its slot at `y`.
     fn draw_toast(&mut self, batch: &mut HudBatch, index: usize, y: f32, multiplier: f64) {

@@ -313,6 +313,7 @@ impl Game<'_> {
         for e in events {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
+                Event::Online(action) => self.online_option_action(action),
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();

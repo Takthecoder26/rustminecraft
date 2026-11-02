@@ -665,6 +665,9 @@ impl Game<'_> {
                 json!({ "mode": "multiplayer", "disconnected": reason })
             }
             Mode::Multiplayer(_) => json!({ "mode": "multiplayer" }),
+            Mode::Realms(state) => {
+                json!({ "mode": "realms", "page": format!("{:?}", state.page), "loading": state.loading })
+            }
             Mode::MultiplayerWarning { check } => {
                 json!({ "mode": "multiplayer-warning", "check": check })
             }

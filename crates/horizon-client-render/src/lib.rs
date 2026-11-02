@@ -52,6 +52,7 @@ pub mod hud_overlays;
 pub mod inventory_effects;
 pub mod java_text;
 pub mod jigsaw_block;
+pub mod social_service;
 pub use horizon_world::json_folder;
 pub mod level_loading;
 pub mod light;

@@ -126,11 +126,12 @@ impl Opt {
                 | Opt::HideMatchedNames
                 | Opt::OnlySecureChat
                 | Opt::SaveChatDrafts
-                // Saved, but no Horizon system reads them yet: no Realms, no
-                // friends list, no directional audio, no now-playing toast.
+                // Online controls use OnlineStatus and OnlineAction: their
+                // account-dependent availability is not a static Opt property.
                 | Opt::RealmsNotifications
                 | Opt::InGameNotification
                 | Opt::SharePresence
+                // Saved, but these consumers are not implemented.
                 | Opt::DirectionalAudio
                 | Opt::MusicToast
                 // Saved, but nothing in rendering reads them yet.
@@ -1267,9 +1268,36 @@ pub enum Page {
     /// Splitscreen: the monitor map and draft window arrangement.
     SplitSetup,
 }
+/// Account-dependent state supplied by gameplay; the render library does no network I/O.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnlineStatus {
+    pub available: bool,
+    pub busy: bool,
+    pub friends_enabled: bool,
+    pub allow_requests: bool,
+    pub realms_available: bool,
+    /// A translated service status, never a raw HTTP error or credential.
+    pub message: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineAction {
+    FriendsList,
+    AcceptRequests,
+    Notifications,
+    Presence,
+    RealmsNotifications,
+    XboxPrivacy,
+    OpenPrivacy,
+    CancelPrivacy,
+    CancelUpdates,
+    ConfirmFriends(bool),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Act {
     None,
+    Online(OnlineAction),
     Push(Page),
     Done,
     Cycle(Opt),
@@ -1396,6 +1424,7 @@ fn matches_focus(id: &FocusId, i: usize, wd: &Widget) -> bool {
 /// What the game must do after an interaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    Online(OnlineAction),
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Close the options screens (back to the pause menu or title).
@@ -1465,6 +1494,9 @@ fn slider_unsnapped(opt: Opt, held: bool, moved: Instant) -> bool {
     }
 }
 pub struct OptionsUi {
+    online_status: OnlineStatus,
+    online_consent: bool,
+    online_privacy: bool,
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
@@ -1553,6 +1585,9 @@ impl Default for OptionsUi {
         let mut settings_search = ui::EditBox::new(0.0, 0.0, 200.0, 15.0);
         settings_search.focused = false;
         Self {
+            online_status: OnlineStatus::default(),
+            online_consent: false,
+            online_privacy: false,
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
@@ -1828,6 +1863,16 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
     }
     let key = match act {
         Act::Cycle(opt) => Some(opt.tooltip_key(s)),
+        Act::Online(OnlineAction::AcceptRequests) => {
+            Some("options.allowFriendRequests.tooltip".into())
+        }
+        Act::Online(OnlineAction::Notifications) => {
+            Some("options.inGameNotification.tooltip".into())
+        }
+        Act::Online(OnlineAction::Presence) => Some(Opt::SharePresence.tooltip_key(s)),
+        Act::Online(OnlineAction::RealmsNotifications) => {
+            Some(Opt::RealmsNotifications.tooltip_key(s))
+        }
         Act::Push(Page::Language) => Some("options.language.tooltip".into()),
         Act::Push(Page::Accessibility) => Some("options.accessibility.tooltip".into()),
         _ => None,
@@ -1992,6 +2037,45 @@ fn pairs(opts: &[Opt]) -> Vec<Row> {
         .collect()
 }
 impl OptionsUi {
+    pub fn set_online_status(&mut self, status: OnlineStatus) {
+        if !status.available {
+            self.online_consent = false;
+        }
+        self.online_status = status;
+    }
+
+    pub fn confirm_online_friends(&mut self) {
+        self.online_consent = true;
+        self.focus = None;
+        self.scroll = 0.0;
+    }
+
+    fn online_action(&mut self, action: OnlineAction, events: &mut Vec<Event>) {
+        match action {
+            OnlineAction::XboxPrivacy => {
+                self.online_privacy = true;
+                self.focus = None;
+                return;
+            }
+            OnlineAction::OpenPrivacy | OnlineAction::CancelPrivacy => {
+                if !self.online_privacy {
+                    return;
+                }
+                self.online_privacy = false;
+                self.focus = None;
+                if action == OnlineAction::CancelPrivacy {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        if matches!(action, OnlineAction::ConfirmFriends(_)) {
+            self.online_consent = false;
+            self.focus = None;
+        }
+        events.push(Event::Online(action));
+    }
+
     /// A switch of `horizon-extras.txt` as the Extras page draws it: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
         let label = format!("{}: {}", item.caption_text(), item.value(&s.extras));
@@ -2109,6 +2193,8 @@ impl OptionsUi {
     /// Open a page whose Done/Escape returns directly to the calling screen.
     pub fn open_at(&mut self, in_world: bool, page: Page) {
         self.stack.clear();
+        self.online_consent = false;
+        self.online_privacy = false;
         self.data_pack_dir = None;
         self.focus = None;
         self.focus_from_keyboard = false;
@@ -2497,13 +2583,75 @@ impl OptionsUi {
                 pairs(&opts)
             }
             Page::Online => {
-                // OnlineOptionsScreen without the Xbox and friends-list parts.
-                let mut rows = vec![Row::Header("options.online.friends.header")];
-                rows.extend(pairs(&[Opt::InGameNotification, Opt::SharePresence]));
+                let state = &self.online_status;
+                let control = |label, action, active, wide| {
+                    let widget = button(
+                        0.0,
+                        0.0,
+                        if wide { 310.0 } else { 150.0 },
+                        label,
+                        Act::Online(action),
+                    );
+                    if active { widget } else { inactive(widget) }
+                };
+                let toggle = |key, value| tr(key).append(Text::literal(": ")).append(on_off(value));
+                let available = state.available && !state.busy;
+                let dependent = available && state.friends_enabled;
+                let mut rows = vec![
+                    Row::Header("options.online.friends.header"),
+                    Row::Buttons(
+                        control(
+                            toggle("options.friendsList", state.friends_enabled),
+                            OnlineAction::FriendsList,
+                            available,
+                            false,
+                        ),
+                        Some(control(
+                            toggle("options.allowFriendRequests", state.allow_requests),
+                            OnlineAction::AcceptRequests,
+                            dependent,
+                            false,
+                        )),
+                    ),
+                    Row::Buttons(
+                        control(
+                            Opt::InGameNotification.label(s),
+                            OnlineAction::Notifications,
+                            dependent,
+                            false,
+                        ),
+                        Some(control(
+                            Opt::SharePresence.label(s),
+                            OnlineAction::Presence,
+                            dependent,
+                            false,
+                        )),
+                    ),
+                    Row::Buttons(
+                        control(
+                            tr("options.online.xboxSettings"),
+                            OnlineAction::XboxPrivacy,
+                            true,
+                            true,
+                        ),
+                        None,
+                    ),
+                ];
+                if let Some(message) = state.message {
+                    rows.push(Row::Header(message));
+                }
                 rows.push(Row::Header("options.online.servers.header"));
                 rows.push(Row::Big(Opt::AllowServerListing));
                 rows.push(Row::Header("options.online.realms.header"));
-                rows.push(Row::Big(Opt::RealmsNotifications));
+                rows.push(Row::Buttons(
+                    control(
+                        Opt::RealmsNotifications.label(s),
+                        OnlineAction::RealmsNotifications,
+                        state.realms_available,
+                        true,
+                    ),
+                    None,
+                ));
                 rows
             }
             Page::Controls => {
@@ -2693,6 +2841,47 @@ impl OptionsUi {
         let mut rows = ListRows::default();
         let page = self.page();
         let cx = (w / 2.0).floor();
+        if page == Page::Online && self.online_privacy {
+            out.push(button(
+                cx - 155.0,
+                h - 28.0,
+                150.0,
+                tr("chat.link.open"),
+                Act::Online(OnlineAction::OpenPrivacy),
+            ));
+            out.push(button(
+                cx + 5.0,
+                h - 28.0,
+                150.0,
+                tr("gui.cancel"),
+                Act::Online(OnlineAction::CancelPrivacy),
+            ));
+            return (out, 0.0, 0.0, 0.0);
+        }
+        if page == Page::Online && self.online_consent {
+            out.push(button(
+                cx - 155.0,
+                h - 28.0,
+                150.0,
+                tr("options.friendsList.confirm.turnOn"),
+                Act::Online(OnlineAction::ConfirmFriends(true)),
+            ));
+            out.push(button(
+                cx + 5.0,
+                h - 28.0,
+                150.0,
+                tr("options.friendsList.confirm.turnOff"),
+                Act::Online(OnlineAction::ConfirmFriends(false)),
+            ));
+            out.push(button(
+                cx - 155.0,
+                h - 54.0,
+                310.0,
+                tr("options.friendsList.confirm.message.link"),
+                Act::Online(OnlineAction::XboxPrivacy),
+            ));
+            return (out, 0.0, 0.0, 0.0);
+        }
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.x = cx - 100.0;
             self.settings_search.y = 17.0;
@@ -3377,10 +3566,27 @@ impl OptionsUi {
         // The page is its own screen (OptionsScreen, VideoSettingsScreen...).
         let page = self.page();
         crate::widgets::begin_screen(|| {
-            crate::widgets::ScreenInfo::new(
-                format!("options/{page:?}"),
-                tr(Self::title(page)).plain(),
-            )
+            let (name, message) = if page == Page::Online && self.online_privacy {
+                (
+                    "options/online/privacy".to_owned(),
+                    tr("gui.privacy_link.title")
+                        .append(Text::literal("\n"))
+                        .append(tr("gui.privacy_link.message")),
+                )
+            } else if page == Page::Online && self.online_consent {
+                (
+                    "options/online/consent".to_owned(),
+                    tr("options.friendsList.confirm.title")
+                        .append(Text::literal("\n"))
+                        .append(Text::translate(
+                            "options.friendsList.confirm.message",
+                            &[tr("options.friendsList.confirm.message.link")],
+                        )),
+                )
+            } else {
+                (format!("options/{page:?}"), tr(Self::title(page)))
+            };
+            crate::widgets::ScreenInfo::new(name, message.plain())
         });
         if self.page() == Page::HdrCalibration
             && let Some(c) = &self.calibration
@@ -3422,6 +3628,58 @@ impl OptionsUi {
         self.size = (w, h);
         let in_world = self.in_world;
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
+        if page == Page::Online && self.online_privacy {
+            let message = tr("gui.privacy_link.title")
+                .append(Text::literal("\n\n"))
+                .append(tr("gui.privacy_link.message"))
+                .append(Text::literal(
+                    "\nhttps://aka.ms/MinecraftJavaXboxPrivacyAndSafety",
+                ));
+            for (i, line) in atlas
+                .font
+                .split(&message, (w - 80.0).max(1.0))
+                .iter()
+                .enumerate()
+            {
+                batch.text_styled(
+                    atlas,
+                    line,
+                    ((w - atlas.font.width_text(line)) / 2.0).floor(),
+                    20.0 + i as f32 * 9.0,
+                    u32::MAX,
+                    true,
+                );
+            }
+        } else if page == Page::Online && self.online_consent {
+            let title = tr("options.friendsList.confirm.title");
+            batch.text_styled(
+                atlas,
+                &title,
+                ((w - atlas.font.width_text(&title)) / 2.0).floor(),
+                20.0,
+                u32::MAX,
+                true,
+            );
+            let message = Text::translate(
+                "options.friendsList.confirm.message",
+                &[tr("options.friendsList.confirm.message.link")],
+            );
+            for (i, line) in atlas
+                .font
+                .split(&message, (w - 80.0).max(1.0))
+                .iter()
+                .enumerate()
+            {
+                batch.text_styled(
+                    atlas,
+                    line,
+                    ((w - atlas.font.width_text(line)) / 2.0).floor(),
+                    48.0 + i as f32 * 9.0,
+                    u32::MAX,
+                    true,
+                );
+            }
+        }
         let list = bottom > top;
         if list {
             ui::list_background(batch, atlas, top, bottom, in_world);
@@ -4084,6 +4342,7 @@ impl OptionsUi {
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
+                        Act::Online(action) => self.online_action(action, &mut events),
                         Act::None => {}
                     }
                 }
@@ -4426,6 +4685,14 @@ impl OptionsUi {
     }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
         let mut events = Vec::new();
+        if self.online_privacy {
+            self.online_action(OnlineAction::CancelPrivacy, &mut events);
+            return events;
+        }
+        if self.online_consent {
+            self.online_action(OnlineAction::ConfirmFriends(false), &mut events);
+            return events;
+        }
         // A pack's screen goes back to the one that opened it.
         if self.page() == Page::ShaderOptions
             && let Some(options) = &mut s.shader_options
@@ -4435,6 +4702,9 @@ impl OptionsUi {
             return events;
         }
         let page = self.stack.pop().unwrap_or(Page::Main);
+        if page == Page::Online {
+            events.push(Event::Online(OnlineAction::CancelUpdates));
+        }
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.dragging = None;
@@ -5031,6 +5301,7 @@ impl OptionsUi {
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
+                        Act::Online(action) => self.online_action(action, &mut events),
                         Act::None => {}
                     }
                     return events;

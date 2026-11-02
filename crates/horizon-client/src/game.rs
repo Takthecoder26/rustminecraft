@@ -235,6 +235,7 @@ mod net_harness;
 mod nether_portal;
 mod no_resources;
 mod ominous_item_spawner;
+mod online_options;
 mod options;
 mod packs;
 mod pad;
@@ -259,6 +260,8 @@ mod quick_actions;
 mod raids;
 mod ram_limit;
 mod random_textures;
+mod realms;
+mod realms_entry;
 mod recipe_book;
 mod remote;
 mod remote_camera;
@@ -2569,6 +2572,9 @@ struct Game<'a> {
     /// Duration of the last frame in ticks (GUI easing).
     frame_ticks: f32,
     title: Option<Title>,
+    online: online_options::OnlineState,
+    realms: realms::RealmsRuntime,
+    realms_entry: realms_entry::RealmEntryState,
     /// Armor slots: head, chest, legs, feet.
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
@@ -8073,6 +8079,7 @@ impl Game<'_> {
                 self.update_remote_skins();
             }
             self.draw_options(&mut batch);
+            self.draw_online_toasts(&mut batch, false);
             self.fire_screen_render_post(&mut batch);
             self.draw_split_hud(&mut batch, true);
             return batch;
@@ -8116,6 +8123,7 @@ impl Game<'_> {
             self.draw_toasts(&mut batch, false);
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
+            self.draw_online_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
             return batch;
         }
@@ -8125,6 +8133,7 @@ impl Game<'_> {
         // download while the connection screen shows.
         if self.remote_overlay(&mut batch) {
             self.draw_pack_toasts(&mut batch, false);
+            self.draw_online_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
             return batch;
         }
@@ -8434,6 +8443,7 @@ impl Game<'_> {
         self.draw_toasts(&mut batch, !show_hud);
         self.draw_tutorial_toasts(&mut batch, !show_hud);
         self.draw_pack_toasts(&mut batch, !show_hud);
+        self.draw_online_toasts(&mut batch, !show_hud);
         self.draw_music_toast(&mut batch, !show_hud);
         if self.server_packs.prompt.is_none() {
             self.remote_hud(&mut batch);
@@ -11656,8 +11666,42 @@ impl Game<'_> {
         }
         Ok(())
     }
+    fn realm_effect(&mut self, effect: Option<realms_entry::EntryEffect>) -> Result<()> {
+        match effect {
+            Some(realms_entry::EntryEffect::Join(join)) => self.begin_realm_join(join)?,
+            Some(realms_entry::EntryEffect::OpenUri(uri)) => packs::open_uri(&uri),
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn poll_realms_menu(&mut self) -> Result<()> {
+        if let Some(title) = self.title.as_mut() {
+            realms::prepare_title(title);
+            self.realms
+                .poll_notifications(title, self.settings.file.bool("realmsNotifications"));
+            let effect = if let Some(done) = self.realms.poll(title) {
+                self.realms_entry.handle_completion(done, title)
+            } else {
+                self.realms_entry.poll(title)
+            };
+            self.realm_effect(effect)?;
+        } else {
+            self.realms.cancel();
+            self.realms_entry.cancel();
+        }
+        self.poll_realm_join()
+    }
+
     /// What the title screen asked for, from a click or Enter.
     fn title_action(&mut self, event_loop: &dyn EventLoopCtl, action: Action) -> Result<()> {
+        if let Some(title) = self.title.as_mut()
+            && self
+                .realms_entry
+                .create(&action, &self.options.resources, title)
+        {
+            return Ok(());
+        }
         match action {
             // A splitscreen player's title never ends the process (P1's does).
             Action::Quit if self.options.split_guest => {}
@@ -11672,6 +11716,19 @@ impl Game<'_> {
             Action::Sounds => self.open_options_at(true, horizon_client::options_ui::Page::Sound),
             Action::Credits => {
                 self.open_options_at(true, horizon_client::options_ui::Page::Credits)
+            }
+            Action::Realms(action) => {
+                if let Some(title) = self.title.as_mut() {
+                    if let horizon_client::title::realms::RealmsAction::ConfirmJoinPack(yes) =
+                        action
+                    {
+                        let effect = self.realms_entry.confirm_join_pack(yes, title);
+                        self.realm_effect(effect)?;
+                    } else {
+                        self.realms_entry.cancel();
+                        self.realms.start(action, title);
+                    }
+                }
             }
             Action::OpenUri(uri) => packs::open_uri(&uri),
             Action::CopyText(text) => {
@@ -15012,6 +15069,8 @@ impl Game<'_> {
         });
     }
     fn render(&mut self) -> Result<bool> {
+        self.tick_online_options();
+        self.poll_realms_menu()?;
         // The window's GPU holds the atlas: its copy in memory is kept
         // compressed (a no-op once it is).
         if self.renderer.is_some() {
@@ -18055,6 +18114,9 @@ impl Game<'_> {
     }
     /// The loop ended: close the pads' output, save the world, write the perf report.
     pub(super) fn shut_down(&mut self) {
+        self.online.send_offline_presence();
+        self.realms.cancel();
+        self.realms_entry.cancel();
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
             log::warn!("Horizon: failed to save the world on exit: {e}");
@@ -18423,6 +18485,9 @@ impl<'a> Game<'a> {
             scope_scale: 0.5,
             frame_ticks: 0.0,
             title: None,
+            online: Default::default(),
+            realms: Default::default(),
+            realms_entry: Default::default(),
             armor: [None, None, None, None],
             offhand: None,
             hotbar_pop: [0; 10],
@@ -18811,6 +18876,7 @@ enum LoaderMsg {
 }
 
 enum PendingWorldEntry {
+    Realm(realms_entry::RealmJoin),
     Local {
         folder: String,
         name: Option<String>,
@@ -18891,6 +18957,7 @@ impl Game<'_> {
             self.reload_packs();
         }
         match self.pending_entry.take() {
+            Some(PendingWorldEntry::Realm(join)) => self.begin_realm_join(join)?,
             Some(PendingWorldEntry::Local {
                 folder,
                 name,

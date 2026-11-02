@@ -21,6 +21,7 @@ mod create_world;
 mod experiments;
 mod flat;
 mod onboarding;
+pub mod realms;
 #[cfg(test)]
 mod tests;
 pub mod world_management;
@@ -329,6 +330,7 @@ pub enum Mode {
         alert: Option<Alert>,
     },
     Multiplayer(crate::multiplayer::Screen),
+    Realms(realms::State),
     /// SafetyScreen: the warning before the first Multiplayer click, with its
     /// "Do not show this screen again" box.
     MultiplayerWarning {
@@ -362,6 +364,7 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     None,
+    Realms(realms::RealmsAction),
     Quit,
     Options,
     Accessibility,
@@ -417,6 +420,10 @@ pub struct Title {
     credits_button: Cell<[f32; 4]>,
     /// `Minecraft.allowsMultiplayer()` once the account's attributes are known.
     pub allows_multiplayer: bool,
+    /// Authenticated, game-owning account eligibility. Never stores credentials.
+    pub realms_eligible: bool,
+    pub realms_profile_uuid: Option<String>,
+    pub realms_notification_count: usize,
     /// The ban screens `Gui.addInitialScreens` queued, shown once the title is up.
     ban_queue: std::collections::VecDeque<crate::ban_notice::Notice>,
     /// A ban notice's three buttons as last drawn (`ConfirmLinkScreen`'s row).
@@ -461,6 +468,8 @@ pub struct Title {
     preparing: bool,
     /// The confirm screen's Back: the Data Packs screen reopens.
     reopen_data_packs: bool,
+    realms_create_return: Option<Box<Mode>>,
+    realms_create_cancelled: bool,
 }
 pub(crate) struct Button {
     x: f32,
@@ -721,6 +730,7 @@ impl Mode {
             Self::Recovered { .. } => "world_recovered",
             Self::Error { .. } => "error",
             Self::Multiplayer(screen) => screen.id(),
+            Self::Realms(_) => "realms",
             Self::MultiplayerWarning { .. } => "multiplayer_warning",
             Self::Onboarding(_) => "onboarding",
             Self::BanNotice(_) => "ban_notice",
@@ -769,6 +779,9 @@ impl Title {
             warning_check: Cell::new([0.0; 4]),
             credits_button: Cell::new([0.0; 4]),
             allows_multiplayer: true,
+            realms_eligible: false,
+            realms_profile_uuid: None,
+            realms_notification_count: 0,
             ban_queue: Default::default(),
             ban_buttons: Cell::new([(0.0, 0.0); 3]),
             backup: None,
@@ -791,6 +804,8 @@ impl Title {
             confirm_experiments: RefCell::new(None),
             preparing: false,
             reopen_data_packs: false,
+            realms_create_return: None,
+            realms_create_cancelled: false,
         }
     }
     /// Vanilla bypasses the selector when there are no saves.
@@ -856,12 +871,45 @@ impl Title {
         self.icons.borrow_mut().clear();
         row
     }
+    /// RealmsCreateWorldFlow uses the regular editor, then uploads its settings.
+    pub fn begin_realms_create(&mut self, seed: String) {
+        if !matches!(self.mode, Mode::Realms(_)) {
+            return;
+        }
+        let mut mode = Self::new_world();
+        if let Mode::Create { seed: value, .. } = &mut mode {
+            *value = seed;
+        }
+        self.realms_create_return = Some(Box::new(std::mem::replace(&mut self.mode, mode)));
+        self.realms_create_cancelled = false;
+        self.focused_button = None;
+        self.preparing = true;
+    }
+    /// Called after the owner intercepts Action::Create; keeps pack files for upload.
+    pub fn finish_realms_create(&mut self) {
+        if let Some(previous) = self.realms_create_return.take() {
+            self.mode = *previous;
+            if let Mode::Realms(state) = &mut self.mode {
+                state.set_loading(false);
+            }
+            self.preparing = false;
+            self.focused_button = None;
+        }
+    }
+    pub fn take_realms_create_cancelled(&mut self) -> bool {
+        std::mem::take(&mut self.realms_create_cancelled)
+    }
     fn cancel_create(&mut self) {
         // removeTempDataPackDir.
         if let Mode::Create { options, .. } = &self.mode
             && let Some(dir) = &options.pack_dir
         {
             let _ = std::fs::remove_dir_all(dir);
+        }
+        if self.realms_create_return.is_some() {
+            self.finish_realms_create();
+            self.realms_create_cancelled = true;
+            return;
         }
         if self.create_return_to_main {
             self.mode = Mode::Main;
@@ -1146,6 +1194,10 @@ impl Title {
     pub fn scroll_worlds(&mut self, delta: f32, cursor: (f32, f32), size: (f32, f32)) -> bool {
         if let Some(rules) = self.rules.get_mut() {
             rules.wheel(delta, size.1.ceil());
+            return false;
+        }
+        if let Mode::Realms(state) = &mut self.mode {
+            state.scroll(delta, size);
             return false;
         }
         if let Mode::Multiplayer(screen) = &mut self.mode {
@@ -1716,8 +1768,16 @@ impl Title {
                         cx - 100.0,
                         y + 48.0,
                         200.0,
-                        &lang::get_or("menu.online", "Minecraft Realms"),
-                        false,
+                        &if self.realms_notification_count > 0 {
+                            format!(
+                                "{} ({})",
+                                lang::get("menu.online"),
+                                self.realms_notification_count
+                            )
+                        } else {
+                            lang::get_or("menu.online", "Minecraft Realms")
+                        },
+                        self.allows_multiplayer,
                         0,
                     ),
                     b(
@@ -2141,6 +2201,7 @@ impl Title {
                     .collect()
             }
             Mode::Backup { .. } => Vec::new(),
+            Mode::Realms(state) => state.buttons(w, h),
             Mode::Multiplayer(screen) => screen
                 .buttons(w, h)
                 .into_iter()
@@ -2331,6 +2392,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     ),
                 ),
             ),
+            Mode::Realms(state) => ScreenInfo::new("realms", state.title()),
             Mode::Multiplayer(_) => return None,
         };
         Some(info)
@@ -3081,6 +3143,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 self.ban_buttons
                     .set([layout.buttons[0], layout.buttons[1], layout.buttons[2]]);
             }
+            Mode::Realms(state) => {
+                state.draw(atlas, batch, &mut self.caret.borrow_mut(), self.started)
+            }
             Mode::Multiplayer(screen) => screen.draw(
                 atlas,
                 batch,
@@ -3355,6 +3420,17 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 Action::None
             }
             (Mode::Main, Some(2)) => Action::Quit,
+            (Mode::Main, Some(0)) => self.open_realms(),
+            (Mode::Realms(state), hit) => {
+                let (action, exit) = state.press(hit, x, y, (w, h));
+                if exit {
+                    self.mode = Mode::Main;
+                }
+                if hit.is_none() {
+                    self.focused_button = None;
+                }
+                action
+            }
             (Mode::BanNotice(_), Some(id @ 120..=122)) => {
                 // BanNoticeScreens' callback: Open in Browser opens the link, Copy copies it
                 // and answers no; all of them run `next`.
@@ -3739,6 +3815,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
         match &mut self.mode {
             Mode::Multiplayer(screen) => screen.focused_text(),
+            Mode::Realms(state) => state.focused_text(),
             mode => caret_field(mode, self.search_focused, &mut self.search),
         }
     }
@@ -3808,6 +3885,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 .filter(|(id, _)| id == focus)
                 .map(|(_, rect)| rect),
             Mode::Multiplayer(screen) => screen.focused_box((w, h)),
+            Mode::Realms(state) => state.focused_rect((w, h)),
             Mode::CreateBuffet { buffet, .. } if buffet.query_focused => {
                 Some(buffet::search_box(w))
             }
@@ -3903,6 +3981,18 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             let sound = matches!(action, Action::Play { .. });
             return (action, sound);
         }
+        if self.focused_button.is_none()
+            && matches!(&self.mode, Mode::Realms(state) if state.page == realms::Page::List && state.selected.is_some())
+        {
+            if let Some(button) = self
+                .buttons(size.0, size.1)
+                .into_iter()
+                .find(|b| b.id == 10 && b.enabled)
+            {
+                return (self.click_action(button.x, button.y, size, Some(10)), true);
+            }
+            return (Action::None, false);
+        }
         if let Some(id) = self.focused_button {
             let (w, h) = size;
             let buttons = self.buttons(w, h);
@@ -3950,6 +4040,18 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     /// Tab navigation through widgets and fields in either forward or reverse order.
     pub fn tab_dir(&mut self, reverse: bool, size: (f32, f32)) {
         if self.rules.get_mut().is_some() {
+            return;
+        }
+        if matches!(self.mode, Mode::Realms(_)) {
+            let enabled: Vec<u8> = self
+                .buttons(size.0, size.1)
+                .iter()
+                .filter(|b| b.enabled)
+                .map(|b| b.id)
+                .collect();
+            if let Mode::Realms(state) = &mut self.mode {
+                state.tab(reverse, &enabled, &mut self.focused_button);
+            }
             return;
         }
         if matches!(self.mode, Mode::Multiplayer(_)) {
@@ -4104,6 +4206,13 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             return;
         }
         if self.focused_button.is_none()
+            && let Mode::Realms(state) = &mut self.mode
+            && matches!(key, KeyCode::ArrowUp | KeyCode::ArrowDown)
+        {
+            state.arrow(key == KeyCode::ArrowUp, size);
+            return;
+        }
+        if self.focused_button.is_none()
             && let Mode::Multiplayer(screen) = &mut self.mode
             && matches!(key, KeyCode::ArrowUp | KeyCode::ArrowDown)
             && screen.arrow(key == KeyCode::ArrowUp, shift, size, &self.saves)
@@ -4206,6 +4315,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         if let Mode::Multiplayer(screen) = &self.mode {
             std::mem::discriminant(screen).hash(&mut hasher);
         }
+        if let Mode::Realms(state) = &self.mode {
+            state.page.hash(&mut hasher);
+        }
         self.rules.borrow().is_some().hash(&mut hasher);
         hasher.finish()
     }
@@ -4216,6 +4328,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             Mode::Select { .. } => self.search_focused = false,
             Mode::Edit { focused, .. } => *focused = false,
             Mode::Create { focus, .. } => *focus = 2,
+            Mode::Realms(state) => state.blur(),
             _ => {}
         }
     }
@@ -4450,6 +4563,13 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         {
             return;
         }
+        if let Mode::Realms(state) = &mut self.mode {
+            if state.back() {
+                self.mode = Mode::Main;
+            }
+            self.focused_button = None;
+            return;
+        }
         match &self.mode {
             // OptimizeWorldScreen: `shouldCloseOnEsc` is false; the Backup wait takes no input.
             Mode::Backup { .. } | Mode::Optimize { .. } => {}
@@ -4546,6 +4666,7 @@ fn caret_field<'a>(
             _ => None,
         },
         Mode::Multiplayer(screen) => screen.focused_text(),
+        Mode::Realms(state) => state.focused_text(),
         Mode::CreateFlat { flat, .. } if flat.page == flat::Page::Presets && flat.share_focused => {
             Some((FLAT_SHARE, &mut flat.share, 1230))
         }

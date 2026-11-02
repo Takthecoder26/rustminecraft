@@ -83,6 +83,8 @@ impl ServerPackState {
 #[derive(Default)]
 pub(super) struct ServerPackState {
     packs: ServerPacks,
+    realms_result: Option<(u128, Option<bool>)>,
+    realms_pack_ready: bool,
     /// `downloads/` in the game folder, opened at the first download.
     queue: Option<download::Queue>,
     pub(super) prompt: Option<PackPrompt>,
@@ -242,10 +244,33 @@ impl Game<'_> {
         let entry = servers::load(&file).into_iter().find(|s| s.ip == address);
         let setting = entry.as_ref().and_then(|e| e.accept_textures);
         state.address = entry.map(|e| e.ip);
-        state.packs.connect(Prompt::for_server(setting));
+        let prompt = if std::mem::take(&mut state.realms_pack_ready) {
+            Prompt::Allowed
+        } else {
+            Prompt::for_server(setting)
+        };
+        state.packs.connect(prompt);
     }
+    pub(super) fn begin_realms_pack(&mut self, id: u128, path: PathBuf) {
+        self.server_packs.realms_result = Some((id, None));
+        self.server_packs.packs.connect(Prompt::Allowed);
+        self.server_packs.packs.push_local(id, path);
+    }
+
+    pub(super) fn take_realms_pack_result(&mut self) -> Option<bool> {
+        let (_, result) = self.server_packs.realms_result?;
+        if let Some(ok) = result {
+            self.server_packs.realms_result = None;
+            self.server_packs.realms_pack_ready = ok;
+        }
+        result
+    }
+
     /// `Minecraft.clearDownloadedResourcePacks`: every server pack goes at once.
     pub(super) fn server_packs_disconnect(&mut self) {
+        self.server_packs.realms_result = None;
+        self.server_packs.realms_pack_ready = false;
+        self.realms.connected_realm = None;
         self.server_packs.prompt = None;
         self.server_packs.notifiers.clear();
         self.server_packs.packs.disconnect();
@@ -376,6 +401,20 @@ impl Game<'_> {
             }
         }
         for (id, status) in self.server_packs.packs.take_replies() {
+            if let Some((watch, result)) = &mut self.server_packs.realms_result
+                && *watch == id
+            {
+                match status {
+                    action::SUCCESSFULLY_LOADED => *result = Some(true),
+                    action::FAILED_DOWNLOAD
+                    | action::FAILED_RELOAD
+                    | action::DISCARDED
+                    | action::DECLINED
+                    | action::INVALID_URL => *result = Some(false),
+                    _ => {}
+                }
+                continue;
+            }
             self.send_pack_status(id, status);
         }
     }

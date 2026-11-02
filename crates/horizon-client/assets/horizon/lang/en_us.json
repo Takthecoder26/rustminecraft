@@ -1,4 +1,5 @@
 {
+  "horizon.realms.sign_in_required": "Sign in to a Microsoft account that owns Minecraft in the launcher, then restart the game to use Minecraft Realms.",
   "horizon.options.controller": "Controller",
   "horizon.options.vibration": "Vibration",
   "horizon.options.adaptive_triggers": "Adaptive Triggers",
