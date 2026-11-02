@@ -482,10 +482,10 @@ impl Game<'_> {
         let mut trial_keys = Vec::new();
         let mut vault_keys = Vec::new();
         for (&pos, be) in &self.world.block_entities {
-            let d = (pos.0 - center[0])
-                .abs()
-                .max((pos.1 - center[1]).abs())
-                .max((pos.2 - center[2]).abs());
+            let d = pos.0
+                .abs_diff(center[0])
+                .max(pos.1.abs_diff(center[1]))
+                .max(pos.2.abs_diff(center[2]));
             if d <= 64 {
                 match be {
                     BlockEntity::Spawner(_) => keys.push(pos),
