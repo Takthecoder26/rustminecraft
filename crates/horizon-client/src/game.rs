@@ -15402,8 +15402,10 @@ impl Game<'_> {
             renderer.clear_lods();
         }
     }
-    /// Far terrain on a server: its own directory per address and dimension,
-    /// keyed by the level and the hashed seed it sent (`lod::store`).
+    /// Far terrain on a server: its own directory per address and dimension
+    /// in the game's home, keyed by the level and the hashed seed it sent
+    /// (`lod::store`). The servers played on longest ago make room when all
+    /// of them take more than the store's cap (`store::trim_servers`).
     fn remote_lod_source(
         remote: &remote::Remote,
         registry: &horizon_world::registry::BlockRegistry,
@@ -15411,11 +15413,9 @@ impl Game<'_> {
     ) -> Option<Arc<dyn horizon_client::streaming::LodSource>> {
         use horizon_client::lod::store;
         let (level, seed) = &remote.far_world;
-        let dir = store::server_dir(
-            &std::env::current_dir().ok()?,
-            &remote.session.address,
-            level,
-        );
+        let home = horizon_client::logging::game_home();
+        store::trim_servers(&home, &remote.session.address);
+        let dir = store::server_dir(&home, &remote.session.address, level);
         let key = store::store_key(registry, biomes, store::world_id(level, *seed));
         Some(Arc::new(store::RemoteSource::new(store::FarStore::open(
             dir, key, true,

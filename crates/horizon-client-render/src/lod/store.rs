@@ -1129,13 +1129,112 @@ impl LodSampler for RemoteSampler {
     }
 }
 
-/// The directory of a server's far terrain in the game directory.
-pub fn server_dir(game_dir: &Path, address: &str, dimension: &str) -> PathBuf {
-    game_dir
-        .join(".horizon-cache")
-        .join("far-terrain")
+/// Where the far terrain of the servers played on is kept, in the game's
+/// home (`logging::game_home`: where the launcher runs the game and keeps
+/// its saves and the packs servers send).
+pub fn servers_dir(home: &Path) -> PathBuf {
+    home.join(".horizon-cache").join("far-terrain")
+}
+
+/// The directory of a server's far terrain, in `servers_dir`.
+pub fn server_dir(home: &Path, address: &str, dimension: &str) -> PathBuf {
+    servers_dir(home)
         .join(dir_name(address))
         .join(dir_name(dimension))
+}
+
+/// The most the far terrain of every server played on takes on disk.
+const SERVERS_CAP: u64 = 2 << 30;
+/// The file in a server's directory that says when it was last played on,
+/// in seconds since 1970.
+const LAST_PLAYED: &str = "last-played";
+
+/// Marks the server at `address` played on now, then, on a thread of its
+/// own, removes the far terrain of the servers played on longest ago until
+/// all of it fits in `SERVERS_CAP`. The server played on now, and any whose
+/// store is still open, are kept.
+pub fn trim_servers(home: &Path, address: &str) {
+    let root = servers_dir(home);
+    let current = root.join(dir_name(address));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    if std::fs::create_dir_all(&current).is_ok() {
+        let _ = std::fs::write(current.join(LAST_PLAYED), now.to_string());
+    }
+    let _ = thread::Builder::new()
+        .name("Far store trim".into())
+        .spawn(move || {
+            horizon_threads::idle_current();
+            trim(&root, &current, SERVERS_CAP);
+        });
+}
+
+/// `trim_servers`' work: oldest first until the servers in `root` fit `cap`.
+fn trim(root: &Path, current: &Path, cap: u64) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut servers: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| {
+            let path = entry.path();
+            let (size, newest) = usage(&path);
+            let played = std::fs::read_to_string(path.join(LAST_PLAYED))
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .map_or(newest, |secs| {
+                    std::time::UNIX_EPOCH + Duration::from_secs(secs)
+                });
+            (played, size, path)
+        })
+        .collect();
+    let mut total: u64 = servers.iter().map(|(_, size, _)| size).sum();
+    servers.sort_by_key(|(played, ..)| *played);
+    for (_, size, path) in servers {
+        if total <= cap {
+            break;
+        }
+        let open = OPEN
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(at, store)| at.starts_with(&path) && store.strong_count() > 0);
+        if path == current || open {
+            continue;
+        }
+        if std::fs::remove_dir_all(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// The bytes of the files under `dir`, and when the newest was written.
+fn usage(dir: &Path) -> (u64, std::time::SystemTime) {
+    let mut size = 0;
+    let mut newest = std::time::UNIX_EPOCH;
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            // Not followed through links: neither is the removal.
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                dirs.push(entry.path());
+            } else {
+                size += meta.len();
+                if let Ok(written) = meta.modified() {
+                    newest = newest.max(written);
+                }
+            }
+        }
+    }
+    (size, newest)
 }
 
 #[cfg(test)]
