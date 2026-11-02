@@ -386,7 +386,13 @@ impl Game<'_> {
                         horizon_client::shader_pack_list::scan(&Self::shader_packs_dir());
                 }
                 // Saved; the next frame's `shader_pack_inputs` loads the pick.
-                Event::ShaderPack => self.settings.save(&Self::options_path()),
+                Event::ShaderPack => {
+                    self.settings.save(&Self::options_path());
+                    let mut maps = horizon_client::sprites::labpbr_maps();
+                    if super::shader_packs::refresh_material_maps(&self.settings, &mut maps) {
+                        self.reload_packs();
+                    }
+                }
                 Event::OpenShaderOptions => self.open_shader_options(),
                 Event::ShaderOptions => self.save_shader_options(),
                 Event::NativePackOptions(i) => {

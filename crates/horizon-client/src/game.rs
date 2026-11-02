@@ -18850,6 +18850,8 @@ impl GameCpuResources {
 
 /// The data the background loader produces for `Game::new`.
 struct Loaded {
+    /// The background worker's shader selection, before the startup menu can change it.
+    material_maps: bool,
     game_cpu: Option<GameCpuResources>,
     renderer_cpu: Option<horizon_client::gfx::PreparedTextures>,
     root: PathBuf,
@@ -19513,7 +19515,8 @@ fn load_resources(
     // server thread's (horizon_threads::jobs), sized before any world opens.
     horizon_threads::jobs::configure(threads);
     horizon_client::sprites::set_texture_budget(settings.horizon.texture_budget_mib);
-    horizon_client::sprites::set_labpbr_maps(shader_packs::picks_native_pack(settings));
+    let material_maps = shader_packs::needs_material_maps(settings);
+    horizon_client::sprites::set_labpbr_maps(material_maps);
     // Stage A: the menu bundle (atlas and panorama). With a loading screen it is
     // published at once so the title screen can appear while the world bundle
     // loads; the synchronous launch instead carries it in `Loaded`.
@@ -19737,6 +19740,7 @@ fn load_resources(
         (None, None)
     };
     Ok(Loaded {
+        material_maps,
         game_cpu,
         renderer_cpu,
         root,
@@ -19947,6 +19951,7 @@ fn prepare_renderer_textures(pack: &PackResources) -> horizon_client::gfx::Prepa
         assets.pbr_size,
         assets.texture_layers,
     )
+    .with_material_animations(&assets.material_animations)
 }
 
 /// Upload pack textures and create the renderer on the window's device.
@@ -20619,8 +20624,12 @@ impl Loading {
             );
         }
     }
-    fn finish(&mut self, loaded: Loaded) -> Result<Option<split::Split<'static>>> {
+    fn finish(&mut self, mut loaded: Loaded) -> Result<Option<split::Split<'static>>> {
         let handoff_at = Instant::now();
+        // This owner is handed over once; split views do not reconcile a process-global flag
+        // every frame. A selection made while the worker loaded gets one pending reload.
+        let reload_materials =
+            shader_packs::refresh_material_maps(&self.settings, &mut loaded.material_maps);
         let mut options = self.options.take().ok_or("loading already finished")?;
         options.resources = loaded.root.clone();
         // StartupMenu owns world selection until it can hand it to Game.
@@ -20688,6 +20697,9 @@ impl Loading {
         game.panorama_rotation = self.panorama_rotation;
         self.menu.handoff(&mut game);
         game.apply_settings();
+        if reload_materials {
+            game.reload_packs();
+        }
         game.previous = Instant::now();
         log::info!(
             "Horizon: startup handoff {} ms (renderer {} ms, start_game {} ms)",

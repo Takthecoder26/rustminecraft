@@ -103,6 +103,7 @@ pub struct RenderAssets {
     pub pbr_normals: Vec<u8>,
     pub pbr_specular: Vec<u8>,
     pub pbr_size: u32,
+    pub material_animations: [Vec<crate::sprites::SpriteAnimation>; 2],
     /// OptiFine connected textures (empty without `optifine/ctm` files).
     pub connected: crate::connected::ConnectedTextures,
     /// Fusion connected textures (empty without Fusion's connecting textures and models).
@@ -309,6 +310,7 @@ impl RenderAssets {
             pbr_normals: sprites.normals,
             pbr_specular: sprites.specular,
             pbr_size: sprites.pbr_size,
+            material_animations: sprites.material_animations,
             connected,
             fusion,
         })

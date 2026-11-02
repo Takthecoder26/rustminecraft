@@ -148,6 +148,7 @@ pub mod pack_draw;
 mod pack_entities;
 mod pack_hand;
 mod pack_images;
+mod pack_materials;
 mod pack_post;
 mod pack_shadow;
 mod pack_sky;
@@ -922,6 +923,8 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     /// The resource packs' LabPBR maps (normals, specular), for native shader packs.
     pbr_maps: Option<[wgpu::Texture; 2]>,
+    pbr_banks: Option<[Vec<wgpu::Texture>; 2]>,
+    material_animations: [Option<pack_materials::MaterialAnimator>; 2],
     lightmap: wgpu::Texture,
     /// The block sprites, `sprite_split` layers per array (the first is
     /// `sprites` in terrain.wgsl, the others `sprites_1`...).
@@ -1282,6 +1285,7 @@ pub struct PreparedTextures {
     forcefield: (Vec<u8>, u32),
     /// The LabPBR maps' mip chains (normals, specular), their levels, layers and size.
     pbr: Option<(Vec<u8>, Vec<u8>, u32, u32, u32)>,
+    material_animations: [Vec<SpriteAnimation>; 2],
 }
 /// Every level of `layers` square RGBA layers of `size`, each the mean of four texels of the
 /// one above, layer major: the LabPBR maps' mips (their channels are data, not colour).
@@ -1344,6 +1348,7 @@ impl PreparedTextures {
             split,
             forcefield: mip_chain(forcefield.0, forcefield.1, &[], 0, 1),
             pbr: None,
+            material_animations: Default::default(),
         }
     }
 
@@ -1359,6 +1364,11 @@ impl PreparedTextures {
                 size,
             ));
         }
+        self
+    }
+
+    pub fn with_material_animations(mut self, animations: &[Vec<SpriteAnimation>; 2]) -> Self {
+        self.material_animations = animations.clone();
         self
     }
 
@@ -2548,40 +2558,59 @@ impl Renderer {
         };
         let mut mip_levels = 1;
         let gl = adapter.get_info().backend == wgpu::Backend::Gl;
-        // The resource packs' LabPBR maps, for native shader packs: one array each, cut to
-        // the layers the GPU has (`block_normal_map` gives the default past them).
-        let pbr_maps = prepared
+        // Material maps use the same layer split as colour sprites; no layers are dropped
+        // when a modded resource set exceeds one GPU array.
+        let material_size = prepared.pbr.as_ref().map_or(16, |p| p.4);
+        let pbr_banks = prepared
             .pbr
             .map(|(normals, specular, levels, layers, size)| {
-                let kept = layers.min(device.limits().max_texture_array_layers);
-                let count = array_layers(kept, gl);
-                [("LabPBR normals", normals), ("LabPBR specular", specular)].map(
-                    |(label, mut data)| {
-                        // The extra layers are empty.
-                        let layer_bytes = data.len() / layers as usize;
-                        data.resize(layer_bytes * count as usize, 0);
-                        device.create_texture_with_data(
-                            &queue,
-                            &wgpu::TextureDescriptor {
-                                label: Some(label),
-                                size: wgpu::Extent3d {
-                                    width: size,
-                                    height: size,
-                                    depth_or_array_layers: count,
+                [("LabPBR normals", normals), ("LabPBR specular", specular)].map(|(label, data)| {
+                    let layer_bytes = data.len() / layers.max(1) as usize;
+                    (0..layers.div_ceil(split))
+                        .map(|bank| {
+                            let first = bank * split;
+                            let kept = (layers - first).min(split);
+                            let count = array_layers(kept, gl);
+                            let mut bytes = data[first as usize * layer_bytes
+                                ..(first + kept) as usize * layer_bytes]
+                                .to_vec();
+                            bytes.resize(layer_bytes * count as usize, 0);
+                            device.create_texture_with_data(
+                                &queue,
+                                &wgpu::TextureDescriptor {
+                                    label: Some(label),
+                                    size: wgpu::Extent3d {
+                                        width: size,
+                                        height: size,
+                                        depth_or_array_layers: count,
+                                    },
+                                    mip_level_count: levels,
+                                    sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: wgpu::TextureFormat::Rgba8Unorm,
+                                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                                        | wgpu::TextureUsages::COPY_SRC
+                                        | wgpu::TextureUsages::COPY_DST,
+                                    view_formats: &[],
                                 },
-                                mip_level_count: levels,
-                                sample_count: 1,
-                                dimension: wgpu::TextureDimension::D2,
-                                format: wgpu::TextureFormat::Rgba8Unorm,
-                                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                                view_formats: &[],
-                            },
-                            wgpu::util::TextureDataOrder::LayerMajor,
-                            &data,
-                        )
-                    },
-                )
+                                wgpu::util::TextureDataOrder::LayerMajor,
+                                &bytes,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
             });
+        let pbr_maps = pbr_banks
+            .as_ref()
+            .map(|maps| [maps[0][0].clone(), maps[1][0].clone()]);
+        let material_animations = std::array::from_fn(|kind| {
+            (!prepared.material_animations[kind].is_empty()).then(|| {
+                pack_materials::MaterialAnimator::new(
+                    &prepared.material_animations[kind],
+                    material_size,
+                )
+            })
+        });
         let sprite_textures: Vec<wgpu::Texture> = prepared
             .sprites
             .into_iter()
@@ -4010,6 +4039,8 @@ impl Renderer {
             group,
             globals,
             pbr_maps,
+            pbr_banks,
+            material_animations,
             lightmap,
             sprite_textures,
             sprite_unused,
@@ -5445,6 +5476,11 @@ impl Renderer {
         let post = pack.map(|post| {
             let world = pack_post::World {
                 atlas: self.pack_atlas.as_ref().map(|a| (a.view.clone(), a.size())),
+                materials: self
+                    .pack_atlas
+                    .as_ref()
+                    .and_then(|a| a.materials.as_ref())
+                    .map(|m| [m[0].view.clone(), m[1].view.clone()]),
                 lightmap: self.lightmap_view.clone(),
                 gui_size: self
                     .hud
@@ -5595,6 +5631,27 @@ impl Renderer {
             );
             if let Some(atlas) = &mut atlas {
                 atlas.separate_ao = self.separate_ao;
+                if let Some(maps) = &self.pbr_banks {
+                    let normals = pack_atlas::PackAtlas::new(
+                        &self.device,
+                        &mut encoder,
+                        &maps[0],
+                        self.sprite_split,
+                        layers,
+                        maps[0][0].width(),
+                    );
+                    let specular = pack_atlas::PackAtlas::new(
+                        &self.device,
+                        &mut encoder,
+                        &maps[1],
+                        self.sprite_split,
+                        layers,
+                        maps[1][0].width(),
+                    );
+                    if let (Some(normals), Some(specular)) = (normals, specular) {
+                        atlas.materials = Some([Box::new(normals), Box::new(specular)]);
+                    }
+                }
             }
             self.pack_atlas = atlas;
             self.queue.submit([encoder.finish()]);
@@ -5822,6 +5879,19 @@ impl Renderer {
             active,
             self.own_timing.as_mut(),
         );
+        if let Some(maps) = &self.pbr_banks {
+            for (kind, animator) in self.material_animations.iter_mut().enumerate() {
+                if let Some(animator) = animator {
+                    let changed =
+                        animator.animate(&self.queue, &maps[kind], self.sprite_split, tick);
+                    if let Some(materials) =
+                        self.pack_atlas.as_ref().and_then(|a| a.materials.as_ref())
+                    {
+                        materials[kind].copy(encoder, &maps[kind], changed.iter().copied());
+                    }
+                }
+            }
+        }
         if let Some(atlas) = &self.pack_atlas {
             atlas.copy(
                 encoder,

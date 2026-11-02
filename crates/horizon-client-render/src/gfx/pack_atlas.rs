@@ -14,6 +14,7 @@ pub(super) struct PackAtlas {
     split: u32,
     /// OptiFine/Iris separate ambient occlusion: pass vertex alpha to hz_Color.a.
     pub separate_ao: bool,
+    pub materials: Option<[Box<PackAtlas>; 2]>,
 }
 
 impl PackAtlas {
@@ -60,6 +61,7 @@ impl PackAtlas {
             sprite,
             split,
             separate_ao: false,
+            materials: None,
         };
         atlas.copy(encoder, arrays, 0..layers);
         Some(atlas)
@@ -354,6 +356,7 @@ mod tests {
             sprite: 16,
             split: 1,
             separate_ao: false,
+            materials: None,
         };
         let inputs_default = atlas.terrain_inputs(false);
         assert!(

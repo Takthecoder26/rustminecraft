@@ -422,10 +422,21 @@ fn walked_minecraft_texture(name: &str) -> bool {
 /// files already packed: generated ones (`paletted_permutations` such as the
 /// armour trim sprites, `unstitch` regions) and files listed under another id,
 /// such as other namespaces' item textures; and the animated ones' names.
+fn material_companion(root: &Path, name: &str) -> bool {
+    name.strip_suffix("_n")
+        .or_else(|| name.strip_suffix("_s"))
+        .is_some_and(|base| crate::atlas_sources::texture_path(root, base, "textures").is_file())
+}
+
+#[cfg(test)]
+#[path = "hud/material_tests.rs"]
+mod material_tests;
+
 fn atlas_sprites(root: &Path, packed: &[PackedImage]) -> (Vec<PackedImage>, Vec<String>) {
     use crate::atlas_sources::{self, SpriteOrigin};
     let have: std::collections::HashSet<&str> = packed.iter().map(|i| i.0.as_str()).collect();
-    let textures = atlas_sources::list_textures(root);
+    let mut textures = atlas_sources::list_textures(root);
+    textures.retain(|id| !material_companion(root, id));
     // Each new name with its origins in the atlases' order: the first that
     // loads is the sprite. They load at once (a content pack's atlases list
     // tens of thousands of files), and come out in the order a load of one
@@ -1049,9 +1060,7 @@ impl HudAtlas {
                 }
             };
             // LabPBR's maps beside a texture are the world's (sprites.rs), not images to draw.
-            if let Some(base) = name.strip_suffix("_n").or_else(|| name.strip_suffix("_s"))
-                && textures.join(format!("{base}.png")).is_file()
-            {
+            if material_companion(root, &name) {
                 return None;
             }
             let image = decode(path)

@@ -108,17 +108,61 @@ fn active_pack<'a>(picked: &'a str, mods: &horizon_client::mod_list::ModList) ->
     }
 }
 
-/// Whether the pack `settings` pick (or `HORIZON_SHADER_PACK`) is one of Horizon's own: only
-/// then do resource loads read the resource packs' LabPBR maps (`sprites::set_labpbr_maps`).
-pub(super) fn picks_native_pack(settings: &horizon_client::settings::Settings) -> bool {
+/// Both standard and native packs can consume the resource packs' material maps.
+pub(super) fn needs_material_maps(settings: &horizon_client::settings::Settings) -> bool {
     let dev = std::env::var("HORIZON_SHADER_PACK").ok();
     let picked = active_pack(
         dev.as_deref().unwrap_or(&settings.horizon.shader_pack),
         &settings.mods,
     );
     !picked.is_empty()
-        && horizon_shader_api::package::is_pack(&Game::shader_packs_dir().join(picked))
 }
+
+/// Reconcile the resource owner's request, rather than another split view's global decode flag.
+/// Record it before queuing a reload, so the same handoff cannot request it twice.
+pub(super) fn refresh_material_maps(
+    settings: &horizon_client::settings::Settings,
+    requested: &mut bool,
+) -> bool {
+    let maps = needs_material_maps(settings);
+    if maps == *requested {
+        return false;
+    }
+    *requested = maps;
+    horizon_client::sprites::set_labpbr_maps(maps);
+    true
+}
+
+/// Resource-pack format declarations affect shader preprocessing, not the encoded pixels.
+fn define_material_format(macros: &mut Macros, resources: &std::path::Path) {
+    let path = resources.join("assets/minecraft/optifine/texture.properties");
+    let Ok(text) = horizon_core::prepared_files::read_to_string(&path) else {
+        return;
+    };
+    let properties = Properties::parse(&text, macros);
+    let Some(format) = properties.get("format").map(str::trim) else {
+        return;
+    };
+    let (format, version) = format
+        .split_once('/')
+        .map_or((format, None), |(f, v)| (f, Some(v)));
+    if format != "lab-pbr" {
+        return;
+    }
+    macros.define("MC_TEXTURE_FORMAT_LAB_PBR", "");
+    if let Some(version) =
+        version.filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    {
+        macros.define(
+            format!("MC_TEXTURE_FORMAT_LAB_PBR_{}", version.replace('.', "_")),
+            "",
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "shader_packs/material_tests.rs"]
+mod material_tests;
 
 /// The ids a pack gives entities and block entities (4.1, 5.3), for the spans of the entity
 /// geometry.
@@ -200,6 +244,7 @@ impl Game<'_> {
                     Ok(pack) => {
                         let mut macros = Macros::standard();
                         renderer.define_pack_macros(&mut macros);
+                        define_material_format(&mut macros, &self.options.resources);
                         // Its conditionals test the pack's options too.
                         let (properties, notes) =
                             horizon_shaders::read_properties(&pack, &mut macros);

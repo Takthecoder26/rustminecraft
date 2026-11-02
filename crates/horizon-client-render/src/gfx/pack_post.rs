@@ -87,13 +87,7 @@ enum SamplerKind {
 impl SamplerKind {
     fn of(source: Source, filtering: bool) -> Self {
         match source {
-            Source::Color(_)
-            | Source::ShadowColor(_)
-            | Source::Dummy
-            | Source::Normals
-            | Source::Specular
-                if !filtering =>
-            {
+            Source::Color(_) | Source::ShadowColor(_) | Source::Dummy if !filtering => {
                 Self::Nearest
             }
             Source::Depth | Source::Depth1 | Source::Depth2 | Source::ShadowDepth(_, false) => {
@@ -101,8 +95,9 @@ impl SamplerKind {
             }
             Source::Noise => Self::Repeat,
             Source::Shadow | Source::ShadowDepth(_, true) => Self::Comparison,
-            // Blocks look as the game draws them: nearest texels.
-            Source::Atlas => Self::NearestRepeat,
+            // All three material atlases use the same texel selection. Linear sampling
+            // blends unrelated sprites at tile edges and corrupts encoded material IDs.
+            Source::Atlas | Source::Normals | Source::Specular => Self::NearestRepeat,
             Source::Image(_) if filtering => Self::Linear,
             Source::Image(_) => Self::Nearest,
             Source::Custom { blur, clamp, .. } => match (blur && filtering, clamp) {
@@ -111,12 +106,9 @@ impl SamplerKind {
                 (true, false) => Self::Repeat,
                 (false, false) => Self::NearestRepeat,
             },
-            Source::Color(_)
-            | Source::ShadowColor(_)
-            | Source::Dummy
-            | Source::Normals
-            | Source::Specular
-            | Source::Lightmap => Self::Linear,
+            Source::Color(_) | Source::ShadowColor(_) | Source::Dummy | Source::Lightmap => {
+                Self::Linear
+            }
         }
     }
 
@@ -426,6 +418,7 @@ struct Targets {
 pub(super) struct World<'a> {
     /// The block atlas and its size.
     pub atlas: Option<(wgpu::TextureView, [u32; 2])>,
+    pub materials: Option<[wgpu::TextureView; 2]>,
     pub lightmap: wgpu::TextureView,
     /// Terrain's geometry, when the pack draws it.
     pub terrain: Option<Geometry<'a>>,
@@ -548,6 +541,7 @@ pub struct PackPost {
     /// `shaders.properties`' custom uniforms, after the frame's in `uniforms.values`.
     custom: horizon_shaders::Custom,
     atlas: Option<wgpu::TextureView>,
+    materials: Option<[wgpu::TextureView; 2]>,
     lightmap: wgpu::TextureView,
     deferred_pre: u16,
     composite_pre: u16,
@@ -2359,6 +2353,7 @@ impl PackPost {
             center_depth: None,
             custom,
             atlas: world.atlas.as_ref().map(|a| a.0.clone()),
+            materials: world.materials,
             lightmap: world.lightmap,
             deferred_pre: mask(&post.deferred_pre),
             composite_pre: mask(&post.composite_pre),
@@ -2627,8 +2622,16 @@ impl PackPost {
                     Source::Dummy if s.dimension == wgpu::TextureViewDimension::D1 => {
                         &self.dummy_1d
                     }
-                    Source::Normals => &self.dummy_normal,
-                    Source::Specular => &self.dummy_black,
+                    Source::Normals => self
+                        .materials
+                        .as_ref()
+                        .filter(|_| pass.atlas.is_none())
+                        .map_or(&self.dummy_normal, |maps| &maps[0]),
+                    Source::Specular => self
+                        .materials
+                        .as_ref()
+                        .filter(|_| pass.atlas.is_none())
+                        .map_or(&self.dummy_black, |maps| &maps[1]),
                     Source::Dummy => &self.dummy,
                     Source::Image(k) if pass.image_copies & 1 << k != 0 => {
                         self.images[k].copy.as_ref().unwrap_or(&self.dummy)
@@ -4383,3 +4386,7 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_post/material_tests.rs"]
+mod material_tests;

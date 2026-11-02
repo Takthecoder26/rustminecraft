@@ -87,6 +87,8 @@ pub struct Sprites {
     pub normals: Vec<u8>,
     pub specular: Vec<u8>,
     pub pbr_size: u32,
+    /// Normal/specular animations, on the same layer numbering as the colour sprites.
+    pub material_animations: [Vec<SpriteAnimation>; 2],
     /// Still textures by their pixels, their LabPBR maps and mip settings: mods copy vanilla's
     /// textures under their own names, and one layer serves them all (the GPU's array may
     /// hold as few as 2048).
@@ -117,7 +119,7 @@ pub fn set_texture_budget(mib: u32) {
 /// Whether resource loads read the resource packs' LabPBR maps (`set_labpbr_maps`).
 static LABPBR_MAPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Whether resource loads from now on read the resource packs' LabPBR maps beside their block
-/// textures. Only a native shader pack's material stage reads them, so without one they cost
+/// textures. Both standard and native shader packs read them; without a selected pack they cost
 /// neither loading time nor video memory.
 pub fn set_labpbr_maps(on: bool) {
     LABPBR_MAPS.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -126,7 +128,7 @@ pub fn set_labpbr_maps(on: bool) {
 pub fn labpbr_maps() -> bool {
     LABPBR_MAPS.load(std::sync::atomic::Ordering::Relaxed)
 }
-/// Largest array of each LabPBR map, which only a native shader pack reads.
+/// Per-map decode budget, before the shared colour/material array budget is applied.
 const MAX_MAP_BYTES: u64 = DEFAULT_TEXTURE_BUDGET / 4;
 /// Fewer layers than any game has (vanilla's are about 1300): what a map is kept at while
 /// loading assumes at least these many share the array.
@@ -242,10 +244,23 @@ impl Sprites {
         // Prefetched textures nothing inserted.
         self.ready = Default::default();
         let layers = self.native.len().max(1) as u64;
-        let largest = self.native.iter().map(|n| n.0).max().unwrap_or(SPRITE_SIZE);
+        let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
+        let largest = self
+            .native
+            .iter()
+            .map(|n| n.0)
+            .max()
+            .unwrap_or(SPRITE_SIZE)
+            .max(largest_map.unwrap_or(SPRITE_SIZE));
         self.minimum_size = self.native.iter().map(|n| n.0).min().unwrap_or(SPRITE_SIZE);
         let budget = TEXTURE_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
-        let size = side_within(largest, layers, budget);
+        // Keep identical atlas geometry for all three maps and account for their memory
+        // together. A high-resolution normal map may accompany a low-resolution colour map.
+        let size = side_within(
+            largest,
+            layers,
+            budget / if largest_map.is_some() { 3 } else { 1 },
+        );
         if pixels {
             log::info!(
                 "Horizon: block sprites: {layers} layers at {size} px (largest {largest} px, budget {} MiB)",
@@ -256,6 +271,7 @@ impl Sprites {
             self.pixels = Vec::new();
             self.animations = Vec::new();
             self.pbr = Vec::new();
+            self.material_animations = Default::default();
             self.size = size;
             return;
         }
@@ -273,10 +289,7 @@ impl Sprites {
         self.size = size;
         self.normals.clear();
         self.specular.clear();
-        let largest_map = self.pbr.iter().flatten().flatten().map(|m| m.0).max();
-        self.pbr_size = largest_map.map_or(SPRITE_SIZE, |l| {
-            side_within(l.min(size), layers, MAX_MAP_BYTES)
-        });
+        self.pbr_size = size;
         if largest_map.is_some() {
             let pbr_size = self.pbr_size;
             log::info!("Horizon: LabPBR maps at {pbr_size} px, {layers} layers");
@@ -293,6 +306,21 @@ impl Sprites {
                         None => out.extend(none.repeat((pbr_size * pbr_size) as usize)),
                     }
                 }
+            }
+        }
+        for animations in &mut self.material_animations {
+            for animation in animations {
+                animation.frames = Arc::new(
+                    animation
+                        .frames
+                        .iter()
+                        .map(|frame| {
+                            let from = (frame.len() / 4).isqrt() as u32;
+                            let (from, frame) = shrink_map(frame.clone(), from, size);
+                            resample(&frame, from, size)
+                        })
+                        .collect(),
+                );
             }
         }
     }
@@ -513,6 +541,12 @@ impl Sprites {
         self.translucent[l] = self.translucent[s];
         self.mips[l] = self.mips[s];
         self.pbr[l] = self.pbr[s].clone();
+        for animations in &mut self.material_animations {
+            animations.retain(|a| a.layer != layer);
+            if let Some(animation) = animations.iter().find(|a| a.layer == source).cloned() {
+                animations.push(SpriteAnimation { layer, ..animation });
+            }
+        }
         self.animations.retain(|a| a.layer != layer);
         if let Some(animation) = self.animations.iter().find(|a| a.layer == source) {
             let animation = SpriteAnimation {
@@ -626,13 +660,20 @@ impl Sprites {
             .transpose()?;
         let count = frames.len() as u32;
         let layer = u32::try_from(self.native.len())?;
-        let pbr = match name.split_once(':') {
-            Some(_) if labpbr_maps() => {
-                let path = crate::atlas_sources::texture_path(root, name, "textures");
-                ["_n", "_s"].map(|suffix| pbr_map(&path, suffix, count))
-            }
-            _ => [None, None],
+        let materials = if labpbr_maps() {
+            read_material_maps(root, name, animation.as_ref(), count)
+        } else {
+            [None, None]
         };
+        let pbr = materials.each_ref().map(|map| {
+            map.as_ref().map(|map| {
+                let first = map
+                    .clip
+                    .as_ref()
+                    .map_or(0, |clip| clip.sample(0).frame as usize);
+                (map.side, map.frames[first].clone())
+            })
+        });
         let settings = crate::mipmap::Settings {
             native_size: side,
             strategy,
@@ -645,7 +686,10 @@ impl Sprites {
                     .is_some_and(|(_, p)| p.starts_with("item/")),
             dither_cutouts: crate::mipmap::dither_cutouts(),
         };
-        let still = (animation.is_none() && frames.len() == 1).then(|| {
+        let still = (animation.is_none()
+            && frames.len() == 1
+            && materials.iter().flatten().all(|map| map.clip.is_none()))
+        .then(|| {
             use std::hash::{Hash, Hasher};
             let mut maps = std::collections::hash_map::DefaultHasher::new();
             pbr.hash(&mut maps);
@@ -683,6 +727,20 @@ impl Sprites {
             });
         }
         self.mips.push(settings);
+        for (kind, map) in materials.into_iter().enumerate() {
+            if let Some(MaterialMap {
+                frames,
+                clip: Some(clip),
+                ..
+            }) = map
+            {
+                self.material_animations[kind].push(SpriteAnimation {
+                    layer,
+                    frames,
+                    clip,
+                });
+            }
+        }
         self.opaque.push(opaque);
         self.translucent.push(translucent);
         self.pbr.push(pbr);
@@ -723,30 +781,145 @@ fn read_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     Ok((info.width, info.height, pixels))
 }
 
-/// The LabPBR map with `suffix` beside the texture at `path`, whose frames lie in a column of
-/// `count`: its first frame, square, no larger than the maps' array allows any game's
-/// textures (a 512x pack's maps would otherwise fill the memory while loading).
-fn pbr_map(path: &Path, suffix: &str, count: u32) -> Option<(u32, Vec<u8>)> {
+/// A material map retains encoded data; the shader, rather than the loader, decodes
+/// LabPBR/oldPBR channels. Its own metadata wins, otherwise it follows the colour timeline.
+struct MaterialMap {
+    pub side: u32,
+    pub frames: Arc<Vec<Vec<u8>>>,
+    pub clip: Option<Arc<AnimationClip>>,
+}
+fn read_material_maps(
+    root: &Path,
+    name: &str,
+    animation: Option<&AnimationMetadata>,
+    colour_frames: u32,
+) -> [Option<MaterialMap>; 2] {
+    // Connected-texture tiles may be named by their resource path outside textures/.
+    let path = if name.contains(':') {
+        crate::atlas_sources::texture_path(root, name, "textures")
+    } else {
+        root.join(name)
+    };
+    ["_n", "_s"].map(|suffix| material_map(&path, suffix, animation, colour_frames))
+}
+
+/// Infer an explicitly sized colour animation at the material sheet's own pixel scale.
+/// A square companion is ambiguous with a high-resolution static map: keep it static
+/// unless it supplies its own metadata. Ordinary square-frame strips use the fallback.
+fn inherited_material_size(
+    metadata: &AnimationMetadata,
+    [width, height]: [u32; 2],
+    count: u32,
+) -> Option<(u32, u32)> {
+    if width == height || count <= 1 {
+        return None;
+    }
+    let (w, h) = (
+        u128::try_from(metadata.width?).ok()?,
+        u128::try_from(metadata.height?).ok()?,
+    );
+    let numerator = u128::from(width) * u128::from(height) * w;
+    let denominator = u128::from(count) * h;
+    if numerator % denominator != 0 {
+        return None;
+    }
+    let squared = numerator / denominator;
+    let frame_width = squared.isqrt();
+    if frame_width * frame_width != squared || (frame_width * h) % w != 0 {
+        return None;
+    }
+    let frame_height = frame_width * h / w;
+    let (w, h) = (
+        u32::try_from(frame_width).ok()?,
+        u32::try_from(frame_height).ok()?,
+    );
+    (w > 0
+        && h > 0
+        && width.is_multiple_of(w)
+        && height.is_multiple_of(h)
+        && width / w * (height / h) == count)
+        .then_some((w, h))
+}
+
+fn material_map(
+    path: &Path,
+    suffix: &str,
+    inherited: Option<&AnimationMetadata>,
+    colour_frames: u32,
+) -> Option<MaterialMap> {
     let stem = path.file_stem()?.to_str()?;
     let map = path.with_file_name(format!("{stem}{suffix}.png"));
     let (map_width, map_height, pixels) = read_rgba(&map).ok()?;
-    let (w, h) = (map_width, map_height / count.max(1));
-    if w == 0 || h == 0 {
+    let own = horizon_core::prepared_files::read_to_string(&map.with_extension("png.mcmeta"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|meta| meta.get("animation").cloned())
+        .and_then(|meta| AnimationMetadata::from_json(&meta.to_string()).ok());
+    let metadata = own.as_ref().or(inherited);
+    let (width, height) = if let Some(own) = &own {
+        let [w, h] = own.frame_size(map_width.try_into().ok()?, map_height.try_into().ok()?);
+        (u32::try_from(w).ok()?, u32::try_from(h).ok()?)
+    } else if let Some(metadata) = inherited {
+        // Static maps beside animated colour sprites stay static. Otherwise infer the
+        // material's own pixel scale instead of applying the colour's pixel dimensions.
+        let side = map_width.min(map_height);
+        inherited_material_size(metadata, [map_width, map_height], colour_frames)
+            .unwrap_or((side, side))
+    } else {
+        (map_width, map_height)
+    };
+    if width == 0
+        || height == 0
+        || !map_width.is_multiple_of(width)
+        || !map_height.is_multiple_of(height)
+    {
+        log::warn!(
+            "Horizon: material map {} has invalid frame dimensions",
+            map.display()
+        );
         return None;
     }
-    let side = w.max(h);
-    let mut frame = Vec::with_capacity((side * side * 4) as usize);
-    for row in 0..side {
-        for column in 0..side {
-            let offset = (((row * h / side) * map_width + column * w / side) * 4) as usize;
-            frame.extend_from_slice(&pixels[offset..offset + 4]);
+    let columns = map_width / width;
+    let count = columns * (map_height / height);
+    let side = width.max(height);
+    let limit = side_within(side, LAYERS_AT_LEAST, MAX_MAP_BYTES);
+    let mut frames = Vec::with_capacity(count as usize);
+    let mut kept_side = side;
+    for frame in 0..count {
+        let (x, y) = (frame % columns * width, frame / columns * height);
+        let mut data = Vec::with_capacity((side * side * 4) as usize);
+        for row in 0..side {
+            for col in 0..side {
+                let offset =
+                    (((y + row * height / side) * map_width + x + col * width / side) * 4) as usize;
+                data.extend_from_slice(&pixels[offset..offset + 4]);
+            }
         }
+        let (size, data) = shrink_map(data, side, limit);
+        kept_side = size;
+        frames.push(data);
     }
-    Some(shrink_map(
-        frame,
-        side,
-        side_within(side, LAYERS_AT_LEAST, MAX_MAP_BYTES),
-    ))
+    // A one-frame map is a valid static companion even if the colour animation's indices
+    // name other frames. Never discard it because those colour indices exceed one.
+    let clip = if count > 1 {
+        match metadata.map(|meta| meta.clip(count)).transpose() {
+            Ok(clip) => clip.flatten().map(Arc::new),
+            Err(error) => {
+                log::warn!(
+                    "Horizon: material map {}: {error}; using its first frame",
+                    map.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Some(MaterialMap {
+        side: kept_side,
+        frames: Arc::new(frames),
+        clip,
+    })
 }
 
 /// SpriteContents: the `.mcmeta` `texture` section (TextureMetadataSection's
@@ -1315,3 +1488,7 @@ mod tests {
         assert_eq!(stepped.blend(5), blend(1, 1, 0));
     }
 }
+
+#[cfg(test)]
+#[path = "sprites/material_tests.rs"]
+mod material_loading_tests;
