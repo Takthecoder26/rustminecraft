@@ -137,7 +137,11 @@ fn pack(
     )
     .unwrap();
     let macros = horizon_shaders::Macros::standard();
-    let properties = horizon_shaders::Properties::parse("oldLighting=false", &macros);
+    // The output alpha carries encoded specular data, including zero; retain those fragments.
+    let properties = horizon_shaders::Properties::parse(
+        "oldLighting=false\nalphaTest.gbuffers_terrain=off",
+        &macros,
+    );
     let inputs = horizon_shaders::GameInputs {
         terrain: Some(Default::default()),
         ..Default::default()
