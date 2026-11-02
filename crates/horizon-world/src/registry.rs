@@ -5,6 +5,7 @@ mod json;
 use crate::{DATA_VERSION, chunk::BlockState, compression::invalid, nbt::Tag};
 pub use json::BlockStateJsonCodec;
 pub(crate) use json::java_integer;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
@@ -34,6 +35,38 @@ fn state_key(state: &BlockState) -> u64 {
         value.hash(&mut hasher);
     }
     hasher.finish()
+}
+/// The registry's identity for a resolved-data snapshot's fingerprint
+/// (level/data/cache.rs, worldgen/generator_cache.rs): the state count, every
+/// state's name and sorted properties, and each block's default state.
+pub(crate) fn cache_key(registry: &BlockRegistry) -> io::Result<[u8; 32]> {
+    fn hash_str(hasher: &mut Sha256, text: &str) {
+        hasher.update((text.len() as u64).to_le_bytes());
+        hasher.update(text.as_bytes());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update((registry.len() as u64).to_le_bytes());
+    let mut seen = std::collections::HashSet::new();
+    for index in 0..registry.len() {
+        let state = registry
+            .state(BlockStateId(index as u32))
+            .ok_or_else(|| invalid("missing registry state"))?;
+        hash_str(&mut hasher, &state.name);
+        let mut props: Vec<_> = state.properties.iter().collect();
+        props.sort_by_key(|(key, _)| *key);
+        hasher.update((props.len() as u32).to_le_bytes());
+        for (key, value) in props {
+            hash_str(&mut hasher, key);
+            hash_str(&mut hasher, value);
+        }
+        if seen.insert(state.name.as_str()) {
+            let default = registry
+                .default_state(&state.name)
+                .ok_or_else(|| invalid("missing default state"))?;
+            hasher.update(default.0.to_le_bytes());
+        }
+    }
+    Ok(hasher.finalize().into())
 }
 impl BlockRegistry {
     pub fn from_nbt(tag: &Tag) -> io::Result<Self> {

@@ -20911,6 +20911,9 @@ pub fn run_with() -> Result<()> {
     // Snapshots of derived tables live in the game folder, never beside the
     // shared resources.
     Behaviours::set_cache_dir(std::env::current_dir()?.join(".horizon-cache"));
+    horizon_world::worldgen::generator::GeneratorData::set_cache_dir(
+        std::env::current_dir()?.join(".horizon-cache"),
+    );
     if !synchronous_startup(&options) {
         return run_loading(options, early_settings, vanilla_root, None, started);
     }

@@ -151,27 +151,7 @@ fn fingerprint(registry: &BlockRegistry, root: &Path) -> io::Result<[u8; 32]> {
     hasher.update(modified.as_nanos().to_le_bytes());
     hasher.update(sources_digest(root)?);
     // The registry argument may be modified independently of facts.json.
-    hasher.update((registry.len() as u64).to_le_bytes());
-    let mut seen = std::collections::HashSet::new();
-    for index in 0..registry.len() {
-        let state = registry
-            .state(BlockStateId(index as u32))
-            .ok_or_else(|| invalid("missing registry state"))?;
-        hash_str(&mut hasher, &state.name);
-        let mut props: Vec<_> = state.properties.iter().collect();
-        props.sort_by_key(|(key, _)| *key);
-        hasher.update((props.len() as u32).to_le_bytes());
-        for (key, value) in props {
-            hash_str(&mut hasher, key);
-            hash_str(&mut hasher, value);
-        }
-        if seen.insert(state.name.as_str()) {
-            let default = registry
-                .default_state(&state.name)
-                .ok_or_else(|| invalid("missing default state"))?;
-            hasher.update(default.0.to_le_bytes());
-        }
-    }
+    hasher.update(crate::registry::cache_key(registry)?);
     Ok(hasher.finalize().into())
 }
 

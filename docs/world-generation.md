@@ -208,7 +208,9 @@ A world's enabled data packs (`<world>/datapacks`, in `datapacks.json`'s order) 
 conditions, carvers, configured and placed features, structures, structure sets, template pools, processor lists, biomes, level stems), a
 higher pack's file for an id replacing a lower one's, and its block, fluid and biome tag files to the tag bundles in pack order.
 `GeneratorData::load_with` reads the bundles with them; the client caches the result per set of pack entries
-(`vanillagen::shared_data_with`). What Horizon leaves out is logged: a pack's new biomes (the game has no id, colours or sounds for them;
+(`vanillagen::shared_data_with`). A later start replays a `.horizon-cache` snapshot of the parsed bundles instead of
+`serde_json`'ing them again (`worldgen::generator_cache`, keyed by the build, the registry and every file the load
+reads). What Horizon leaves out is logged: a pack's new biomes (the game has no id, colours or sounds for them;
 their tag entries and climate points go with them) and folders the generator does not read. A pack's dimension types set each level's
 height ([world-height.md](world-height.md)); noise settings taller than the level generate only inside it, as `clampToHeightAccessor`. Sapling growth and bone
 meal still place vanilla's features.

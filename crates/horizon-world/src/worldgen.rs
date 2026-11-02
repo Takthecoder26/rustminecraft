@@ -41,6 +41,7 @@ pub mod fluid_predicate;
 pub mod fungus;
 pub mod generator;
 mod generator_blocks;
+mod generator_cache;
 mod generator_decoration;
 mod generator_structures;
 pub mod height_provider;
