@@ -482,7 +482,8 @@ impl Game<'_> {
         let mut trial_keys = Vec::new();
         let mut vault_keys = Vec::new();
         for (&pos, be) in &self.world.block_entities {
-            let d = pos.0
+            let d = pos
+                .0
                 .abs_diff(center[0])
                 .max(pos.1.abs_diff(center[1]))
                 .max(pos.2.abs_diff(center[2]));
