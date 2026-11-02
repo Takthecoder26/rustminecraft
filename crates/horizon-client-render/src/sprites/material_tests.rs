@@ -202,3 +202,24 @@ fn square_companions_stay_static_until_their_own_metadata_declares_a_grid() {
     assert_eq!([clip.sample(0).frame, clip.sample(2).frame], [3, 1]);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn one_rectangular_material_frame_keeps_both_halves_at_its_own_scale() {
+    let root = std::env::temp_dir().join(format!("horizon-material-single-{}", std::process::id()));
+    let top = [23, 91, 157, 19];
+    let bottom = [211, 47, 83, 241];
+    let mut pixels = top.repeat(32 * 32);
+    pixels.extend(bottom.repeat(32 * 32));
+    png(&root.join("single_n.png"), 32, 64, &pixels);
+    let inherited =
+        AnimationMetadata::from_json(r#"{"width":16,"height":32,"frames":[0]}"#).unwrap();
+    let map = material_map(&root.join("single.png"), "_n", Some(&inherited), 1).unwrap();
+    assert_eq!(map.frames.len(), 1);
+    assert_eq!(map.side, 64);
+    // Both halves belong to one frame at twice the colour sprite's pixel scale.
+    let mut expected = top.repeat(64 * 32);
+    expected.extend(bottom.repeat(64 * 32));
+    assert_eq!(map.frames[0], expected);
+    assert!(map.clip.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
