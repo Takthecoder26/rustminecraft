@@ -811,7 +811,7 @@ fn inherited_material_size(
     [width, height]: [u32; 2],
     count: u32,
 ) -> Option<(u32, u32)> {
-    if width == height || count <= 1 {
+    if width == height || count == 0 {
         return None;
     }
     let (w, h) = (
