@@ -170,7 +170,15 @@ fn pack(
             hand: false,
         },
     );
-    assert!(post.notes.is_empty(), "{:?}", post.notes);
+    assert!(post.terrain.is_some(), "{:?}", post.notes);
+    assert!(post.water.is_some(), "{:?}", post.notes);
+    assert_eq!(
+        post.notes,
+        [
+            "terrain draws with gbuffers_terrain",
+            "translucent terrain draws with gbuffers_terrain"
+        ]
+    );
     post
 }
 

@@ -137,7 +137,13 @@ fn inherited_rectangular_frames_use_physical_capacity_and_the_maps_pixel_scale()
         assert_eq!(map.frames.len(), 4);
         assert_eq!(map.side, width);
         for (frame, colour) in map.frames.iter().zip(colours) {
-            assert!(frame.chunks_exact(4).all(|pixel| pixel == colour));
+            assert!(
+                frame
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| *pixel == colour)
+            );
         }
         let clip = map.clip.unwrap();
         assert_eq!(
@@ -184,7 +190,13 @@ fn square_companions_stay_static_until_their_own_metadata_declares_a_grid() {
     assert_eq!(map.frames.len(), 4);
     assert_eq!(map.side, 16);
     for (frame, colour) in map.frames.iter().zip(colours) {
-        assert!(frame.chunks_exact(4).all(|pixel| pixel == colour));
+        assert!(
+            frame
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == colour)
+        );
     }
     let clip = map.clip.unwrap();
     assert_eq!([clip.sample(0).frame, clip.sample(2).frame], [3, 1]);
