@@ -7,7 +7,7 @@ use horizon_client::{
     biome::{BiomeInfo, Biomes, GrassModifier},
     blocks::BlockFacts,
     chunk::{Chunk, Light, MIN_Y, index},
-    mesher::{EMISSION_BITS, MeshTables, Mesher, OPAQUE_LAYER, TerrainVertex},
+    mesher::{EMISSION_BITS, LAYER_MASK, MeshTables, Mesher, TerrainVertex},
     models,
 };
 use horizon_core::biome::BiomeZoom;
@@ -136,46 +136,56 @@ fn scene(
         blend_radius,
         smooth_lighting,
         cutout_leaves,
+        greedy: false,
     };
     let section_y = int(&row["section_y"])?;
+    let sy = (section_y * 16 - MIN_Y) / 16;
+    // `quads`: the mesher's output unmerged, quad for quad against the oracle.
+    // `merged`: it after `merge` — the harness checks each merged quad covers
+    // and shades identically to the unmerged quads it replaced.
+    let mesh = mesher.mesh(&region, sy);
+    mesher.greedy = true;
     let started = Instant::now();
-    let mesh = mesher.mesh(&region, (section_y * 16 - MIN_Y) / 16);
+    let merged = mesher.mesh(&region, sy);
     *elapsed += started.elapsed();
-    let mut quads = Vec::new();
-    for (layer, vertices) in [("opaque", &mesh.solid), ("translucent", &mesh.translucent)] {
-        let (vertices, rest) = vertices.as_chunks::<4>();
-        if !rest.is_empty() {
-            return Err("partial quad".into());
-        }
-        for quad in vertices {
-            let sprite = names
-                .get(&u32::from(quad[0].layer & !OPAQUE_LAYER))
-                .ok_or("unknown sprite layer")?;
-            if quad
-                .iter()
-                .any(|v: &TerrainVertex| v.layer != quad[0].layer)
-            {
-                return Err("quad mixes sprite layers".into());
+    let emit = |mesh: &horizon_client::mesher::SectionMesh| -> Result<Vec<Value>> {
+        let mut quads = Vec::new();
+        for (layer, vertices) in [("opaque", &mesh.solid), ("translucent", &mesh.translucent)] {
+            let (vertices, rest) = vertices.as_chunks::<4>();
+            if !rest.is_empty() {
+                return Err("partial quad".into());
             }
-            let vertices: Vec<Value> = quad
-                .iter()
-                .map(|v| {
-                    let ([x, y, z], [u, w]) = (v.pos, v.uv());
-                    json!([
-                        x,
-                        y,
-                        z,
-                        u,
-                        w,
-                        argb(v.color | EMISSION_BITS),
-                        light_coords(v.light)
-                    ])
-                })
-                .collect();
-            quads.push(json!({"layer": layer, "sprite": sprite, "vertices": vertices}));
+            for quad in vertices {
+                let sprite = names
+                    .get(&u32::from(quad[0].layer & LAYER_MASK))
+                    .ok_or("unknown sprite layer")?;
+                if quad
+                    .iter()
+                    .any(|v: &TerrainVertex| (v.layer & LAYER_MASK) != (quad[0].layer & LAYER_MASK))
+                {
+                    return Err("quad mixes sprite layers".into());
+                }
+                let vertices: Vec<Value> = quad
+                    .iter()
+                    .map(|v| {
+                        let ([x, y, z], [u, w]) = (v.pos, v.uv());
+                        json!([
+                            x,
+                            y,
+                            z,
+                            u,
+                            w,
+                            argb(v.color | EMISSION_BITS),
+                            light_coords(v.light)
+                        ])
+                    })
+                    .collect();
+                quads.push(json!({"layer": layer, "sprite": sprite, "vertices": vertices}));
+            }
         }
-    }
-    Ok(json!({"name": row["name"], "quads": quads}))
+        Ok(quads)
+    };
+    Ok(json!({"name": row["name"], "quads": emit(&mesh)?, "merged": emit(&merged)?}))
 }
 pub fn main() -> Result<()> {
     let args: Vec<_> = crate::args().skip(1).collect();

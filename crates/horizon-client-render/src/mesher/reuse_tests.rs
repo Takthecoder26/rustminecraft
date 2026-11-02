@@ -105,6 +105,7 @@ fn reused_mesh_matches_fresh_geometry_across_sections_and_resource_reload() {
             blend_radius: 2,
             smooth_lighting: reload == 0,
             cutout_leaves: reload == 0,
+            greedy: true,
         };
         for (case, (center, east)) in [
             (&empty, None),

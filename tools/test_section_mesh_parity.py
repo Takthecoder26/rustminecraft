@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import platform
 import random
+from itertools import combinations
 import struct
 import subprocess
 try:
@@ -466,6 +467,99 @@ def compare(scene, client, rust, states, report, limit):
     return counts
 
 
+def plane_rect(vertices):
+    """An axis-aligned rect in a constant-coordinate plane, or None."""
+    for a in range(3):
+        if all(abs(p[a] - vertices[0][a]) < 1e-6 for p in vertices):
+            o = [i for i in range(3) if i != a]
+            lo = [min(p[i] for p in vertices) for i in o]
+            hi = [max(p[i] for p in vertices) for i in o]
+            on = lambda p: all(abs(p[o[i]] - lo[i]) < 1e-6 or abs(p[o[i]] - hi[i]) < 1e-6
+                               for i in range(2))
+            if all(hi[i] - lo[i] > 1e-9 for i in range(2)) and all(on(p) for p in vertices):
+                return a, vertices[0][a], o, lo, hi
+    return None
+
+
+def check_merged(scene, quads, merged, report):
+    """Every merged quad must cover whole original quads whose own vertices it
+    reproduces: same sprite, layer and plane; member vertices' colours, light
+    and UVs (modulo one) equal to the merged quad's interpolation; the matched
+    members' rects tile the merged one. Coincident quads with different
+    attributes stay separate, so they are not members."""
+    def describe(quad):
+        return {'scene': scene['name'], 'sprite': quad['sprite'],
+                'vertices': [list(x) for x in quad['vertices']]}
+    verbatim = {tuple(tuple(v) for v in q['vertices']) for q in quads}
+    for mq in merged:
+        if tuple(tuple(v) for v in mq['vertices']) in verbatim:
+            continue
+        report['merged_quads'] = report.get('merged_quads', 0) + 1
+        f = plane_rect([p[:3] for p in mq['vertices']])
+        ok = f is not None
+        members = []
+        if ok:
+            a, plane, o, lo, hi = f
+            corner = {(p[o[0]], p[o[1]]): p for p in mq['vertices']}
+            us_ut = lambda p: ((p[o[0]] - lo[0]) / (hi[0] - lo[0]),
+                               (p[o[1]] - lo[1]) / (hi[1] - lo[1]))
+            def interp(p, i):
+                us, ut = us_ut(p)
+                c00, c10 = corner[(lo[0], lo[1])][i], corner[(hi[0], lo[1])][i]
+                c01, c11 = corner[(lo[0], hi[1])][i], corner[(hi[0], hi[1])][i]
+                return c00 + (c10 - c00) * us + (c01 - c00) * ut \
+                    + (c00 - c10 - c01 + c11) * us * ut
+            mc = {k: channels(v[5]) for k, v in corner.items()}
+            for q in quads:
+                if q['sprite'] != mq['sprite'] or q['layer'] != mq['layer']:
+                    continue
+                g = plane_rect([p[:3] for p in q['vertices']])
+                if g is None or g[0] != a or abs(g[1] - plane) > 1e-6:
+                    continue
+                lq, hq = g[3], g[4]
+                if not all(lq[i] >= lo[i] - 1e-6 and hq[i] <= hi[i] + 1e-6 for i in range(2)):
+                    continue
+                member = True
+                for p in q['vertices']:
+                    us, ut = us_ut(p)
+                    c00 = mc[(lo[0], lo[1])]; c10 = mc[(hi[0], lo[1])]
+                    c01 = mc[(lo[0], hi[1])]; c11 = mc[(hi[0], hi[1])]
+                    for c in range(4):
+                        exp = c00[c] + (c10[c] - c00[c]) * us + (c01[c] - c00[c]) * ut \
+                            + (c00[c] - c10[c] - c01[c] + c11[c]) * us * ut
+                        if abs(round(exp) - channels(p[5])[c]) > 0:
+                            member = False
+                    if member and light(p[6]) != light(mq['vertices'][0][6]):
+                        member = False
+                    if member:
+                        for c in (3, 4):
+                            d = (interp(p, c) - p[c]) % 1.0
+                            if min(d, 1.0 - d) > 1e-3:
+                                member = False
+                    if not member:
+                        break
+                if member:
+                    members.append((q, lq, hq))
+        if ok:
+            area = (hi[0] - lo[0]) * (hi[1] - lo[1])
+            xs = sorted({lo[0], hi[0]} | {x for _, l, h in members for x in (l[0], h[0])})
+            ys = sorted({lo[1], hi[1]} | {y for _, l, h in members for y in (l[1], h[1])})
+            covered = 0.0
+            for i in range(len(xs) - 1):
+                for j in range(len(ys) - 1):
+                    s, t = (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2
+                    if any(l[0] - 1e-9 <= s <= h[0] + 1e-9 and l[1] - 1e-9 <= t <= h[1] + 1e-9
+                           for _, l, h in members):
+                        covered += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j])
+            ok = abs(covered - area) < 1e-4
+        if not ok:
+            key = 'merged_illegal' if f is not None else 'merged_non_rect'
+            report['categories'][key] = report['categories'].get(key, 0) + 1
+            bucket = report['examples'].setdefault(key, [])
+            if len(bucket) < 12:
+                bucket.append(describe(mq))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--strict', action='store_true', help='fail when any quad or fact differs')
@@ -518,7 +612,9 @@ def main():
     for row, a, b in zip(rows, client, rust):
         assert row['name'] == a['name'] == b['name']
         counts = compare(row, a['quads'], b['quads'], states, report, args.examples)
-        report['per_scene'][row['name']] = {'client': len(a['quads']), 'rust': len(b['quads']), **counts}
+        check_merged(row, b['quads'], b.get('merged', []), report)
+        report['per_scene'][row['name']] = {'client': len(a['quads']), 'rust': len(b['quads']),
+                                           'merged': len(b.get('merged', [])), **counts}
     client_facts = [json.loads(line) for line in (BUILD / 'client-facts.jsonl').read_text().splitlines()]
     rust_facts = [json.loads(line) for line in (BUILD / 'rust-facts.jsonl').read_text().splitlines()]
     fact_mismatches = Counter()
@@ -545,7 +641,9 @@ def main():
     total = report['client_quads']
     print(f"Section mesh parity: {len(rows)} scenes, client {total:,} quads, Rust {report['rust_quads']:,} quads, "
           f"{report['matched_quads']:,} geometry matches, {report['identical_quads']:,} identical "
-          f"({100.0 * report['identical_quads'] / max(total, 1):.2f}% of client quads)")
+          f"({100.0 * report['identical_quads'] / max(total, 1):.2f}% of client quads), "
+          f"merged to {report.get('merged_quads', 0):,} quads "
+          f"({100.0 * report.get('merged_quads', 0) / max(report['rust_quads'], 1):.1f}%)")
     for category, count in sorted(report['categories'].items(), key=lambda kv: -kv[1]):
         print(f'  {category:<28} {count:,}')
     print(f"Mesh facts: {len(client_facts):,} states, mismatches: {dict(fact_mismatches) or 'none'}")

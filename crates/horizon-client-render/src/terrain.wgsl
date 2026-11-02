@@ -85,18 +85,19 @@ fn sprite_level(uv: vec2<f32>, layer: u32, lod: f32) -> vec4<f32> {
 // texture_sampling.glsl's sampleNearest: the sprite's texels stay square pixels, blending only
 // across the one screen pixel where two meet, so a linear (and anisotropic) sampler keeps them crisp.
 fn sample_nearest(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv: vec2<f32>,
-                  texel_screen: vec2<f32>) -> vec4<f32> {
+                  texel_screen: vec2<f32>, wrap: bool) -> vec4<f32> {
     let texel_coords = uv / pixel;
     let center = round(texel_coords) - 0.5;
     var offset = texel_coords - center;
     offset = (offset - 0.5) * pixel / max(texel_screen, vec2(1e-12)) + 0.5;
     offset = clamp(offset, vec2(0.0), vec2(1.0));
-    return sprite_grad((center + offset) * pixel, layer, du, dv);
+    let p = (center + offset) * pixel;
+    return sprite_grad(select(p, fract(p), wrap), layer, du, dv);
 }
 // sampleRGSS: four rotated-grid samples of the two nearest mip levels, faded in as the texels
 // shrink below two screen pixels, over sample_nearest.
 fn sample_rgss(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv: vec2<f32>,
-               texel_screen: vec2<f32>) -> vec4<f32> {
+               texel_screen: vec2<f32>, wrap: bool) -> vec4<f32> {
     let max_texel = max(texel_screen.x, texel_screen.y);
     let min_pixel = min(pixel.x, pixel.y);
     let blend = smoothstep(min_pixel, min_pixel * 2.0, max_texel);
@@ -111,27 +112,34 @@ fn sample_rgss(uv: vec2<f32>, layer: u32, pixel: vec2<f32>, du: vec2<f32>, dv: v
     var sum_low = vec4(0.0);
     var sum_high = vec4(0.0);
     for (var i = 0; i < 4; i++) {
-        let p = uv + offsets[i] * pixel;
+        let p = select(uv + offsets[i] * pixel, fract(uv + offsets[i] * pixel), wrap);
         sum_low += sprite_level(p, layer, low);
         sum_high += sprite_level(p, layer, low + 1.0);
     }
     let rgss = mix(sum_low * 0.25, sum_high * 0.25, mip_blend);
     return mix(sample_nearest(uv, layer, pixel, du, dv, texel_screen), rgss, blend);
 }
-fn sprite(uv: vec2<f32>, layer: u32) -> vec4<f32> {
+// `layer` is the vertex's layer field: bits 0..14 index the sprite arrays,
+// bit 14 (`MERGED_UV`) marks a tiled UV that may pass 1.0 — wrapped before
+// the clamped samplers of the filtering modes — and bit 15 the opaque flag.
+fn sprite(uv: vec2<f32>, layer_flags: u32) -> vec4<f32> {
+    let layer = layer_flags & 0x3fffu;
+    let tiled = (layer_flags & 0x4000u) != 0u;
     let mode = u32(globals.filtering.x);
     if mode != 0u {
         // Texture Filtering Anisotropic or RGSS: terrain.fsh's two sampling paths.
         let du = dpdx(uv);
         let dv = dpdy(uv);
+        let p = select(uv, fract(uv), tiled);
         let pixel = vec2(1.0 / globals.filtering.y);
         let texel_screen = sqrt(du * du + dv * dv);
         if mode == 1u {
-            return sample_rgss(uv, layer, pixel, du, dv, texel_screen);
+            return sample_rgss(p, layer, pixel, du, dv, texel_screen, tiled);
         }
-        return sample_nearest(uv, layer, pixel, du, dv, texel_screen);
+        return sample_nearest(p, layer, pixel, du, dv, texel_screen, tiled);
     }
     if SPRITE_ARRAYS == 1u {
+        // The repeat sampler wraps a tiled UV itself.
         return textureSample(sprites, sprite_sampler, uv, i32(layer));
     }
     // The array is chosen per fragment: sample with the derivatives taken here.
@@ -232,7 +240,11 @@ fn sample_lightmap(sky: f32, block: f32) -> vec4<f32> {
 // integer below 2^24, so it decodes exactly), 1/32 per block for distant
 // terrain tiles (TerrainVertex::tiled). A fading tile negates it past its
 // dither code (gfx/lod.rs's `instance`): the step is the fraction either way.
-fn terrain_uv(packed: vec2<u32>, w: f32) -> vec2<f32> {
+fn terrain_uv(packed: vec2<u32>, w: f32, layer: u32) -> vec2<f32> {
+    // `MERGED_UV` vertices pack their UV at TILED_UV_STEPS (1/32) per block.
+    if (layer & 0x4000u) != 0u {
+        return vec2<f32>(packed) / 32.0;
+    }
     return vec2<f32>(packed) * instance_step(w);
 }
 // A whole section's step (a power of two) carries its fade-in in the mantissa's 23 bits, as
@@ -258,7 +270,7 @@ fn fade_code(w: f32) -> u32 {
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>,
     @location(5) origin: vec4<f32>) -> TerrainOut {
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
+    return terrain_vertex(position, terrain_uv(uv, origin.w, layer), layer, color, light, origin.xyz,
         origin.w);
 }
 // Flat section draws (gfx/flat.rs): one draw per arena page over the frame's
@@ -272,7 +284,7 @@ fn fade_code(w: f32) -> u32 {
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
     let origin = slot_origins[block_slots[vertex >> 8u]];
-    return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
+    return terrain_vertex(position, terrain_uv(uv, origin.w, layer), layer, color, light, origin.xyz,
         origin.w);
 }
 fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f32>,
@@ -309,7 +321,7 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     let dy = dpdy(in.local);
     if faded(in.fade, in.local, dx, dy) { discard; }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    var color = sprite(in.uv, in.layer) * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
@@ -323,7 +335,7 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(in: TerrainOut) -> @location(0) vec4<f32> {
-    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    var color = sprite(in.uv, in.layer) * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < 0.01 { discard; }
     return apply_fog(color, in.spherical, in.cylindrical);

@@ -55,6 +55,7 @@ fn main() -> Result<(), Error> {
         "--threads",
         thread::available_parallelism().map_or(2, |n| n.get()),
     );
+    let greedy: i32 = flag(&args, "--merge", 1);
     let center = args
         .iter()
         .position(|a| a == "--center")
@@ -138,6 +139,7 @@ fn main() -> Result<(), Error> {
             blend_radius: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            greedy: greedy != 0,
             assets: &context.assets,
             render: &context.render,
             tables: &context.tables,

@@ -5,6 +5,7 @@
 //! follow `FluidRenderer` (see `fluid`).
 mod fluid;
 mod lighting;
+mod merge;
 mod sides;
 use crate::{
     assets::{Assets, RenderAssets},
@@ -83,20 +84,27 @@ impl TerrainVertex {
             color,
         }
     }
-    /// A vertex of a merged distant-terrain face, its UV in blocks from the
-    /// face's corner. Drawn with an instance UV scale of `1 / TILED_UV_STEPS`.
+    /// A vertex of a merged face (distant terrain, `merge`'s section quads),
+    /// its UV in blocks from the face's corner, `MERGED_UV` set so the shader
+    /// decodes it at `1 / TILED_UV_STEPS` and wraps it where the sampler
+    /// clamps.
     pub fn tiled(pos: [f32; 3], uv: [f32; 2], layer: u16, color: u32, light: u16) -> Self {
         Self {
             pos,
             uv: uv.map(|v| (v * TILED_UV_STEPS).round().clamp(0.0, f32::from(u16::MAX)) as u16),
-            layer,
+            layer: layer | MERGED_UV,
             light,
             color,
         }
     }
     /// The UV the GPU samples.
     pub fn uv(&self) -> [f32; 2] {
-        self.uv.map(|v| f32::from(v) / UV_STEPS)
+        let steps = if self.layer & MERGED_UV != 0 {
+            TILED_UV_STEPS
+        } else {
+            UV_STEPS
+        };
+        self.uv.map(|v| f32::from(v) / steps)
     }
 }
 #[cfg(test)]
@@ -455,11 +463,12 @@ impl MeshTables {
         facts: &BlockFacts,
         visibility: FaceVisibility,
     ) -> crate::Result<Self> {
-        // Terrain vertices keep the sprite layer below `OPAQUE_LAYER`.
+        // Terrain vertices keep the sprite layer below `MERGED_UV` (the
+        // `OPAQUE_LAYER` and `MERGED_UV` bits are flags).
         let layers = render.sprite_layers.values().max().map_or(0, |l| l + 1);
-        if layers > u32::from(OPAQUE_LAYER) {
+        if layers > u32::from(MERGED_UV) {
             return Err(
-                format!("{layers} block sprites, terrain vertices index {OPAQUE_LAYER}").into(),
+                format!("{layers} block sprites, terrain vertices index {MERGED_UV}").into(),
             );
         }
         let layer = |name: &str| -> crate::Result<u16> {
@@ -792,6 +801,12 @@ pub(crate) struct MeshScratch {
 mod reuse_tests;
 /// Set on a terrain vertex's sprite layer when its texture alpha must be ignored.
 pub const OPAQUE_LAYER: u16 = 1 << 15;
+/// Set on a `TerrainVertex::tiled`'s sprite layer: its UV is `TILED_UV_STEPS`
+/// per block rather than `UV_STEPS` per unit, and may span several sprite
+/// periods. Sprite layers index below this bit.
+pub const MERGED_UV: u16 = 1 << 14;
+/// The bits of `layer` that address the sprite array.
+pub const LAYER_MASK: u16 = MERGED_UV - 1;
 /// The bits of `TerrainVertex::color`'s alpha byte that hold how brightly its face shines
 /// in HDR output (`gfx/hdr.rs`): 15 minus the tier, so the usual 0xFF means none. The
 /// byte's other four bits stay set.
@@ -966,6 +981,10 @@ pub struct Mesher<'a> {
     pub smooth_lighting: bool,
     /// The `cutoutLeaves` option (fancy graphics); off makes leaves opaque.
     pub cutout_leaves: bool,
+    /// Merging coplanar quads that draw identically (`merge`). Off while the
+    /// `dynamicLights` extra is on: it shades each vertex by its position,
+    /// which merging samples more coarsely.
+    pub greedy: bool,
 }
 impl Mesher<'_> {
     /// `region[dz][dx]` are the chunks around the meshed column (centre 1,1).
@@ -1091,6 +1110,9 @@ impl Mesher<'_> {
                     }
                 }
             }
+        }
+        if self.greedy {
+            merge::solid(&mut out.solid);
         }
         out
     }
