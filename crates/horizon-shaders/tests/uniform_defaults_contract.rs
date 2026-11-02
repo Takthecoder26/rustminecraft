@@ -593,8 +593,8 @@ pub fn assert_capture(id: &str, capture: &Capture, expected: &[Expected]) {
                 "mat2" => 2,
                 _ => 0,
             };
-            let relative = if matrix_rows > 0 {
-                within / matrix_rows * 16 + within % matrix_rows * 4
+            let relative = if let Some(column) = within.checked_div(matrix_rows) {
+                column * 16 + within % matrix_rows * 4
             } else {
                 within * 4
             } + if array {
