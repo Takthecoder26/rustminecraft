@@ -1548,7 +1548,7 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             super::raider::state_mut(m).patrol_leader = true;
         }
         if super::raider::state(m).is_some_and(|s| s.patrol_leader) {
-            set_item(m, HEAD, super::raider::BANNER);
+            super::raider::wear_banner(m);
             set_drop_chance(m, HEAD, 2.0);
         }
         if reason == Reason::Patrol {
