@@ -377,28 +377,6 @@ impl Hiz {
         if self.tests.is_empty() {
             return;
         }
-        // One pass a level: each reads the one before it.
-        let mut level = |label: &'static str,
-                         pipeline: &wgpu::ComputePipeline,
-                         group: &wgpu::BindGroup,
-                         [x, y]: [u32; 2]| {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(x, y, 1);
-        };
-        level(
-            "Far terrain depth pyramid, level 0",
-            &self.from_depth,
-            from_depth,
-            pyramid.first_groups,
-        );
-        for (group, size) in &pyramid.downs {
-            level("Far terrain depth pyramid", &self.down, group, *size);
-        }
         fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding,
@@ -429,10 +407,22 @@ impl Hiz {
                 },
             ],
         });
+        // One pass for the whole pyramid and the test: each dispatch reads
+        // the level the one before it wrote, which wgpu orders within a pass.
+        // A pass a level cost Metal a compute encoder each, a dozen a frame.
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Far terrain occlusion test"),
             timestamp_writes: None,
         });
+        let [x, y] = pyramid.first_groups;
+        pass.set_pipeline(&self.from_depth);
+        pass.set_bind_group(0, from_depth, &[]);
+        pass.dispatch_workgroups(x, y, 1);
+        pass.set_pipeline(&self.down);
+        for (level, [x, y]) in &pyramid.downs {
+            pass.set_bind_group(0, level, &[]);
+            pass.dispatch_workgroups(*x, *y, 1);
+        }
         pass.set_pipeline(&self.test);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups((self.tests.len() as u32).div_ceil(GROUP), 1, 1);

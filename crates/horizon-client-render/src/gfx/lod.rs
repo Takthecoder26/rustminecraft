@@ -70,6 +70,9 @@ const MASK_RADIUS: i32 = 63;
 const MASK_SIDE: i32 = 128;
 /// Its `vec4<u32>`s in terrain.wgsl's `Globals::lod_columns`: a bit a column.
 pub(super) const MASK_VECS: usize = (MASK_SIDE * MASK_SIDE / 128) as usize;
+/// A settled `Renderer::lod_mask`: the camera's column, the radius and
+/// `detail_revision` it was built for, and the mask.
+pub(super) type MaskCache = (((i32, i32), i32, u64), [[u32; 4]; MASK_VECS]);
 
 /// terrain.wgsl's `lod_columns`: one bit for each chunk column of the window
 /// around `center` (the camera's column), row after row, set for those of
@@ -318,8 +321,13 @@ impl Renderer {
     /// and `lod_columns` for this frame: the columns whose near sections are
     /// all in and have faded in, within the render distance `radius`. A column
     /// that stops being complete leaves it at once; its sections fade out
-    /// over the tile, which then shows.
-    pub(super) fn lod_mask(&self, camera: DVec3, radius: i32) -> ([f32; 4], [[u32; 4]; MASK_VECS]) {
+    /// over the tile, which then shows. Once every complete column has faded
+    /// in, the mask is kept until the columns or the camera's column change.
+    pub(super) fn lod_mask(
+        &mut self,
+        camera: DVec3,
+        radius: i32,
+    ) -> ([f32; 4], [[u32; 4]; MASK_VECS]) {
         let center = (
             (camera.x.floor() as i32) >> 4,
             (camera.z.floor() as i32) >> 4,
@@ -333,6 +341,12 @@ impl Renderer {
         if self.lods.is_empty() || !self.lod_screen_space(radius) {
             return (view, [[0; 4]; MASK_VECS]);
         }
+        let key = (center, radius, self.detail_revision);
+        if let Some((at, mask)) = self.lod_mask_cache
+            && at == key
+        {
+            return (view, mask);
+        }
         let now = Instant::now();
         let columns = self
             .detail_complete
@@ -340,7 +354,9 @@ impl Renderer {
             .filter(|&(_, &since)| now.saturating_duration_since(since) >= FADE)
             .map(|(&column, _)| column)
             .filter(|&(x, z)| in_view_distance(center, radius, x, z));
-        (view, column_mask(center, columns))
+        let mask = column_mask(center, columns);
+        self.lod_mask_cache = (now >= self.detail_settled).then_some((key, mask));
+        (view, mask)
     }
 
     /// A tile meshed again (finer detail) takes its place at once, but for

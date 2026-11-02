@@ -703,6 +703,12 @@ pub struct Renderer {
     /// When each complete column of `detail_columns` became so: far tiles stay
     /// in it until its sections have faded in (`Renderer::lod_mask`).
     detail_complete: crate::fast_hash::FxHashMap<(i32, i32), std::time::Instant>,
+    /// When the column that became complete last has faded in: from then on
+    /// `lod_mask` is the same until `detail_revision` or the camera's column
+    /// changes, and is kept (`lod_mask_cache`) rather than rebuilt per frame.
+    detail_settled: std::time::Instant,
+    /// The last settled `lod_mask`: its camera column, radius and revision.
+    lod_mask_cache: Option<lod::MaskCache>,
     arena: arena::Arena,
     sorted_indices: arena::Arena,
     translucent_sorter: translucency::Sorter,
@@ -3376,6 +3382,8 @@ impl Renderer {
             detail_columns: Default::default(),
             detail_revision: 0,
             detail_complete: Default::default(),
+            detail_settled: std::time::Instant::now(),
+            lod_mask_cache: None,
             arena,
             sorted_indices,
             translucent_sorter: translucency::Sorter::default(),
@@ -4070,8 +4078,9 @@ impl Renderer {
         if (mask == complete) != (next == complete) {
             self.detail_revision += 1;
             if next == complete {
-                self.detail_complete
-                    .insert(column, std::time::Instant::now());
+                let now = std::time::Instant::now();
+                self.detail_complete.insert(column, now);
+                self.detail_settled = now + lod::FADE;
             } else {
                 self.detail_complete.remove(&column);
             }

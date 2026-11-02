@@ -956,14 +956,20 @@ pub struct StoredSampler {
     inner: Box<dyn LodSampler>,
     store: Arc<FarStore>,
     approximate: bool,
-    /// Chunk summaries read lately, newest first.
-    visited: VecDeque<(At, Arc<[Column; 256]>)>,
+    /// Chunk summaries read lately, newest first, and chunks the store has
+    /// none of (`None`): every column of a tile asks for its chunk.
+    visited: VecDeque<(At, Option<Arc<[Column; 256]>>)>,
 }
 
 /// As `SavedLodSampler`'s limits: the coarsest cells that read single chunks,
 /// at Full and at Reduced far detail.
 const VISITED_STRIDE: i32 = 16;
 const VISITED_STRIDE_REDUCED: i32 = 4;
+/// Chunks `StoredSampler::chunk` remembers: a row of a tile's chunks. A tile
+/// reads its columns row by row and no chunk is read again by the next
+/// tile, so more only held summaries (a few hundred kilobytes each with
+/// their strata) in every sampling thread.
+const VISITED_CACHE: usize = 32;
 
 impl StoredSampler {
     pub fn new(inner: Box<dyn LodSampler>, store: Arc<FarStore>) -> Self {
@@ -980,12 +986,14 @@ impl StoredSampler {
             let found = self.visited.remove(index)?;
             let columns = found.1.clone();
             self.visited.push_front(found);
-            return Some(columns);
+            return columns;
         }
-        let columns = self.store.visited(at.0, at.1)?;
+        // A chunk never seen is asked for once, not for each of its columns
+        // (256 lookups under the store's lock for a finest tile).
+        let columns = self.store.visited(at.0, at.1);
         self.visited.push_front((at, columns.clone()));
-        self.visited.truncate(128);
-        Some(columns)
+        self.visited.truncate(VISITED_CACHE);
+        columns
     }
 }
 
@@ -1034,6 +1042,13 @@ impl LodSampler for StoredSampler {
         let Some(key) = grid_tile(x, z, stride, side) else {
             return self.inner.grid(x, z, stride, side);
         };
+        // A finest tile is one chunk: one seen before is the tile as it was,
+        // with nothing to sample, and no second copy of it to keep.
+        if key.level == 0
+            && let Some(chunk) = self.chunk((key.x, key.z))
+        {
+            return chunk.to_vec();
+        }
         // An approximate tile is only good enough for Reduced far detail.
         let stored = self
             .store

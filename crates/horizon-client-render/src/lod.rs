@@ -70,6 +70,11 @@ const DETAIL_LEVEL: u8 = 2;
 /// The most chunks one detail request asks for, one request each 250 ms:
 /// generated ones arrive at the decoration threads' pace, cached ones at once.
 const DETAIL_REQUEST: usize = 512;
+/// In screen space, the finest tiles of complete near columns at least this
+/// many chunks inside the render distance are kept as data but not meshed or
+/// drawn (`Lod::hide_inner`): the renderer leaves every pixel of them out.
+/// Those nearer the edge stay meshed for the columns the player leaves.
+const INNER_MARGIN: i32 = 4;
 /// Top solid face and optional fluid face, in absolute block coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Surface {
@@ -940,6 +945,10 @@ pub struct Lod {
     /// there, per chunk: remeshed once the chunk leaves the near area, so a
     /// tile never swaps in view while the chunks load.
     deferred: FxHashMap<(i32, i32), FxHashSet<TileKey>>,
+    /// In screen space, the complete near columns `INNER_MARGIN` chunks or
+    /// more inside the render distance (`hide_inner`): their finest tiles
+    /// stand in for selection, as covered ones do, but are not drawn.
+    inner: FxHashSet<(i32, i32)>,
     /// Unsampled tiles, coarsest level first and nearest first within a level.
     /// Rebuilt when the view changes, not scanned every frame.
     wanted: std::collections::BinaryHeap<std::cmp::Reverse<Wanted>>,
@@ -1282,6 +1291,7 @@ impl Lod {
             cutout_waiting: FxHashSet::default(),
             screen_space: false,
             deferred: FxHashMap::default(),
+            inner: FxHashSet::default(),
             wanted: std::collections::BinaryHeap::new(),
             wanted_at: None,
             wanted_stale: true,
@@ -1351,7 +1361,50 @@ impl Lod {
             self.screen_space = on;
             self.retiring.clear();
             self.leave_out();
+            self.hide_inner();
             self.flush_deferred();
+        }
+    }
+    /// Screen space: the finest tiles of the complete near columns well
+    /// inside the render distance (`INNER_MARGIN`) stop being drawn. Every
+    /// pixel of them was left out anyway, yet each was sampled, meshed and
+    /// kept on the GPU: thousands of tiles at a render distance of 32, most
+    /// of the far terrain's memory and meshing. They stay in `ready` (their
+    /// columns follow the chunks, `apply_fine`), so selection treats them as
+    /// covered stand-ins; a column that nears the edge as the player moves
+    /// is meshed again before it can leave. A column missing a tile gets one
+    /// from its summary, or an empty stand-in until the summary comes.
+    fn hide_inner(&mut self) {
+        let inner: FxHashSet<(i32, i32)> = match self.area {
+            Some(([cx, cz], detail, ..)) if self.screen_space && detail > INNER_MARGIN => self
+                .full
+                .iter()
+                .copied()
+                .filter(|&(x, z)| {
+                    crate::streaming::in_view_distance((cx, cz), detail - INNER_MARGIN, x, z)
+                })
+                .collect(),
+            _ => FxHashSet::default(),
+        };
+        let mut changed: Vec<(i32, i32)> =
+            inner.symmetric_difference(&self.inner).copied().collect();
+        self.inner = inner;
+        for &(x, z) in &self.inner {
+            let key = TileKey { x, z, level: 0 };
+            if self.plan.nodes.contains(&key) && !self.ready.contains_key(&key) {
+                let columns = match self.saved.get(&(x, z)) {
+                    Some(saved) => {
+                        self.detail_masks.insert(key, [u64::MAX; 4]);
+                        Arc::new(saved.to_vec())
+                    }
+                    None => Arc::new(vec![Column::default(); CELLS * CELLS]),
+                };
+                self.ready.insert(key, columns);
+                changed.push((x, z));
+            }
+        }
+        for (x, z) in changed {
+            self.refresh_path(TileKey { x, z, level: 0 });
         }
     }
     /// Marks an active tile for remeshing. Versioned so a result from an
@@ -1504,8 +1557,12 @@ impl Lod {
     /// subtree can stand alone, and active when its own mesh is drawn.
     fn evaluate(&self, key: TileKey) -> (bool, bool) {
         let present = self.ready.contains_key(&key);
-        // Covered level-0 stand-ins complete their parent but are never drawn.
-        let ready = present && !(key.level == 0 && self.covered.contains(&(key.x, key.z)));
+        // Covered level-0 stand-ins complete their parent but are never drawn,
+        // nor are those deep inside the near area in screen space.
+        let ready = present
+            && !(key.level == 0
+                && (self.covered.contains(&(key.x, key.z))
+                    || self.inner.contains(&(key.x, key.z))));
         // Mirrors `Plan::select`: a ready split tile is a complete
         // stand-in even while its children are still incomplete, so no
         // second fallback is drawn above it.
@@ -1961,6 +2018,7 @@ impl Lod {
         let full_changed = covered.as_ref().is_some_and(|full| *full != self.full);
         crate::spans::time("lod_covered", || self.cover(covered));
         if moved || full_changed {
+            self.hide_inner();
             self.flush_deferred();
         }
         if std::mem::take(&mut self.reselect) {
