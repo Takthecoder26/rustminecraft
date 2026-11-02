@@ -70,9 +70,12 @@ const REFRESH_LEVEL: u8 = 5;
 /// The columns a tile holds, all known.
 const FULL: [u64; 4] = [u64::MAX; 4];
 /// Flags of a record: a mask of the known columns precedes the columns;
-/// sampled with Reduced far detail (an exact sample is better).
+/// sampled with Reduced far detail (an exact sample is better); a sampled
+/// tile with the detail of generated chunks applied to every column
+/// (`FarStore::put_detailed`), which a `Lod` need not ask for again.
 const PARTIAL: u32 = 1;
 const APPROXIMATE: u32 = 2;
+const DETAILED: u32 = 4;
 
 /// FNV-1a: the same in every process and build, which a store key and the
 /// hashes in its records need (`DefaultHasher` promises neither).
@@ -308,10 +311,16 @@ struct Work {
     /// Tiles a server supplied (`FarStore::supply_tile`).
     supplied: Vec<(TileKey, Arc<Vec<Column>>, [u64; 4])>,
     tiles: VecDeque<Record>,
+    /// Tiles with their detail applied (`FarStore::put_detailed`), not yet
+    /// deflated: the render thread hands them over.
+    detailed: Vec<(TileKey, Arc<Vec<Column>>)>,
 }
 impl Work {
     fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.supplied.is_empty() && self.tiles.is_empty()
+        self.chunks.is_empty()
+            && self.supplied.is_empty()
+            && self.tiles.is_empty()
+            && self.detailed.is_empty()
     }
 }
 
@@ -469,8 +478,9 @@ impl Inner {
     }
 
     /// Writes a tile unless the store has these very columns already.
-    fn put(&self, place: (RegionId, At), columns: &[Column], known: [u64; 4], approximate: bool) {
-        let Some(record) = self.pack(place, columns, known, approximate) else {
+    /// `flags`: `APPROXIMATE`, `DETAILED`.
+    fn put(&self, place: (RegionId, At), columns: &[Column], known: [u64; 4], flags: u32) {
+        let Some(record) = self.pack(place, columns, known, flags) else {
             return;
         };
         self.write(record);
@@ -481,11 +491,10 @@ impl Inner {
         (region, at): (RegionId, At),
         columns: &[Column],
         known: [u64; 4],
-        approximate: bool,
+        flags: u32,
     ) -> Option<Record> {
         let raw = cache::raw(columns);
-        let flags =
-            (if known == FULL { 0 } else { PARTIAL }) | (if approximate { APPROXIMATE } else { 0 });
+        let flags = (if known == FULL { 0 } else { PARTIAL }) | flags;
         let mut hash = Fnv::new();
         hash.write(&raw);
         hash.write(&flags.to_le_bytes());
@@ -603,7 +612,8 @@ impl FarStore {
         if columns.len() != CELLS * CELLS {
             return;
         }
-        let Some(record) = self.inner.pack(tile_at(key), columns, FULL, approximate) else {
+        let flags = if approximate { APPROXIMATE } else { 0 };
+        let Some(record) = self.inner.pack(tile_at(key), columns, FULL, flags) else {
             return;
         };
         let mut work = self.inner.work.lock().unwrap();
@@ -615,6 +625,30 @@ impl FarStore {
             drop(work);
             self.inner.write(record);
         }
+    }
+
+    /// Keeps a sampled tile whose every column now has the detail of
+    /// generated (or saved) chunks (`Lod::apply_detail`), in place of the
+    /// sample: the next session reads it whole and asks for no detail, so
+    /// its terrain does not change again as the detail comes in. From the
+    /// render thread: it only queues it. Not for a pyramid store.
+    pub fn put_detailed(&self, key: TileKey, columns: Arc<Vec<Column>>) {
+        if self.inner.pyramid || columns.len() != CELLS * CELLS {
+            return;
+        }
+        let mut work = self.inner.work.lock().unwrap();
+        if work.detailed.len() < MAX_QUEUED_TILES {
+            work.detailed.push((key, columns));
+            drop(work);
+            self.inner.wake.notify_one();
+        }
+    }
+
+    /// Whether the tile the store has at `key` is one `put_detailed` kept.
+    pub fn detailed(&self, key: TileKey) -> bool {
+        self.inner
+            .entry(tile_at(key))
+            .is_some_and(|entry| entry.flags & DETAILED != 0)
     }
 
     /// The summary of chunk (x, z) kept by an earlier visit.
@@ -685,7 +719,7 @@ fn run(inner: Arc<Inner>) {
     let mut pyramid = Pyramid::default();
     let mut flushed = Instant::now();
     loop {
-        let (chunks, supplied, tiles) = {
+        let (chunks, supplied, tiles, detailed) = {
             let mut work = inner.work.lock().unwrap();
             while work.is_empty() && !inner.stop.load(Ordering::Relaxed) {
                 let (guard, timeout) = inner.wake.wait_timeout(work, IDLE).unwrap();
@@ -698,17 +732,22 @@ fn run(inner: Arc<Inner>) {
                 std::mem::take(&mut work.chunks),
                 std::mem::take(&mut work.supplied),
                 std::mem::take(&mut work.tiles),
+                std::mem::take(&mut work.detailed),
             )
         };
         let stopping = inner.stop.load(Ordering::Relaxed);
         for record in tiles {
             inner.write(record);
         }
+        // After the samples queued before them, which they replace.
+        for (key, columns) in detailed {
+            inner.put(tile_at(key), &columns, FULL, DETAILED);
+        }
         for (chunk, columns) in chunks {
             if inner.pyramid {
                 pyramid.set_chunk(&inner, chunk, &columns);
             } else {
-                inner.put(chunk_at(chunk), &columns[..], FULL, false);
+                inner.put(chunk_at(chunk), &columns[..], FULL, 0);
             }
         }
         for (key, columns, known) in supplied {
@@ -891,7 +930,7 @@ impl Pyramid {
             let Some(tile) = self.tiles.get(&key) else {
                 continue;
             };
-            inner.put(tile_at(key), &tile.columns, tile.known, false);
+            inner.put(tile_at(key), &tile.columns, tile.known, 0);
             if key.level >= REFRESH_LEVEL {
                 changed.push(key);
             }

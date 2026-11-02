@@ -752,6 +752,8 @@ enum Done {
     Sample {
         key: TileKey,
         samples: Vec<Column>,
+        /// The far store kept it with its detail applied (`FarStore::detailed`).
+        detailed: bool,
     },
     Mesh {
         key: TileKey,
@@ -844,6 +846,18 @@ struct Shared {
     approximate: AtomicBool,
     /// On small machines, hold queued far meshing while near terrain loads.
     mesh_held: AtomicBool,
+    /// The near terrain is loading: the far threads step behind it
+    /// (`horizon_threads::far_terrain_behind`) and come back once it is in.
+    near_loading: AtomicBool,
+}
+/// Puts the calling far terrain thread behind the near terrain while it
+/// loads, and back once it is in. `behind`: where the thread is now.
+fn step_behind(shared: &Shared, behind: &mut bool) {
+    let loading = shared.near_loading.load(Ordering::Relaxed);
+    if loading != *behind {
+        horizon_threads::far_terrain_behind(loading);
+        *behind = loading;
+    }
 }
 /// One background worker and at most two outstanding sample jobs. Only the
 /// current view's quadtree and a bounded set of visited summaries are retained.
@@ -966,6 +980,7 @@ impl Lod {
             stop: AtomicBool::new(false),
             approximate: AtomicBool::new(false),
             mesh_held: AtomicBool::new(false),
+            near_loading: AtomicBool::new(false),
         });
         let worker = shared.clone();
         let (tx, results) = mpsc::channel();
@@ -986,6 +1001,7 @@ impl Lod {
                         .name("Far meshing".into())
                         .spawn(move || {
                             horizon_threads::far_terrain_current();
+                            let mut behind = true;
                             let mut mesher = mesh::Mesher::default();
                             loop {
                                 let job = {
@@ -1016,6 +1032,7 @@ impl Lod {
                                     }
                                     continue;
                                 }
+                                step_behind(&shared, &mut behind);
                                 let keep_finer = !job.finer.is_empty();
                                 let input = job.snapshot.mesh_input(job.key, job.finer);
                                 let columns = input.columns();
@@ -1066,12 +1083,19 @@ impl Lod {
                         .expect("far meshing worker"),
                 );
             }
+            // Whether the store kept a sampled tile with its detail applied.
+            let detailed = |store: &Option<Arc<store::FarStore>>, key: TileKey| {
+                key.level <= DETAIL_LEVEL
+                    && store.as_ref().is_some_and(|store| store.detailed(key))
+            };
+            let sample_store = store.clone();
             handle = Some(
                 thread::Builder::new()
                     .name("Far terrain".into())
                     .spawn(move || {
                         // Ticks and frames come first (horizon_threads).
                         horizon_threads::far_terrain_current();
+                        let mut behind = true;
                         let mut sampler = source.sampler();
                         let count = sampling_threads(cores);
                         let mut sampling = Vec::new();
@@ -1081,11 +1105,13 @@ impl Lod {
                             };
                             let shared = worker.clone();
                             let tx = tx.clone();
+                            let store = sample_store.clone();
                             sampling.push(
                                 thread::Builder::new()
                                     .name("Far sampling".into())
                                     .spawn(move || {
                                         horizon_threads::far_terrain_current();
+                                        let mut behind = true;
                                         loop {
                                             let key = {
                                                 let mut jobs = shared.jobs.lock().unwrap();
@@ -1108,6 +1134,7 @@ impl Lod {
                                                     jobs = shared.wake.wait(jobs).unwrap();
                                                 }
                                             };
+                                            step_behind(&shared, &mut behind);
                                             let [x, _, z] = key.origin();
                                             sample.set_approximate(
                                                 shared.approximate.load(Ordering::Relaxed),
@@ -1117,7 +1144,14 @@ impl Lod {
                                             if shared.stop.load(Ordering::Relaxed) {
                                                 return;
                                             }
-                                            if tx.send(Done::Sample { key, samples }).is_err() {
+                                            if tx
+                                                .send(Done::Sample {
+                                                    key,
+                                                    samples,
+                                                    detailed: detailed(&store, key),
+                                                })
+                                                .is_err()
+                                            {
                                                 return;
                                             }
                                         }
@@ -1159,6 +1193,7 @@ impl Lod {
                                 }
                             };
                             let Some(job) = job else { continue };
+                            step_behind(&worker, &mut behind);
                             let done = match job {
                                 Job::Observe(key) => {
                                     let chunk = worker.observed.lock().unwrap().remove(&key);
@@ -1182,7 +1217,11 @@ impl Lod {
                                     );
                                     let samples =
                                         sampler.grid(x, z, key.size() / CELLS as i32, CELLS);
-                                    Done::Sample { key, samples }
+                                    Done::Sample {
+                                        key,
+                                        samples,
+                                        detailed: detailed(&sample_store, key),
+                                    }
                                 }
                             };
                             if tx.send(done).is_err() {
@@ -1612,26 +1651,38 @@ impl Lod {
         self.saved.insert(key, columns.columns.clone());
         self.finish_detail(key, columns);
     }
-    fn apply_fine(&mut self, (cx, cz): (i32, i32), columns: &[Column; 256]) {
+    /// The finest tile of a chunk takes its columns. Whether they changed it.
+    fn apply_fine(&mut self, (cx, cz): (i32, i32), columns: &[Column; 256]) -> bool {
         let fine = TileKey {
             x: cx,
             z: cz,
             level: 0,
         };
-        if self.plan.nodes.contains(&fine) || self.ready.contains_key(&fine) {
-            let existed = self
-                .ready
-                .insert(fine, Arc::new(columns.to_vec()))
-                .is_some();
-            self.detail_masks.insert(fine, [u64::MAX; 4]);
-            self.refresh_path(fine);
-            if existed {
-                self.data_changed(fine, (cx, cz));
-            }
+        if !self.plan.nodes.contains(&fine) && !self.ready.contains_key(&fine) {
+            return false;
         }
+        self.detail_masks.insert(fine, [u64::MAX; 4]);
+        let old = self.ready.get(&fine);
+        if old.is_some_and(|old| old[..] == columns[..]) {
+            return false;
+        }
+        let existed = old.is_some();
+        self.ready.insert(fine, Arc::new(columns.to_vec()));
+        self.refresh_path(fine);
+        if existed {
+            self.data_changed(fine, (cx, cz));
+        }
+        true
     }
     fn apply_detail(&mut self, (cx, cz): (i32, i32), columns: &ReducedColumns) {
-        self.apply_fine((cx, cz), &columns.columns);
+        let mut detailed = Vec::new();
+        if self.apply_fine((cx, cz), &columns.columns) && !self.saved.contains_key(&(cx, cz)) {
+            detailed.push(TileKey {
+                x: cx,
+                z: cz,
+                level: 0,
+            });
+        }
         let mut modified = Vec::new();
         // A single generated chunk cannot describe a larger cell's area
         // (strides over 16 blocks, levels over 4); at each level up to that,
@@ -1655,25 +1706,54 @@ impl Lod {
             if x0 == x1 || z0 == z1 {
                 continue;
             }
-            let samples = Arc::make_mut(samples);
+            let detail = |x: i32, z: i32| {
+                columns.get(
+                    (ox + x * stride).rem_euclid(16) as usize,
+                    (oz + z * stride).rem_euclid(16) as usize,
+                    stride as usize,
+                )
+            };
+            // The same columns again (a chunk the store already gave the
+            // tile, or the finest tile `apply_fine` just set) remesh nothing.
+            let same = (z0..z1)
+                .all(|z| (x0..x1).all(|x| samples[(z * 16 + x) as usize] == *detail(x, z)));
             let mask = self.detail_masks.entry(key).or_default();
+            let was_complete = *mask == [u64::MAX; 4];
             for z in z0..z1 {
                 for x in x0..x1 {
                     let index = (z * 16 + x) as usize;
-                    samples[index] = columns
-                        .get(
-                            (ox + x * stride).rem_euclid(16) as usize,
-                            (oz + z * stride).rem_euclid(16) as usize,
-                            stride as usize,
-                        )
-                        .clone();
                     mask[index / 64] |= 1 << (index % 64);
+                }
+            }
+            // A tile whose detail is all in is kept with it, so that the
+            // next session reads it whole rather than asking again.
+            if level > 0
+                && level <= DETAIL_LEVEL
+                && *mask == [u64::MAX; 4]
+                && !(same && was_complete)
+            {
+                detailed.push(key);
+            }
+            if same {
+                continue;
+            }
+            let samples = Arc::make_mut(samples);
+            for z in z0..z1 {
+                for x in x0..x1 {
+                    samples[(z * 16 + x) as usize] = detail(x, z).clone();
                 }
             }
             modified.push(key);
         }
         for key in modified {
             self.data_changed(key, (cx, cz));
+        }
+        if let Some(store) = self.store.as_ref().filter(|store| !store.is_pyramid()) {
+            for key in detailed {
+                if let Some(columns) = self.ready.get(&key) {
+                    store.put_detailed(key, columns.clone());
+                }
+            }
         }
     }
     /// Whether the renderer hides tiles over `chunk`: it is in the near area.
@@ -1723,8 +1803,14 @@ impl Lod {
                     }
                 }
             }
-            let existed = self.ready.insert(key, Arc::new(samples)).is_some();
-            self.refresh_ready(key, existed);
+            // Sampled again to the same columns (a store tile refreshed with
+            // nothing new): its mesh stands.
+            let changed = self
+                .ready
+                .get(&key)
+                .is_some_and(|old| old[..] != samples[..]);
+            self.ready.insert(key, Arc::new(samples));
+            self.refresh_ready(key, changed);
         }
     }
     fn finish_detail(&mut self, key: (i32, i32), columns: ReducedColumns) {
@@ -1747,6 +1833,7 @@ impl Lod {
     /// terrain then holds back (`HELD_SAMPLE_STEP`).
     pub fn set_near_loading(&mut self, loading: bool) {
         self.near_loading = loading;
+        self.shared.near_loading.store(loading, Ordering::Relaxed);
         let held = self.held();
         if self.shared.mesh_held.swap(held, Ordering::Release) && !held {
             self.shared.mesh_wake.notify_all();
@@ -1996,7 +2083,17 @@ impl Lod {
                     crate::spans::time("lod_detail", || self.finish_observed(key, columns))
                 }
                 Done::DetailRequested => self.detail_request_pending = false,
-                Done::Sample { key, samples } => self.finish_sample(key, samples),
+                Done::Sample {
+                    key,
+                    samples,
+                    detailed,
+                } => {
+                    self.finish_sample(key, samples);
+                    // Its detail came from the store: nothing to request.
+                    if detailed && self.ready.contains_key(&key) {
+                        self.detail_masks.insert(key, [u64::MAX; 4]);
+                    }
+                }
                 Done::Mesh {
                     key,
                     version,
@@ -2336,6 +2433,7 @@ impl Lod {
                 || self.ready.contains_key(&key)
                 || !self.plan.nodes.contains(&key)
                 || self.replaced_by_children(key)
+                || !self.stands_in(key)
             {
                 continue;
             }
@@ -2374,12 +2472,37 @@ impl Lod {
     fn rebuild_wanted(&mut self, camera: [i32; 2]) {
         self.wanted.clear();
         for &key in &self.plan.nodes {
-            if self.ready.contains_key(&key) || self.replaced_by_children(key) {
+            if self.ready.contains_key(&key)
+                || self.replaced_by_children(key)
+                || !self.stands_in(key)
+            {
                 continue;
             }
             self.wanted
                 .push(std::cmp::Reverse(Wanted::new(key, camera)));
         }
+    }
+    /// Whether `key` is worth sampling for what it covers: a leaf always; a
+    /// split tile only while nothing above it is ready or on its way. Every
+    /// split tile used to be sampled before the leaves, each drawn for a
+    /// moment, remeshed as every leaf under it arrived and then retired: a
+    /// third more sampling and a far view that kept changing for minutes.
+    /// One stand-in per leaf is enough for coverage.
+    fn stands_in(&self, key: TileKey) -> bool {
+        if !self.plan.split.contains(&key) {
+            return true;
+        }
+        let mut node = key;
+        while node.level < MAX_LEVEL {
+            node = node.parent();
+            if !self.plan.nodes.contains(&node) {
+                break;
+            }
+            if self.ready.contains_key(&node) || self.pending.contains(&node) {
+                return false;
+            }
+        }
+        true
     }
 
     #[cfg(test)]
@@ -3491,8 +3614,8 @@ mod tests {
 
     /// The far view fills coarse first: every leaf has a coarse stand-in
     /// early, and the sampler never asks for a finer tile while a coarser
-    /// one is waiting. Coarse tiles that their ready children replace are
-    /// not sampled.
+    /// one is waiting. A split tile is sampled only where nothing above it
+    /// stands in.
     #[test]
     fn coarse_tiles_are_sampled_before_finer_ones_and_nearest_first() {
         let mut lod = Lod::scheduler_for_test();
@@ -3515,10 +3638,18 @@ mod tests {
             keys
         };
         let keys = queued(&mut lod);
+        let wanted = lod
+            .plan
+            .nodes
+            .iter()
+            .filter(|key| {
+                !lod.plan.split.contains(key) || !lod.plan.nodes.contains(&key.parent())
+            })
+            .count();
         assert_eq!(
             keys.len(),
-            lod.plan.nodes.len(),
-            "split tiles are sampled too"
+            wanted,
+            "every leaf, and the split tiles nothing coarser stands in for"
         );
         for pair in keys.windows(2) {
             assert!(
@@ -3534,19 +3665,26 @@ mod tests {
             lod.plan.nodes.iter().map(|k| k.level).max().unwrap()
         );
 
-        // A split tile whose planned children are all ready is not wanted.
-        let parent = *keys
-            .iter()
-            .rev()
-            .find(|key| lod.plan.split.contains(key) && key.level == 1)
-            .unwrap();
-        for child in parent.children() {
-            lod.finish_sample(child, vec![Column::default(); CELLS * CELLS]);
-        }
-        assert!(!lod.ready.contains_key(&parent));
+        // Under a ready root only leaves are sampled: the root stands in.
+        let root = keys[0];
+        assert!(lod.plan.split.contains(&root));
+        lod.finish_sample(root, vec![Column::default(); CELLS * CELLS]);
+        let under = |key: &TileKey| {
+            let mut node = *key;
+            while node.level < root.level {
+                node = node.parent();
+            }
+            node == root
+        };
         let keys = queued(&mut lod);
-        assert!(!keys.contains(&parent), "its children replace it");
-        assert!(keys.iter().any(|key| key.level > 1), "coarser tiles stay");
+        assert!(!keys.contains(&root));
+        assert!(
+            keys.iter()
+                .filter(|key| under(key))
+                .all(|key| !lod.plan.split.contains(key)),
+            "a split tile under a ready one"
+        );
+        assert!(keys.iter().any(under), "its leaves are still wanted");
     }
 
     /// A neighbour inside the plan that is not drawn yet is unknown, not
