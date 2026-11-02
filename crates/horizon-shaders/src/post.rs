@@ -432,6 +432,8 @@ pub struct Post {
     pub sizes: [Option<BufferSize>; crate::BUFFERS],
     /// `bufferObject.*`, by binding.
     pub buffer_objects: std::collections::BTreeMap<u32, BufferObject>,
+    /// Binary contents loaded from fixed-size `bufferObject.<n> = bytes path` declarations.
+    pub buffer_initializers: std::collections::BTreeMap<u32, Vec<u8>>,
     /// `image.*`.
     pub images: Vec<CustomImage>,
     /// `shadow.culling`: `false` draws everything within the shadow distance, every face, not
@@ -563,6 +565,7 @@ pub fn load_post(
         textures: Vec::new(),
         sizes: [None; crate::BUFFERS],
         buffer_objects: Default::default(),
+        buffer_initializers: Default::default(),
         images: Vec::new(),
         shadow_culling: match properties.get("shadow.culling").map(str::trim) {
             Some("false") => ShadowCulling::Off,
@@ -575,9 +578,27 @@ pub fn load_post(
     let options = crate::with_options(pack, macros);
     for e in &properties.entries {
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
-            match (n.parse(), BufferObject::parse(&e.value)) {
-                (Ok(n), Some(b)) => _ = post.buffer_objects.insert(n, b),
-                _ => post.notes.push(format!("`{}`: not a buffer object", e.key)),
+            let words: Vec<_> = e.value.split_whitespace().collect();
+            let loaded = if let [bytes, path] = words.as_slice()
+                && !matches!(*path, "true" | "false")
+            {
+                bytes.parse::<u64>().ok().and_then(|size| {
+                    let data = pack.read(path)?;
+                    (data.len() as u64 <= size).then_some((BufferObject::Bytes(size), Some(data)))
+                })
+            } else {
+                BufferObject::parse(&e.value).map(|b| (b, None))
+            };
+            match (n.parse(), loaded) {
+                (Ok(n), Some((b, initial))) => {
+                    post.buffer_objects.insert(n, b);
+                    if let Some(data) = initial {
+                        post.buffer_initializers.insert(n, data);
+                    }
+                }
+                _ => post.notes.push(format!(
+                    "`{}`: invalid buffer object or initialization file (missing, outside shaders, or larger than the declared size)", e.key
+                )),
             }
             continue;
         }
@@ -1320,6 +1341,69 @@ fn flips(properties: &Properties, program: &str) -> Vec<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_buffer_initialization_declaration_is_loaded() {
+        let pack = Pack::from_zip_bytes(
+            "original-ssbo-control",
+            crate::pack::tests::zip(&[
+                (
+                    "shaders/shaders.properties",
+                    "bufferObject.2 = 16 data/seed.bin\n",
+                ),
+                ("shaders/data/seed.bin", "ABCDEFGHIJKLMNOP"),
+            ]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse(&pack.read_text("shaders.properties").unwrap(), &macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(post.buffer_objects.get(&2), Some(&BufferObject::Bytes(16)));
+        assert_eq!(
+            post.buffer_initializers.get(&2).unwrap(),
+            b"ABCDEFGHIJKLMNOP"
+        );
+    }
+
+    #[test]
+    fn buffer_initialization_rejects_missing_escaping_and_oversized_files() {
+        let pack = Pack::from_zip_bytes(
+            "t",
+            crate::pack::tests::zip(&[("shaders/seed.bin", "seed")]),
+        )
+        .unwrap();
+        for declaration in [
+            "16 missing.bin",
+            "16 ../seed.bin",
+            "3 seed.bin",
+            "4 true 1 1 seed.bin",
+        ] {
+            let properties = Properties::parse(
+                &format!("bufferObject.0={declaration}"),
+                &Macros::standard(),
+            );
+            let post = load_post(
+                &pack,
+                "",
+                &properties,
+                &Macros::standard(),
+                &GameInputs::default(),
+            );
+            assert!(!post.notes.is_empty(), "{declaration}");
+            assert!(post.buffer_objects.is_empty(), "{declaration}");
+            assert!(post.buffer_initializers.is_empty(), "{declaration}");
+        }
+        let properties = Properties::parse("bufferObject.0=16 seed.bin", &Macros::standard());
+        let post = load_post(
+            &pack,
+            "",
+            &properties,
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+        assert_eq!(post.buffer_initializers.get(&0).unwrap(), b"seed");
+    }
 
     #[test]
     fn image_dimensions_expand_default_and_chosen_options() {

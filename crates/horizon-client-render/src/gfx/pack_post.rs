@@ -1805,7 +1805,13 @@ impl PackPost {
         if gpu.storage_stages().is_empty() {
             objects.clear();
         }
-        let buffers = pack_images::Buffers::new(device, objects, minimums, gpu.storage_stages());
+        let buffers = pack_images::Buffers::new(
+            device,
+            objects,
+            std::mem::take(&mut post.buffer_initializers),
+            minimums,
+            gpu.storage_stages(),
+        );
         let storable = (0..BUFFERS)
             .filter(|&i| gpu.storable(adapter, formats[i], features))
             .fold(0u16, |m, i| m | 1 << i);
@@ -4234,6 +4240,7 @@ mod tests {
         };
         let buffers = pack_images::Buffers::new(
             &device,
+            Default::default(),
             Default::default(),
             Default::default(),
             wgpu::ShaderStages::FRAGMENT,

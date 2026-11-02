@@ -370,6 +370,7 @@ pub(super) fn stand_in(
 pub(super) struct Buffers {
     pub(super) layout: wgpu::BindGroupLayout,
     objects: BTreeMap<u32, BufferObject>,
+    initializers: BTreeMap<u32, Vec<u8>>,
     /// The fewest bytes each one's shaders bind it as (`Post::buffer_minimums`).
     minimums: BTreeMap<u32, u64>,
     pub(super) group: Option<wgpu::BindGroup>,
@@ -382,10 +383,23 @@ impl Buffers {
     /// `minimums` long.
     pub(super) fn new(
         device: &wgpu::Device,
-        objects: BTreeMap<u32, BufferObject>,
+        mut objects: BTreeMap<u32, BufferObject>,
+        initializers: BTreeMap<u32, Vec<u8>>,
         minimums: BTreeMap<u32, u64>,
         stages: wgpu::ShaderStages,
     ) -> Self {
+        let limits = device.limits();
+        let largest = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size)
+            & !3;
+        objects.retain(|binding, _| {
+            let fits = initializers.get(binding).is_none_or(|data| data.len() as u64 <= largest);
+            if !fits {
+                log::warn!("shader pack: bufferObject.{binding} initialization exceeds the device limit {largest}");
+            }
+            fits
+        });
         let entries: Vec<_> = objects
             .keys()
             .map(|&binding| wgpu::BindGroupLayoutEntry {
@@ -406,6 +420,7 @@ impl Buffers {
         Self {
             layout,
             objects,
+            initializers,
             minimums,
             group: None,
             buffers: Vec::new(),
@@ -414,7 +429,8 @@ impl Buffers {
     }
 
     /// Makes the buffers (again, when one depends on the render size and it changed): their
-    /// contents start zeroed and persist across frames.
+    /// contents start with the optional binary initializer (zero elsewhere) and persist across frames.
+    /// Resizing relative buffers preserves the fixed-size buffers and their current contents.
     pub(super) fn resize(&mut self, device: &wgpu::Device, size: [u32; 2]) {
         let relative = self
             .objects
@@ -428,10 +444,17 @@ impl Buffers {
             .max_buffer_size
             .min(limits.max_storage_buffer_binding_size)
             & !3;
+        let previous = std::mem::take(&mut self.buffers);
         self.buffers = self
             .objects
             .iter()
-            .map(|(binding, o)| {
+            .enumerate()
+            .map(|(index, (binding, o))| {
+                if matches!(o, BufferObject::Bytes(_))
+                    && let Some(buffer) = previous.get(index)
+                {
+                    return buffer.clone();
+                }
                 let least = self.minimums.get(binding).copied().unwrap_or(0);
                 let wanted = buffer_size(*o, size, least);
                 if wanted > largest {
@@ -440,12 +463,22 @@ impl Buffers {
                          binds at most {largest}"
                     );
                 }
-                device.create_buffer(&wgpu::BufferDescriptor {
+                let initial = self.initializers.get(binding);
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Shader pack buffer"),
                     size: wanted.min(largest),
                     usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                })
+                    mapped_at_creation: initial.is_some(),
+                });
+                if let Some(data) = initial {
+                    buffer
+                        .slice(..)
+                        .get_mapped_range_mut()
+                        .expect("new buffer is mapped")[..data.len()]
+                        .copy_from_slice(data);
+                    buffer.unmap();
+                }
+                buffer
             })
             .collect();
         let entries: Vec<_> = self
@@ -592,3 +625,7 @@ mod tests {
         assert_eq!(buffer_size(per_pixel, [4, 4], 64), 64);
     }
 }
+
+#[cfg(test)]
+#[path = "pack_images/buffer_init_tests.rs"]
+mod buffer_init_tests;
