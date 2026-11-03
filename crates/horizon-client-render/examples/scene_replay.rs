@@ -654,6 +654,7 @@ fn remesh(
                         smooth_lighting,
                         cutout_leaves,
                         translucent_layers: &[],
+                        shader_layers: &[],
                         leaf_culling,
                     };
                     let mut scratch = MeshScratch::default();
