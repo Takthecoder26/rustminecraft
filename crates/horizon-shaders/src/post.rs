@@ -1062,7 +1062,7 @@ impl Loader<'_> {
         if fade && file.starts_with("gbuffers_") && file.ends_with(".vsh") {
             // The input is automatic and opt-in. Other gbuffers programs receive a
             // constant sentinel, so it is also valid in constant expressions.
-            let declaration = if file.starts_with("gbuffers_terrain") {
+            let declaration = if file == "gbuffers_terrain.vsh" {
                 "attribute float mc_chunkFade;\n"
             } else {
                 "const float mc_chunkFade = -1.0;\n"
