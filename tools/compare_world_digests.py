@@ -10,7 +10,9 @@ must include every dimension at every tick, in serial commit order.
 Exporters must hash canonical simulation state at the same post-tick barrier.
 Object keys may be canonicalized; order-sensitive queues, candidates, entities
 and RNG states must retain simulation order. Include unloaded/pending state,
-not just visible chunks. See issue #8018 for the scheduler/digest contract.
+not just visible chunks. The iteration component must retain tickable-chunk,
+entity and candidate traversal order, independently of canonical block storage.
+See issue #8018 for the scheduler/digest contract.
 A region transcript must come from a real region runtime: this tool provides
 no serial-as-parallel fallback. Missing inputs and malformed/incomplete traces
 and duplicate JSON fields fail closed. Matching traces prove only the supplied workload, not all parity.
@@ -24,7 +26,7 @@ FORMAT = 'horizon-world-digests-v1'
 REQUIRED = frozenset({
     'blocks', 'block_entities', 'entities', 'scheduled_block_ticks',
     'scheduled_fluid_ticks', 'block_events', 'random', 'tickets', 'poi',
-    'transfers',
+    'transfers', 'iteration',
 })
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
