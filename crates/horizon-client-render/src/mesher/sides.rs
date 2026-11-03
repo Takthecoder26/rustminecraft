@@ -216,14 +216,6 @@ pub fn sort_tinted(solid: &mut Vec<TerrainVertex>, tints: &mut Vec<u32>) -> Side
     SORT_SCRATCH.with_borrow_mut(|scratch| sort_with(solid, tints, grouped, scratch))
 }
 
-/// `sort`, retaining each quad's source record.
-pub fn sort_provenance(
-    solid: &mut Vec<TerrainVertex>,
-    provenance: Option<&mut Vec<[u32; 2]>>,
-) -> Sides {
-    sort_tinted_provenance(solid, &mut Vec::new(), provenance)
-}
-
 /// Move tint and source records with the same stable quad permutation.
 pub fn sort_tinted_provenance(
     solid: &mut Vec<TerrainVertex>,

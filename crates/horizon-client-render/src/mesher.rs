@@ -390,11 +390,14 @@ impl SectionMesh {
         if !self.solid_tints.is_empty() {
             self.solid_tints.resize(quads, packed::UNKNOWN_TINT);
         }
-        self.sides = sides::sort_tinted_provenance(
-            &mut self.solid,
-            &mut self.solid_tints,
-            self.provenance.as_mut().map(|p| &mut p[0]),
-        );
+        self.sides = match self.provenance.as_mut() {
+            Some(records) => sides::sort_tinted_provenance(
+                &mut self.solid,
+                &mut self.solid_tints,
+                Some(&mut records[0]),
+            ),
+            None => sides::sort_tinted(&mut self.solid, &mut self.solid_tints),
+        };
         self.bounds = self.compute_bounds();
         self.packed.clear();
         if packed::packing() && quads > 0 && self.solid_tints.len() == quads {
