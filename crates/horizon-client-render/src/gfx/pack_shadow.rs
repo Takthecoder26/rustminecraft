@@ -26,6 +26,16 @@ fn clear(c: [f32; 4]) -> Ops<Color> {
     }
 }
 
+/// Resources demanded by accepted shadow programs and their readers.
+#[derive(Default)]
+pub(super) struct Usage {
+    pub colors: u16,
+    pub storage: u16,
+    pub copied: u16,
+    pub depth1: bool,
+    pub sink: bool,
+}
+
 /// What the shadow pass writes and the programs read.
 pub(super) struct ShadowTargets {
     pub size: u32,
@@ -38,6 +48,8 @@ pub(super) struct ShadowTargets {
     /// The clear colour of each buffer cleared every frame.
     pub scratch: [Option<wgpu::TextureView>; 2],
     pub storage: u16,
+    /// Shadow-resolution invocation coverage for fragment programs writing only images.
+    pub sink: Option<wgpu::TextureView>,
     pub clears: [Option<[f32; 4]>; 2],
     /// Bit n set: B is shadowcolor n's "main".
     pub main: u16,
@@ -82,11 +94,15 @@ impl ShadowTargets {
         device: &wgpu::Device,
         shadow: &horizon_shaders::Shadow,
         formats: [wgpu::TextureFormat; 2],
-        colors: u16,
-        storage: u16,
-        copied: u16,
-        depth1: bool,
+        usage: Usage,
     ) -> Self {
+        let Usage {
+            colors,
+            storage,
+            copied,
+            depth1,
+            sink,
+        } = usage;
         let size = shadow
             .resolution
             .clamp(1, device.limits().max_texture_dimension_2d);
@@ -122,6 +138,16 @@ impl ShadowTargets {
             depth1: depth1.then(|| target(device, "Shader pack shadowtex1", size, depth, copy)),
             color,
             storage,
+            sink: sink.then(|| {
+                target(
+                    device,
+                    "Shader pack shadow image sink",
+                    size,
+                    wgpu::TextureFormat::R8Unorm,
+                    wgpu::TextureUsages::empty(),
+                )
+                .1
+            }),
             scratch: std::array::from_fn(|n| {
                 (copied & 1 << n != 0).then(|| {
                     target(

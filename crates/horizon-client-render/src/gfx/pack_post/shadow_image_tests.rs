@@ -287,10 +287,11 @@ fn shadow_image_early_color_clear_keeps_depth_until_shadow_draw() {
         &gpu.device,
         &config,
         [T::Rgba8Unorm; 2],
-        1,
-        1,
-        0,
-        false,
+        super::super::pack_shadow::Usage {
+            colors: 1,
+            storage: 1,
+            ..Default::default()
+        },
     );
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -356,6 +357,41 @@ fn shadow_image_early_color_clear_keeps_depth_until_shadow_draw() {
     let (depth, colors) = targets.clear_ops(std::iter::once(0));
     assert!(matches!(depth.load, wgpu::LoadOp::Clear(1.0)));
     assert!(matches!(colors[0].load, wgpu::LoadOp::Load));
+}
+
+#[test]
+#[ignore = "requires a host GPU; run with --ignored --nocapture"]
+fn shadow_image_only_fragment_pass_uses_shadow_resolution_sink() {
+    let gpu = Fixture::new().expect("GPU required");
+    let mut post=gpu.build(original(&[
+        ("shadowcomp.vsh","#version 120\nvoid main(){gl_Position=ftransform();}\n"),
+        ("shadowcomp.fsh","#version 430\nconst int shadowMapResolution=16;\nlayout(rgba8) writeonly uniform image2D shadowcolorimg0;\nvoid main(){imageStore(shadowcolorimg0,ivec2(gl_FragCoord.xy),vec4(0.25,0.5,0.75,1));}\n"),
+        ("final.vsh","#version 120\nvoid main(){gl_Position=ftransform();}\n"),
+        ("final.fsh","#version 430\nlayout(rgba8) readonly uniform image2D shadowcolorimg0;\nvoid main(){gl_FragColor=imageLoad(shadowcolorimg0,ivec2(15));}\n"),
+    ]));
+    assert!(
+        post.notes.iter().all(|n| n.starts_with("shadow map ")),
+        "{:?}",
+        post.notes
+    );
+    assert_eq!(
+        post.shadow_targets
+            .as_ref()
+            .unwrap()
+            .sink
+            .as_ref()
+            .unwrap()
+            .texture()
+            .width(),
+        16
+    );
+    for size in [[8, 8], [16, 16]] {
+        assert!(gpu.render(&mut post, size).iter().all(|p| {
+            p.iter()
+                .zip([64u8, 128, 191, 255])
+                .all(|(a, b)| a.abs_diff(b) <= 1)
+        }));
+    }
 }
 
 struct Fixture {

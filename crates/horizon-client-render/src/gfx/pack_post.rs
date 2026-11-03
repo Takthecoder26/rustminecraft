@@ -1498,6 +1498,13 @@ fn build_pass(
         return None;
     }
     let written = writes.iter().fold(0u16, |m, w| m | 1 << w.1);
+    if geometry.is_some() && p.group.shadow() && written & shadow_images(&images) != 0 {
+        notes.push(format!(
+            "{}: a shadow attachment cannot also be a storage image on this GPU; skipped",
+            p.name
+        ));
+        return None;
+    }
     let kept = p
         .flips
         .iter()
@@ -2263,8 +2270,9 @@ impl PackPost {
             let depth1 = all()
                 .flat_map(|p| &p.samplers)
                 .any(|s| matches!(s.source, Source::ShadowDepth(1, _)));
-            let t =
-                super::pack_shadow::ShadowTargets::new(device, &shadow_config, f, colors, storage, copied, depth1);
+            let sink = all().any(|p| p.group == Group::ShadowComp && p.sink);
+            let t = super::pack_shadow::ShadowTargets::new(device, &shadow_config, f,
+                super::pack_shadow::Usage {colors,storage,copied,depth1,sink});
             notes.push(format!(
                 "shadow map {0}x{0} over {2} blocks, sunPathRotation {3}, shadowcolor buffers {colors:#b}{1}",
                 t.size,
@@ -3727,6 +3735,12 @@ impl PackPost {
                     store: wgpu::StoreOp::Store,
                 };
                 attachments[l] = t.color(buffer, true).and_then(|v| attach(v, ops));
+            }
+            if pass.sink {
+                attachments.push(attach(
+                    t.sink.as_ref().expect("shadow image sink"),
+                    super::pack_shadow::load(),
+                ));
             }
             {
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
