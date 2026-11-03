@@ -9564,12 +9564,9 @@ impl Frustum {
     /// Whether the camera-relative box `min..max` is at least partly inside.
     pub fn intersects(&self, min: Vec3, max: Vec3) -> bool {
         !self.planes.iter().any(|p| {
-            let v = Vec3::new(
-                if p.x >= 0.0 { max.x } else { min.x },
-                if p.y >= 0.0 { max.y } else { min.y },
-                if p.z >= 0.0 { max.z } else { min.z },
-            );
-            p.truncate().dot(v) + p.w < 0.0
+            let n = p.truncate();
+            let v = Vec3::select(n.cmplt(Vec3::ZERO), min, max);
+            n.dot(v) + p.w < 0.0
         })
     }
     /// Whether the camera-relative box `min..max` is entirely inside. Then
@@ -9578,12 +9575,9 @@ impl Frustum {
     /// rounding keeps that order.
     pub fn contains(&self, min: Vec3, max: Vec3) -> bool {
         self.planes.iter().all(|p| {
-            let v = Vec3::new(
-                if p.x >= 0.0 { min.x } else { max.x },
-                if p.y >= 0.0 { min.y } else { max.y },
-                if p.z >= 0.0 { min.z } else { max.z },
-            );
-            p.truncate().dot(v) + p.w >= 0.0
+            let n = p.truncate();
+            let v = Vec3::select(n.cmplt(Vec3::ZERO), max, min);
+            n.dot(v) + p.w >= 0.0
         })
     }
 }
