@@ -7,25 +7,25 @@
 //! player's own accent comes out as it does on the website.
 
 /// The mockup's defaults: accent, how much white the plates take, and their blur in px.
-pub const ACCENT: u32 = 0x6b4bff;
+pub const ACCENT: u32 = 0x006b_4bff;
 pub const TINT: f32 = 0.06;
 pub const BLUR: f32 = 24.;
 /// Behind the scene before it is drawn.
-pub const PAGE: u32 = 0x0a0919;
+pub const PAGE: u32 = 0x000a_0919;
 /// The dark text on a light accent, and on the white buttons.
-pub const ON_LIGHT: u32 = 0x100a1f;
+pub const ON_LIGHT: u32 = 0x0010_0a1f;
 /// A running game or server, and a ready instance.
-pub const LIVE: u32 = 0x4ade80;
+pub const LIVE: u32 = 0x004a_de80;
 /// Busy (pulsing) and partly-working states.
-pub const WARN: u32 = 0xf2c46b;
+pub const WARN: u32 = 0x00f2_c46b;
 /// Destructive menu rows (`#ff8a8a`, hovered over `#ff6b6b` at 12 %).
-pub const DANGER: u32 = 0xff8a8a;
-pub const DANGER_HOVER: u32 = 0xff6b6b;
+pub const DANGER: u32 = 0x00ff_8a8a;
+pub const DANGER_HOVER: u32 = 0x00ff_6b6b;
 /// The Discord button and its hover.
-pub const DISCORD: u32 = 0x5865f2;
-pub const DISCORD_HOVER: u32 = 0x4752c4;
+pub const DISCORD: u32 = 0x0058_65f2;
+pub const DISCORD_HOVER: u32 = 0x0047_52c4;
 /// The scrim under dialogs and the palette: this colour at 50 %.
-pub const SCRIM: u32 = 0x07050f;
+pub const SCRIM: u32 = 0x0007_050f;
 
 /// Text families: Geist for everything, Bricolage for page, instance and dialog names.
 pub const FONT: &str = crate::FONT;
@@ -99,7 +99,7 @@ impl Glass {
     /// `--base: color-mix(in oklab, accent 10%, #14111d)`, and `.hzl-glass`'s background
     /// `color-mix(in srgb, white tint, color-mix(in oklab, base 22%, transparent))`.
     pub fn new(accent: u32, tint: f32, blur: f32) -> Glass {
-        let base = mix_oklab(accent, 0x14111d, 0.10);
+        let base = mix_oklab(accent, 0x0014_111d, 0.10);
         // White at `tint` over the base at 22 %, mixed with premultiplied alpha as CSS does.
         let base_alpha = 0.22;
         let alpha = tint + (1. - tint) * base_alpha;
@@ -109,12 +109,12 @@ impl Glass {
         });
         Glass {
             accent,
-            accent_soft: mix_oklab(accent, 0xffffff, 0.52),
+            accent_soft: mix_oklab(accent, 0x00ff_ffff, 0.52),
             base,
             on_accent: if luminance(accent) > 0.4 {
                 ON_LIGHT
             } else {
-                0xffffff
+                0x00ff_ffff
             },
             plate,
             plate_alpha: alpha,
@@ -165,6 +165,7 @@ fn channels(f: impl Fn(u32) -> f32) -> u32 {
     })
 }
 
+#[allow(clippy::unreadable_literal)]
 fn to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
@@ -173,6 +174,7 @@ fn to_linear(c: f32) -> f32 {
     }
 }
 
+#[allow(clippy::unreadable_literal)]
 fn from_linear(c: f32) -> f32 {
     if c <= 0.0031308 {
         c * 12.92
@@ -184,6 +186,7 @@ fn from_linear(c: f32) -> f32 {
 /// sRGB to OKLab (Björn Ottosson's matrices, as CSS Color 4 uses).
 // The matrices as CSS Color 4 publishes them, digit for digit.
 #[allow(clippy::excessive_precision)]
+#[allow(clippy::unreadable_literal)]
 pub fn oklab(c: u32) -> [f32; 3] {
     let [r, g, b] = [16, 8, 0].map(|s| to_linear(((c >> s) & 255) as f32 / 255.));
     let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
@@ -199,6 +202,7 @@ pub fn oklab(c: u32) -> [f32; 3] {
 /// OKLab back to sRGB, clamped to the gamut.
 // The matrices as CSS Color 4 publishes them, digit for digit.
 #[allow(clippy::excessive_precision)]
+#[allow(clippy::unreadable_literal)]
 pub fn from_oklab([l, a, b]: [f32; 3]) -> u32 {
     let l_ = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
     let m_ = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);
@@ -218,6 +222,7 @@ pub fn mix_oklab(a: u32, b: u32, p: f32) -> u32 {
 }
 
 /// WCAG relative luminance, as the mockup's `luminance` picks the label colour on the accent.
+#[allow(clippy::unreadable_literal)]
 pub fn luminance(c: u32) -> f32 {
     let [r, g, b] = [16, 8, 0].map(|s| {
         let v = ((c >> s) & 255) as f32 / 255.;
@@ -246,7 +251,7 @@ mod tests {
     fn mixes_match_the_browser() {
         let g = Glass::default_look();
         let soft = oklab(g.accent_soft);
-        let mixed = [0, 1, 2].map(|i| oklab(ACCENT)[i] * 0.52 + oklab(0xffffff)[i] * 0.48);
+        let mixed = [0, 1, 2].map(|i| oklab(ACCENT)[i] * 0.52 + oklab(0x00ff_ffff)[i] * 0.48);
         for (i, want) in [0.772018, 0.0291158, -0.12693].into_iter().enumerate() {
             assert!(
                 (mixed[i] - want).abs() < 1e-3,
@@ -255,25 +260,25 @@ mod tests {
         }
         // Chrome clips the out-of-gamut blue the same way.
         assert!(
-            close(g.accent_soft, 0xa9a9ff),
+            close(g.accent_soft, 0x00a9_a9ff),
             "accent-soft {:06x} {soft:?}",
             g.accent_soft
         );
-        assert!(close(g.base, 0x1b1830), "base {:06x}", g.base);
+        assert!(close(g.base, 0x001b_1830), "base {:06x}", g.base);
         // color(srgb 0.30732 0.296469 0.370862 / 0.2668)
-        assert!(close(g.plate, 0x4e4c5f), "plate {:06x}", g.plate);
+        assert!(close(g.plate, 0x004e_4c5f), "plate {:06x}", g.plate);
         assert!((g.plate_alpha - 0.2668).abs() < 1e-4);
     }
 
     #[test]
     fn a_light_accent_takes_dark_labels() {
-        assert_eq!(Glass::new(0xf2c46b, TINT, BLUR).on_accent, ON_LIGHT);
-        assert_eq!(Glass::default_look().on_accent, 0xffffff);
+        assert_eq!(Glass::new(0x00f2_c46b, TINT, BLUR).on_accent, ON_LIGHT);
+        assert_eq!(Glass::default_look().on_accent, 0x00ff_ffff);
     }
 
     #[test]
     fn oklab_round_trips() {
-        for c in [0x000000, 0xffffff, 0x6b4bff, 0x14111d, 0x5865f2, 0xf89d62] {
+        for c in [0x0000_0000, 0x00ff_ffff, 0x006b_4bff, 0x0014_111d, 0x0058_65f2, 0x00f8_9d62] {
             assert!(close(from_oklab(oklab(c)), c), "{c:06x}");
         }
     }

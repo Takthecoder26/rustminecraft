@@ -74,49 +74,49 @@ pub struct Night {
 }
 
 pub const NIGHT: Night = Night {
-    sky: [0x07061a, 0x140f38, 0x2a1656, 0x5b2a78, 0xb0477d, 0xf08a5d],
-    page: 0x0e0b26,
-    side: 0x0a0820,
-    card: 0x15112e,
+    sky: [0x0007_061a, 0x0014_0f38, 0x002a_1656, 0x005b_2a78, 0x00b0_477d, 0x00f0_8a5d],
+    page: 0x000e_0b26,
+    side: 0x000a_0820,
+    card: 0x0015_112e,
     card_alpha: 0.84,
-    card_hi: 0x231c4a,
+    card_hi: 0x0023_1c4a,
     card_hi_alpha: 0.90,
-    stroke: 0xb9acff,
+    stroke: 0x00b9_acff,
     stroke_alpha: 0.12,
     rule_alpha: 0.10,
-    ink: 0xf4f2ff,
-    ink_soft: 0xcfc9ea,
-    muted: 0xa59fc6,
-    accent: 0x7656fa,
-    accent_hi: 0xa08cff,
-    on_accent: 0xffffff,
-    success: 0x5fd39a,
-    warn: 0xf5b45a,
-    danger: 0xff8a78,
+    ink: 0x00f4_f2ff,
+    ink_soft: 0x00cf_c9ea,
+    muted: 0x00a5_9fc6,
+    accent: 0x0076_56fa,
+    accent_hi: 0x00a0_8cff,
+    on_accent: 0x00ff_ffff,
+    success: 0x005f_d39a,
+    warn: 0x00f5_b45a,
+    danger: 0x00ff_8a78,
     dark: true,
 };
 
 /// The light appearance: the same sky at dawn, pale blue to peach, with the night's violet.
 pub const DAWN: Night = Night {
-    sky: [0xc9d3f2, 0xdcd8f3, 0xead5ec, 0xf5d3d8, 0xf9d6bd, 0xfbe4c6],
-    page: 0xe9e6f6,
-    side: 0xe1ddf1,
-    card: 0xfdfcff,
+    sky: [0x00c9_d3f2, 0x00dc_d8f3, 0x00ea_d5ec, 0x00f5_d3d8, 0x00f9_d6bd, 0x00fb_e4c6],
+    page: 0x00e9_e6f6,
+    side: 0x00e1_ddf1,
+    card: 0x00fd_fcff,
     card_alpha: 0.86,
-    card_hi: 0xffffff,
+    card_hi: 0x00ff_ffff,
     card_hi_alpha: 0.94,
-    stroke: 0x3b2f78,
+    stroke: 0x003b_2f78,
     stroke_alpha: 0.12,
     rule_alpha: 0.10,
-    ink: 0x1b1530,
-    ink_soft: 0x3b3354,
-    muted: 0x585071,
-    accent: 0x5b3fd6,
-    accent_hi: 0x5333c9,
-    on_accent: 0xffffff,
-    success: 0x136336,
-    warn: 0x7a4f00,
-    danger: 0xa3301d,
+    ink: 0x001b_1530,
+    ink_soft: 0x003b_3354,
+    muted: 0x0058_5071,
+    accent: 0x005b_3fd6,
+    accent_hi: 0x0053_33c9,
+    on_accent: 0x00ff_ffff,
+    success: 0x0013_6336,
+    warn: 0x007a_4f00,
+    danger: 0x00a3_301d,
     dark: false,
 };
 
@@ -156,8 +156,8 @@ impl Night {
             muted: self.muted,
             accent: self.accent_hi,
             face: self.accent,
-            face_bevel: over(0xffffff, 0.22, self.accent),
-            face_lip: over(0, 0.35, self.accent),
+            face_bevel: over(0x00ff_ffff, 0.22, self.accent),
+            face_lip: over(0x0000_0000, 0.35, self.accent),
             on_face: self.on_accent,
             danger: self.danger,
             success: self.success,
@@ -263,8 +263,8 @@ mod tests {
 
     #[test]
     fn over_blends_like_the_gpu() {
-        assert_eq!(over(0xffffff, 1., 0x000000), 0xffffff);
-        assert_eq!(over(0xffffff, 0.5, 0x000000), 0x808080);
-        assert_eq!(over(0x123456, 0., 0xabcdef), 0xabcdef);
+        assert_eq!(over(0x00ff_ffff, 1., 0x0000_0000), 0x00ff_ffff);
+        assert_eq!(over(0x00ff_ffff, 0.5, 0x0000_0000), 0x0080_8080);
+        assert_eq!(over(0x0012_3456, 0., 0x00ab_cdef), 0x00ab_cdef);
     }
 }
