@@ -782,7 +782,9 @@ fn terrain_state_table(pack: &super::PackResources, ids: &BlockIds) -> Vec<i32> 
     let emission = block_emission_table(pack);
     table.extend(
         legacy_ids
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .enumerate()
             .flat_map(|(layer, p)| [p[0], p[1], emission.get(layer).copied().unwrap_or(0)]),
     );

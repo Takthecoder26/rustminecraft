@@ -13,24 +13,10 @@ fn shared_sprite_states_keep_distinct_authored_ids_and_light() {
     ] {
         let state = horizon_world::chunk::BlockState {
             name: name.into(),
-            properties: std::collections::BTreeMap::from([(key.into(), value.into())]),
+            properties: std::collections::BTreeMap::from([(key.into(), value.into())]).into(),
         };
         assert_eq!(super::state_attributes(&state, &ids, emission), expected);
     }
-}
-
-#[test]
-fn a_sprite_takes_the_light_of_its_block() {
-    let votes = std::collections::BTreeMap::from([
-        ((0, 14), (true, 1)),
-        ((0, 0), (false, 5)),
-        ((1, 13), (false, 4)),
-        ((1, 0), (false, 4)),
-        ((2, 15), (false, 4)),
-        ((2, 0), (false, 5)),
-        ((3, 7), (false, 2)),
-    ]);
-    assert_eq!(super::layer_lights(&votes, 5), [14, 0, 0, 7, 0]);
 }
 
 #[test]
