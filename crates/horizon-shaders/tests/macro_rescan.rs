@@ -152,3 +152,23 @@ fn a_suppressed_argument_name_stays_suppressed_when_reinserted() {
     assert_eq!(macros.expand("identity(alias)(2)"), "identity(2)");
     assert_eq!(macros.expand("identity(identity)(2)"), "identity(2)");
 }
+
+#[test]
+fn pasting_joins_adjacent_edge_tokens_and_rescans_chained_results() {
+    let mut macros = increment();
+    macros.define_function("CAT", vec!["a".into(), "b".into()], "a ## b");
+    assert_eq!(
+        macros.expand("CAT(first second, third fourth)"),
+        "first secondthird fourth"
+    );
+    macros.define("N", "7");
+    macros.define("NZ", "13");
+    macros.define_function("MIX", vec!["value".into()], "value ## Z + value");
+    assert_eq!(macros.expand("MIX(N)"), "13 + 7");
+    macros.define_function(
+        "JOIN",
+        vec!["a".into(), "b".into(), "c".into()],
+        "a ## b ## c",
+    );
+    assert_eq!(compact(&macros.expand("JOIN(in,cre,ment)(2)")), "((2)+1)");
+}
