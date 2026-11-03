@@ -4,7 +4,10 @@ import subprocess
 import tempfile
 import unittest
 
-from tools.ci.rust_changes import changed_paths, needs_launcher, needs_rust
+from tools.ci.rust_changes import (
+    changed_crates, changed_launcher_crates, changed_paths, needs_launcher,
+    needs_rust, rust_test_crates,
+)
 
 
 class RustChangesTests(unittest.TestCase):
@@ -63,3 +66,27 @@ class RustChangesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RustTestScopeTests(unittest.TestCase):
+    def test_changed_crates_maps_paths_to_packages(self):
+        self.assertEqual(changed_crates([]), [])
+        self.assertEqual(changed_crates(["docs/setup.md", "README.md"]), [])
+        self.assertEqual(changed_crates(["crates/horizon-core/src/lib.rs"]), ["horizon-core"])
+        self.assertEqual(changed_crates(["crates/horizon-core/src/lib.rs", "crates/horizon-world/src/world.rs"]),
+                         ["horizon-core", "horizon-world"])
+
+    def test_global_rust_changes_select_whole_workspace(self):
+        self.assertIsNone(changed_crates(["Cargo.toml"]))
+        self.assertIsNone(changed_crates(["Cargo.lock"]))
+        self.assertIsNone(changed_crates(["xtask/src/main.rs", "Cargo.toml"]))
+        self.assertIsNone(changed_crates(["unknown-file"]))
+
+    def test_launcher_mapping_excludes_unrelated_crates(self):
+        self.assertEqual(changed_launcher_crates(["launcher/src/main.rs"]), ["horizon-launcher"])
+        self.assertEqual(changed_launcher_crates(["crates/horizon-theme/src/lib.rs"]), ["horizon-theme"])
+        self.assertEqual(changed_launcher_crates(["crates/horizon-core/src/lib.rs"]), [])
+        self.assertIsNone(changed_launcher_crates(["Cargo.toml"]))
+
+    def test_alias_uses_same_mapping(self):
+        self.assertEqual(rust_test_crates(["crates/horizon-core/src/lib.rs"]), ["horizon-core"])
