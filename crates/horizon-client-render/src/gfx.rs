@@ -1562,6 +1562,17 @@ fn describe_adapter(adapter: &wgpu::Adapter) {
         ),
     );
 }
+/// Hardware queries packs may request; the shader crate has no GPU dependency.
+fn define_pack_adapter_features(adapter: &wgpu::Adapter, macros: &mut horizon_shaders::Macros) {
+    macros.define_supported_feature(
+        "PER_BUFFER_BLENDING",
+        adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND),
+    );
+}
+
 /// Whether an adapter's texture arrays hold the block textures Horizon puts
 /// in one array.
 fn check_layers(adapter: &wgpu::Adapter, layers: u32) -> Result<u32> {
@@ -5649,6 +5660,7 @@ impl Renderer {
     /// (`Macros::define_renderer`).
     pub fn define_pack_macros(&self, macros: &mut horizon_shaders::Macros) {
         macros.define_renderer(self.mipmaps);
+        define_pack_adapter_features(&self.adapter, macros);
         if self.device.features().contains(wgpu::Features::SUBGROUP) {
             for ext in [
                 "basic",

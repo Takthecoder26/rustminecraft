@@ -4383,3 +4383,7 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_post/blend_feature_tests.rs"]
+mod blend_feature_tests;
