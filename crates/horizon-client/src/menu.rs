@@ -1905,13 +1905,14 @@ impl Menu {
         if !self.may_place(env, s, stack) {
             return;
         }
-        let have = self.slot(s).map_or(0, |c| c.count);
+        let current = self.slot(s).cloned();
+        let have = current.as_ref().map_or(0, |c| c.count);
         let max = self.slot_max(env, s, stack);
         let transferable = amount.min(stack.count).min(max.saturating_sub(have));
         if transferable == 0 {
             return;
         }
-        match self.slot(s).cloned() {
+        match current {
             None => {
                 let part = split(stack, transferable);
                 self.set_by_player(env, s, Some(part));
@@ -2034,15 +2035,13 @@ impl Menu {
         backwards: bool,
     ) -> bool {
         let mut changed = false;
-        let order = |_: ()| -> Vec<usize> {
-            if backwards {
-                (start..end).rev().collect()
-            } else {
-                (start..end).collect()
-            }
+        let order: Vec<usize> = if backwards {
+            (start..end).rev().collect()
+        } else {
+            (start..end).collect()
         };
         if Self::stackable(env, stack) {
-            for dest in order(()) {
+            for dest in order.iter().copied() {
                 if stack.count == 0 {
                     break;
                 }
@@ -2079,7 +2078,7 @@ impl Menu {
             }
         }
         if stack.count > 0 {
-            for dest in order(()) {
+            for dest in order.iter().copied() {
                 if !self.has_item(dest) && self.may_place(env, dest, stack) {
                     let max = self.slot_max(env, dest, stack);
                     let part = split(stack, stack.count.min(max));
@@ -2652,9 +2651,9 @@ impl Menu {
                     return Err(OUT_OF_BOUNDS);
                 }
                 let s = slot_index as usize;
-                let carried = self.carried.clone().expect("checked");
-                if self.quick_replace(s, &carried, env)
-                    && self.may_place(env, s, &carried)
+                let Some(carried) = self.carried.as_ref() else { return Ok(()); };
+                if self.quick_replace(s, carried, env)
+                    && self.may_place(env, s, carried)
                     && (self.quick_type == 2 || carried.count as usize > self.quick_slots.len())
                     && self.can_drag_to(s)
                     && !self.quick_slots.contains(&s)
@@ -2669,9 +2668,9 @@ impl Menu {
                         self.reset_quick_craft();
                         return self.click(env, s, ty, Input::Pickup);
                     }
-                    let mut source = self.carried.clone().expect("checked");
+                    let mut source = self.carried.take().expect("checked");
                     let mut remaining = source.count as i64;
-                    let carried = self.carried.clone().expect("checked");
+                    let carried = &source;
                     for s in self.quick_slots.clone() {
                         if self.quick_replace(s, &carried, env)
                             && self.may_place(env, s, &carried)
