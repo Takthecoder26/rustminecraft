@@ -507,6 +507,34 @@ fn success(value: bool) -> RealmsResult<()> {
         })
     }
 }
+/// Validate service join targets before handing them to the connection flow.
+fn valid_join_address(address: &str) -> bool {
+    if address
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '?' | '#' | '@'))
+    {
+        return false;
+    }
+    let Some((host, _)) = horizon_protocol::servers::parse_address(address) else {
+        return false;
+    };
+    let port = if address.starts_with('[') {
+        address
+            .split_once(']')
+            .and_then(|(_, tail)| tail.strip_prefix(':'))
+    } else if !host.contains(':') {
+        address.split_once(':').map(|(_, port)| port)
+    } else {
+        None
+    };
+    !host.is_empty()
+        && port.is_none_or(|port| port.bytes().all(|b| b.is_ascii_digit()))
+        && if address.starts_with('[') || host.contains(':') {
+            host.parse::<std::net::Ipv6Addr>().is_ok()
+        } else {
+            !host.contains(['[', ']'])
+        }
+}
 fn execute(
     action: RealmsAction,
     identity: &auth::AuthSession,
@@ -592,7 +620,7 @@ fn execute(
         }
         Join(id) => {
             let info = client.join(&auth, id)?;
-            if info.address.is_empty() || info.address.chars().any(char::is_whitespace) {
+            if !valid_join_address(&info.address) {
                 return Err(RealmsError::InvalidResponse);
             }
             let url = info.resource_pack_url.filter(|s| !s.is_empty());
