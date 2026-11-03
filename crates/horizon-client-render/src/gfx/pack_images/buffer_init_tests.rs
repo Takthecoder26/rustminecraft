@@ -2,6 +2,8 @@
 use super::*;
 use std::io::{Cursor, Write};
 
+const SEED: &[u8] = &[0, 0, 0, 0, 255, 128, 127, 0, 1, 2, 3, 4, 254, 253, 252, 251];
+
 fn loaded() -> horizon_shaders::Post {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (path, contents) in [
@@ -9,7 +11,7 @@ fn loaded() -> horizon_shaders::Post {
             "shaders/shaders.properties",
             b"bufferObject.0=32 data/seed.bin\nbufferObject.3=4 true 1 1\n".as_slice(),
         ),
-        ("shaders/data/seed.bin", b"ABCDEFGHIJKLMNOP".as_slice()),
+        ("shaders/data/seed.bin", SEED),
     ] {
         zip.start_file(path, zip::write::SimpleFileOptions::default())
             .unwrap();
@@ -130,7 +132,7 @@ fn binary_initialization_reaches_gpu_and_survives_resize_until_reload() {
         read.unmap();
         actual
     };
-    let original: Vec<_> = b"ABCDEFGHIJKLMNOP"
+    let original: Vec<_> = SEED
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
         .chain([0; 4])
