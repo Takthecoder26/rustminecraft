@@ -26,8 +26,8 @@ impl Game<'_> {
     /// looks for food within 6 and 8 blocks for `PandaSitGoal`.
     pub(super) fn tick_pandas(&mut self) {
         let griefing = self.ui.rules.bool("mob_griefing");
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if m.species() != Species::Panda || !m.alive() {
                 continue;
             }
@@ -45,10 +45,15 @@ impl Game<'_> {
                 if let Some(j) = taken {
                     let e = self.remove_dropped(j);
                     self.add_pickup(Taken::Item(Box::new(e.clone())), Collector::Mob(id));
-                    panda::hold(&mut self.mobs[i], &e.stack.item, e.stack.count, true);
+                    panda::hold(
+                        &mut self.simulation.mobs[i],
+                        &e.stack.item,
+                        e.stack.count,
+                        true,
+                    );
                 }
             }
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             let area = |r: f64| m.bounds().inflate(Vec3::new(r, r, r));
             let (near, wide) = (area(6.0), area(8.0));
             let food_near = self
@@ -60,13 +65,13 @@ impl Game<'_> {
                 .iter()
                 .find(|e| wants(self, e) && wide.intersects(e.bounds()))
                 .map(|e| [e.position.x, e.position.y, e.position.z]);
-            panda::set_food(&mut self.mobs[i], food_near, food_at);
+            panda::set_food(&mut self.simulation.mobs[i], food_near, food_at);
         }
     }
     /// `Panda.mobInteract` for a click with `item`; whether the click is taken.
     pub(super) fn interact_panda(&mut self, index: usize, item: &str) -> bool {
         let creative = self.creative;
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if panda::scared(m) {
             return false;
         }
@@ -115,6 +120,7 @@ impl Game<'_> {
         if loved {
             self.love_cause.insert(id, self.lan_acting);
             let kind = self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -131,6 +137,7 @@ impl Game<'_> {
     /// `Panda.afterSneeze`: the grown pandas within 10 blocks of a cub jump.
     pub(super) fn panda_sneezed(&mut self, id: u32) {
         let Some(area) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == id)
@@ -138,7 +145,7 @@ impl Game<'_> {
         else {
             return;
         };
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             if m.species() == Species::Panda
                 && !m.is_baby()
                 && m.on_ground
@@ -161,6 +168,7 @@ impl Game<'_> {
         let mut bites = Vec::new();
         let mut sneezes = Vec::new();
         for m in self
+            .simulation
             .mobs
             .iter_mut()
             .filter(|m| m.species() == Species::Panda)

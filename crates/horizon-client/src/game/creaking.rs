@@ -109,7 +109,7 @@ impl Game<'_> {
             &mut Vec<HeartEvent>,
         ),
     ) -> Result<()> {
-        let mut mobs = std::mem::take(&mut self.mobs);
+        let mut mobs = std::mem::take(&mut self.simulation.mobs);
         let mut uuids = std::mem::take(&mut self.persist.uuids);
         let mut next_entity = self.next_entity;
         let mut random = self.world.random.clone();
@@ -136,7 +136,7 @@ impl Game<'_> {
             host.added
         };
         mobs.extend(added);
-        self.mobs = mobs;
+        self.simulation.mobs = mobs;
         self.persist.uuids = uuids;
         self.next_entity = next_entity;
         self.world.random = random;

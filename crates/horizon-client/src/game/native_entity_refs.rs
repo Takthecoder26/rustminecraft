@@ -30,7 +30,15 @@ impl Game<'_> {
             });
         }
         match self.level_entity(id)? {
-            Target::Mob(id) if !self.mobs.iter().any(|m| m.id == id && !m.removed) => None,
+            Target::Mob(id)
+                if !self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .any(|m| m.id == id && !m.removed) =>
+            {
+                None
+            }
             t => Some(t),
         }
     }

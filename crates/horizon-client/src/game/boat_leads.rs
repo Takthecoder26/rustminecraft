@@ -123,7 +123,12 @@ impl Game<'_> {
                 )
             }
             Holder::Mob(id) => {
-                let Some(m) = self.mobs.iter().find(|m| m.id == id && m.alive()) else {
+                let Some(m) = self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .find(|m| m.id == id && m.alive())
+                else {
                     return Held::Gone;
                 };
                 let (lo, hi) = (m.bounds().min_position(), m.bounds().max_position());
@@ -214,7 +219,7 @@ impl Game<'_> {
         // Leashable.whenLeashedTo: `leashHolder.notifyLeashHolder(this)`; a
         // boat supports a quad lead.
         if let Holder::Mob(id) = holder
-            && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+            && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
         {
             horizon_client::mobs::happy_ghast::notify_leash_holder(m);
         }
@@ -430,6 +435,7 @@ impl Game<'_> {
         // hanging on it.
         if item.as_deref() == Some("minecraft:shears") {
             let held_mobs: Vec<u32> = self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|m| m.extra.leash == Some(Holder::Boat(id)))

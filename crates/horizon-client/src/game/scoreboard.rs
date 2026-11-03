@@ -539,7 +539,11 @@ impl Game<'_> {
         // The mob is looked up only when its own name has no team: the
         // owner's team is the fallback.
         self.team_with_owner(id, || {
-            self.mobs.iter().find(|m| m.id == id).and_then(tame_owner)
+            self.simulation
+                .mobs
+                .iter()
+                .find(|m| m.id == id)
+                .and_then(tame_owner)
         })
     }
     /// [`mob_team`](Self::mob_team) of a mob at hand, without looking it up.
@@ -570,7 +574,8 @@ impl Game<'_> {
             let Target::Mob(pet) = self.target_by_uuid(ints_uuid(uuid))? else {
                 return None;
             };
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .find(|m| m.id == pet && m.extra.tame)?
                 .extra
@@ -594,6 +599,7 @@ impl Game<'_> {
         }
         // One pass over the mobs, not one per mob.
         let tame_owners: HashMap<u32, [i32; 4]> = self
+            .simulation
             .mobs
             .iter()
             .filter_map(|m| Some((m.id, tame_owner(m)?)))

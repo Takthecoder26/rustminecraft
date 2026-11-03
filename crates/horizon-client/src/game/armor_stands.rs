@@ -305,7 +305,12 @@ impl Game<'_> {
             .armor
             .iter()
             .chain(guests.flat_map(|g| g.armor.iter()))
-            .chain(self.mobs.iter().flat_map(|m| m.extra.armor.iter()))
+            .chain(
+                self.simulation
+                    .mobs
+                    .iter()
+                    .flat_map(|m| m.extra.armor.iter()),
+            )
             .zip(
                 ["helmet", "chestplate", "leggings", "boots"]
                     .into_iter()

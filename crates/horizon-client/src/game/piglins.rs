@@ -97,7 +97,7 @@ impl Game<'_> {
     fn piglin_equip(&mut self, index: usize, stack: &ItemStack) -> bool {
         let item = &*stack.item;
         let mut slot = self.piglin_slot(item);
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         let mut replace = self.piglin_can_replace(m, item, slot);
         if slot > 1 && !replace {
             slot = 0;
@@ -106,7 +106,7 @@ impl Game<'_> {
         if !replace {
             return false;
         }
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         let old = horizon_client::mobs::finalize::item(m, slot);
         let chance = stored_drop_chance(m, slot);
         let drop_old = old.is_some() && (m.random.next_float() - 0.1).max(0.0) < chance;
@@ -129,7 +129,7 @@ impl Game<'_> {
     /// spot nearby.
     fn piglin_stash(&mut self, index: usize, mut stack: ItemStack) {
         let max = self.piglin_max_stack(&stack.item);
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         for s in &mut m.extra.inventory {
             if stack.count > 0 && s.same_item_same_components(&stack) && s.count < max {
                 let n = (max - s.count).min(stack.count);
@@ -192,8 +192,8 @@ impl Game<'_> {
         if !self.ui.rules.bool("mob_griefing") {
             return;
         }
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if m.species() != Species::Piglin || !m.alive() || m.extra.using_item > 0 {
                 continue;
             }
@@ -221,7 +221,7 @@ impl Game<'_> {
             self.admire_seen_item(i, nearest.map(|(_, d)| d), loved);
             let best = nearest.filter(|(_, d)| *d <= 81.0);
             let Some((j, _)) = best else {
-                self.mobs[i].extra.point = None;
+                self.simulation.mobs[i].extra.point = None;
                 continue;
             };
             let e = &self.dropped[j];
@@ -229,11 +229,12 @@ impl Game<'_> {
                 && (e.position.z - pos.z).abs() <= 1.3
                 && (e.position.y - pos.y).abs() <= 1.0;
             if !close || e.pickup_delay > 0 {
-                self.mobs[i].extra.point = Some([e.position.x, e.position.y, e.position.z]);
+                self.simulation.mobs[i].extra.point =
+                    Some([e.position.x, e.position.y, e.position.z]);
                 continue;
             }
             // Nuggets come whole, anything else one at a time.
-            let (taken_item, id) = (e.clone(), self.mobs[i].id);
+            let (taken_item, id) = (e.clone(), self.simulation.mobs[i].id);
             let item = e.stack.item.clone();
             self.add_pickup(
                 super::pickups::Taken::Item(Box::new(taken_item.clone())),
@@ -258,13 +259,13 @@ impl Game<'_> {
             if self.piglin_loved(&item) {
                 self.start_admiring(i, item);
             } else if self.item_in_tag("minecraft:piglin_food", &item)
-                && self.mobs[i].extra.ints[0] <= 0
+                && self.simulation.mobs[i].extra.ints[0] <= 0
             {
                 // PiglinAi.eat: the food is gone and it will not eat for a while.
-                self.mobs[i].extra.ints[0] = ATE_RECENTLY;
-                self.mobs[i].nav_stop();
+                self.simulation.mobs[i].extra.ints[0] = ATE_RECENTLY;
+                self.simulation.mobs[i].nav_stop();
             } else {
-                self.mobs[i].nav_stop();
+                self.simulation.mobs[i].nav_stop();
                 self.piglin_keep(i, stack);
             }
         }
@@ -272,12 +273,12 @@ impl Game<'_> {
     /// `StartAdmiringItemIfSeen` and the admire activity's stop behaviours, from the
     /// distance squared to `NEAREST_VISIBLE_WANTED_ITEM` and whether that item is loved.
     fn admire_seen_item(&mut self, index: usize, nearest: Option<f64>, loved: bool) {
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         let holding = m.extra.off_hand.is_some();
         m.extra.piglin.admire_seen(holding, nearest, loved);
     }
     fn start_admiring(&mut self, index: usize, item: std::sync::Arc<str>) {
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         // The memory is set again, for the item it holds now.
         m.extra.piglin.seen_admire = 0;
         m.extra.off_hand = Some(item);
@@ -290,7 +291,7 @@ impl Game<'_> {
     /// `PiglinAi.mobInteract`: hand a piglin a gold ingot (only piglin
     /// currency is accepted from the hand; other loved items are passed over).
     pub(super) fn give_piglin(&mut self, index: usize, item: &str) -> bool {
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         if m.species() != Species::Piglin
             || m.is_baby()
             || m.extra.using_item > 0
@@ -307,23 +308,23 @@ impl Game<'_> {
     /// roll of the bartering table for adults. Babies equip the admired item,
     /// or hold it in the main hand after stashing or throwing the old item.
     pub(super) fn finish_admiring(&mut self, mob: u32) {
-        let Some(i) = self.mobs.iter().position(|m| m.id == mob) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == mob) else {
             return;
         };
-        let Some(item) = self.mobs[i].extra.off_hand.take() else {
+        let Some(item) = self.simulation.mobs[i].extra.off_hand.take() else {
             return;
         };
-        if self.mobs[i].is_baby() {
+        if self.simulation.mobs[i].is_baby() {
             let stack = ItemStack::new(&item, 1);
             if !self.piglin_equip(i, &stack) {
-                if let Some(old) = item_stack(&self.mobs[i], 0) {
+                if let Some(old) = item_stack(&self.simulation.mobs[i], 0) {
                     if self.piglin_loved(&old.item) {
                         self.piglin_stash(i, old);
                     } else {
                         self.piglin_throw_items(i, vec![old]);
                     }
                 }
-                let m = &mut self.mobs[i];
+                let m = &mut self.simulation.mobs[i];
                 set_item_stack(m, 0, stack);
                 set_drop_chance(m, 0, 2.0);
                 m.persistent = true;
@@ -345,7 +346,7 @@ impl Game<'_> {
     /// `PiglinAi.throwItems`: barters and a baby's unwanted main-hand item
     /// use the same player-directed throw.
     fn piglin_throw_items(&mut self, i: usize, items: Vec<ItemStack>) {
-        let m = &self.mobs[i];
+        let m = &self.simulation.mobs[i];
         let from = [m.position.x, m.position.y + 1.3, m.position.z];
         // BehaviorUtils.throwItem toward the nearest visible player
         // (NEAREST_VISIBLE_PLAYER: within 16, alive, no spectators; the
@@ -392,8 +393,8 @@ impl Game<'_> {
         }
         let at = p.position;
         let eye = [at.x, at.y + 1.62, at.z];
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if m.species() != Species::Piglin
                 || m.is_baby()
                 || !m.alive()
@@ -407,7 +408,7 @@ impl Game<'_> {
             if only_if_seen && !self.can_see(m.center(), eye) {
                 continue;
             }
-            let m = &mut self.mobs[i];
+            let m = &mut self.simulation.mobs[i];
             m.extra.anger = 600;
             m.ai.target = Some(Who::Player);
         }

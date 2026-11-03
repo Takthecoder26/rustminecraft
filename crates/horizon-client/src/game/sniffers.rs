@@ -32,7 +32,7 @@ impl Game<'_> {
             f64::from(pos[2]) + 0.5,
         ];
         if let Some(id) = self.spawn_mob("minecraft:sniffer", at, true)
-            && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+            && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
         {
             m.extra.age = sniffer::BABY_START_AGE;
             let yaw = self.world.random.next_float() * 360.0 - 180.0;
@@ -52,8 +52,8 @@ impl Game<'_> {
         if players.is_empty() {
             return;
         }
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if m.species() != Species::Sniffer
                 || !m.alive()
                 || m.silent
@@ -78,7 +78,7 @@ impl Game<'_> {
             if ms == 0 {
                 // ClientPacketListener.handleEntityEvent 63: a
                 // SnifferSoundInstance that follows the sniffer.
-                let id = self.mobs[i].id;
+                let id = self.simulation.mobs[i].id;
                 let instance = SoundInstance::sniffer(id, SoundEngine::unseeded());
                 self.audio.play_instance(instance, false);
             }
@@ -101,7 +101,7 @@ impl Game<'_> {
             // Drawn in this window when it has one, and sent to the players
             // within 32 blocks (the server thread's window is one of them).
             self.landing_dust(None, below, Vec3::new(dust[0], dust[1], dust[2]), 30, 0.0);
-            if self.mobs[i].age.is_multiple_of(10) {
+            if self.simulation.mobs[i].age.is_multiple_of(10) {
                 let hit = self.res.facts().get(below).sounds.hit.clone();
                 self.audio.play(&hit, Some(at), 0.5, 0.5);
             }

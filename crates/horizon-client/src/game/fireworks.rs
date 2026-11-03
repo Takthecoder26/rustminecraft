@@ -416,6 +416,7 @@ impl Game<'_> {
             match hit {
                 Some(RocketHit::Entity(Who::Mob(id)))
                     if self
+                        .simulation
                         .mobs
                         .iter()
                         .any(|m| m.id == id && m.species() == Species::Breeze) =>
@@ -478,7 +479,8 @@ impl Game<'_> {
             self.each_guest_hit_except(boosted, |g| g.rocket_blast_player(from, damage));
             let hits: Vec<(u32, f32)> = {
                 let world = self.mob_world_base(&[]);
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .filter(|m| m.alive())
                     .filter_map(|m| {
@@ -510,7 +512,7 @@ impl Game<'_> {
                     .is_some();
                 if ran {
                     for (id, _) in &hits {
-                        if self.mobs.iter().any(|m| m.id == *id) {
+                        if self.simulation.mobs.iter().any(|m| m.id == *id) {
                             host.mob_players.insert(*id, conn);
                         }
                     }
@@ -536,7 +538,7 @@ impl Game<'_> {
             0
         });
         for &(id, amount) in hits {
-            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 let hurt = m.damage(amount, Damage::fireworks(attacker, at));
                 // LivingEntity.hurtServer: a player's rocket makes them the
                 // last player to hurt it (`setLastHurtByPlayer`), so its death
@@ -566,6 +568,7 @@ impl Game<'_> {
     /// dragon's parts and crystals, the player and the guests.
     fn rocket_targets(&self) -> Vec<(Who, Aabb)> {
         let mut targets: Vec<(Who, Aabb)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())

@@ -67,7 +67,7 @@ pub(super) struct Parked {
     ominous_spawners: Vec<ominous_item_spawner::OminousItemSpawner>,
     tnts: horizon_client::join_seq::JoinList<tnt::PrimedTnt>,
     hoppers: HashMap<(i32, i32, i32), machines::HopperState>,
-    pub(super) mobs: horizon_client::join_seq::JoinList<Mob>,
+    pub(super) simulation: super::simulation::LevelSimulation,
     /// The entity ids of the level's fence knots (`knot_ids`).
     knot_ids: HashMap<[i32; 3], u32>,
     projectiles: horizon_client::join_seq::JoinList<horizon_client::projectiles::Projectile>,
@@ -88,8 +88,6 @@ pub(super) struct Parked {
     raiding: Raiding,
     sculk: SculkState,
     creaking: CreakingState,
-    /// Natural spawning's candidate cache: each level keeps its own players' squares.
-    spawn_scratch: super::natural_spawning::SpawnScratch,
     /// Server ticks since a player was last in the level.
     idle: u32,
 }
@@ -151,7 +149,9 @@ impl Levels {
 
     /// The mobs of a parked level.
     pub(super) fn parked_mobs(&self, dim: Dim) -> Option<&[Mob]> {
-        self.parked.get(&dim).map(|level| level.mobs.as_slice())
+        self.parked
+            .get(&dim)
+            .map(|level| level.simulation.mobs.as_slice())
     }
 
     /// The levels that are not in place, by dimension.
@@ -216,7 +216,7 @@ impl Game<'_> {
             ominous_spawners: Vec::new(),
             tnts: Default::default(),
             hoppers: HashMap::new(),
-            mobs: Default::default(),
+            simulation: Default::default(),
             knot_ids: HashMap::new(),
             projectiles: Default::default(),
             dropped: Default::default(),
@@ -233,7 +233,6 @@ impl Game<'_> {
             raiding: Default::default(),
             sculk: Default::default(),
             creaking: Default::default(),
-            spawn_scratch: Default::default(),
             idle: 0,
         })
     }
@@ -274,7 +273,7 @@ impl Game<'_> {
         swap(&mut self.ominous_spawners, &mut p.ominous_spawners);
         swap(&mut self.tnts, &mut p.tnts);
         swap(&mut self.hoppers, &mut p.hoppers);
-        swap(&mut self.mobs, &mut p.mobs);
+        swap(&mut self.simulation, &mut p.simulation);
         swap(&mut self.knot_ids, &mut p.knot_ids);
         swap(&mut self.creatures.projectiles, &mut p.projectiles);
         swap(&mut self.dropped, &mut p.dropped);
@@ -300,7 +299,6 @@ impl Game<'_> {
         self.raiding.swap_level(&mut p.raiding);
         self.sculk.swap_level(&mut p.sculk);
         self.creaking.swap_level(&mut p.creaking);
-        swap(&mut self.spawn_scratch, &mut p.spawn_scratch);
         // What only the client draws starts over.
         self.particles.clear();
         self.pickups.clear();
@@ -369,6 +367,11 @@ impl Game<'_> {
         let Some(p) = self.levels.parked.get_mut(&from) else {
             return;
         };
+        // Death bookkeeping follows the entity through a dimension transfer,
+        // so a corpse is not looted again in the destination level.
+        if p.simulation.died.remove(&id) {
+            self.simulation.died.insert(id);
+        }
         let uuid = p.persist.uuids.remove(&id);
         let raw = p.persist.raw.remove(&id);
         if let Some(u) = uuid {
@@ -542,7 +545,7 @@ impl Game<'_> {
             let cpu = cpu.map_or_else(String::new, |c| format!(", cpu {c:.1} ms"));
             log::info!(
                 "Horizon: slow tick {wall:.1} ms{cpu} ({} mobs): {}",
-                self.mobs.len(),
+                self.simulation.mobs.len(),
                 horizon_client::spans::describe(&spans)
             );
         }

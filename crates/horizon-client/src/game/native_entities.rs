@@ -158,7 +158,7 @@ impl Game<'_> {
         // stands at `pos`.
         let mut tag = Tag::Compound(tag);
         place_summoned(&mut tag, pos);
-        let from = self.mobs.len();
+        let from = self.simulation.mobs.len();
         let first = self.next_entity + 1;
         let deferred = (self.tnts.len(), self.falling.len(), self.rockets.len());
         let target = self.spawn_entity_from_nbt(tag);

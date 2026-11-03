@@ -180,6 +180,7 @@ impl Game<'_> {
         };
         let tags = &self.res.stations().enchantments.entity_tags;
         for mob in self
+            .simulation
             .mobs
             .iter_mut()
             .filter(|m| m.alive() && m.bounds().intersects(area))
@@ -312,6 +313,7 @@ impl Game<'_> {
         let tags = &self.res.stations().enchantments.entity_tags;
         let immune = tags.get("minecraft:not_affected_by_geysers");
         for mob in self
+            .simulation
             .mobs
             .iter_mut()
             .filter(|m| m.alive() && m.bounds().intersects(area))

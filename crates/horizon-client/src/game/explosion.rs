@@ -614,7 +614,7 @@ impl Game<'_> {
             .combat
             .explosion_owner
             .or(exploding)
-            .and_then(|id| self.mobs.iter().find(|m| m.id == id))
+            .and_then(|id| self.simulation.mobs.iter().find(|m| m.id == id))
             .map(|m| m.species());
         // `ServerExplosion.hurtEntities`: every entity in reach, on the walk. Each
         // answers `ignoreExplosion` itself (`Entity::ignores_explosion`); the rest
@@ -651,8 +651,8 @@ impl Game<'_> {
                 let entity = with_entity!(self, handle, e => e.id());
                 match handle {
                     EntityHandle::Mob(i) => {
-                        let hurtable = teams_allow(self, self.mob_team(self.mobs[i].id));
-                        let m = &mut self.mobs[i];
+                        let hurtable = teams_allow(self, self.mob_team(self.simulation.mobs[i].id));
+                        let m = &mut self.simulation.mobs[i];
                         // The exploding mob is the damage source's entity, so
                         // victims it kills drop its charged-creeper loot
                         // (`Creeper.killedEntity`).

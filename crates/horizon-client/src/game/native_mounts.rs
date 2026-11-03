@@ -30,7 +30,7 @@ impl Game<'_> {
             c.kind.id().into()
         } else if self.cushions.iter().any(|c| c.id == id) {
             "minecraft:cushion".into()
-        } else if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+        } else if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
             mob_kind(m)
         } else {
             String::new()
@@ -46,7 +46,8 @@ impl Game<'_> {
         let (entity, kind) = match rider {
             Some(id) => (
                 id,
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .find(|m| m.id == id)
                     .map_or_else(String::new, mob_kind),

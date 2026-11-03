@@ -186,7 +186,7 @@ impl Game<'_> {
                 (self.pitch, self.yaw)
             }
             (Who::Mob(id), _) => {
-                let m = self.mobs.iter().find(|m| m.id == id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
                 (m.head_pitch, m.yaw)
             }
         };

@@ -359,6 +359,7 @@ impl GameLevel<'_, '_> {
         if asked <= SCANNED_QUERIES && self.boxes.get().is_none() {
             return Box::new(
                 self.game
+                    .simulation
                     .mobs
                     .iter()
                     .enumerate()
@@ -368,7 +369,7 @@ impl GameLevel<'_, '_> {
         }
         Box::new(
             self.boxes
-                .get_or_init(|| MobBoxes::new(&self.game.mobs))
+                .get_or_init(|| MobBoxes::new(&self.game.simulation.mobs))
                 .near(area),
         )
     }
@@ -602,7 +603,9 @@ impl horizon_client::mobs::spawner::SpawnerLevel for GameLevel<'_, '_> {
     fn count_entities(&self, id: &str, bounds: Aabb) -> usize {
         let mobs = self
             .mobs_near(bounds)
-            .filter(|&(i, b, ..)| self.game.mobs[i].kind.id == id && b.intersects(bounds))
+            .filter(|&(i, b, ..)| {
+                self.game.simulation.mobs[i].kind.id == id && b.intersects(bounds)
+            })
             .count();
         let pending = self
             .pending_ids
@@ -659,8 +662,8 @@ impl<'a> Game<'a> {
             mob.id = self.next_entity;
             mob.persistent = persistent;
             let id = mob.id;
-            self.mobs.push(mob);
-            self.native_mobs_joined(self.mobs.len() - 1, true);
+            self.simulation.mobs.push(mob);
+            self.native_mobs_joined(self.simulation.mobs.len() - 1, true);
             self.enchant_spawn_equipment(id);
             self.halloween_spawn_head(id);
             if !persistent {
@@ -735,7 +738,7 @@ impl<'a> Game<'a> {
         if players.is_empty() {
             return;
         }
-        let mut scratch = std::mem::take(&mut self.spawn_scratch);
+        let mut scratch = std::mem::take(&mut self.simulation.spawn_scratch);
         let spawnable = self.spawning_chunks(&players, &mut scratch);
         for &key in &scratch.candidates {
             *self.world.inhabited.entry(key).or_insert(0) += 1;
@@ -748,6 +751,7 @@ impl<'a> Game<'a> {
         {
             let level = self.natural_level();
             let counted: Vec<Counted> = self
+                .simulation
                 .mobs
                 .iter()
                 .map(|m| Counted {
@@ -809,7 +813,7 @@ impl<'a> Game<'a> {
         // ServerChunkCache.lastSpawnState, for the debug overlay.
         self.spawn_counts.insert(self.dim, last_state);
         self.add_spawned(pending, false);
-        self.spawn_scratch = scratch;
+        self.simulation.spawn_scratch = scratch;
     }
     /// `NoiseBasedChunkGenerator.spawnOriginalMobs`: creature packs for a
     /// freshly generated chunk, from the biome at its corner column's top,

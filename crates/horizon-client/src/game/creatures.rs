@@ -344,7 +344,7 @@ impl Game<'_> {
                         velocity: b.velocity,
                     });
                 }
-                let m = self.mobs.iter().find(|m| m.id == id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
                 matches!(m.species(), Species::Nautilus | Species::ZombieNautilus).then(|| {
                     horizon_client::mobs::Vehicle {
                         nautilus: true,
@@ -406,7 +406,7 @@ impl Game<'_> {
         // The spawn is not a natural one (no jockeys, the patrol leader roll
         // stays), but the mob is not persistent.
         let id = self.spawn_mob_for(kind, at, true, false)?;
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             m.persistent = false;
         }
         Some(id)
@@ -459,9 +459,9 @@ impl Game<'_> {
             horizon_client::mobs::raider::finalize(&mut mob, reason);
         }
         let id = mob.id;
-        self.mobs.push(mob);
-        self.native_mobs_joined(self.mobs.len() - 1, false);
-        if !self.mobs.iter().any(|m| m.id == id) {
+        self.simulation.mobs.push(mob);
+        self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
+        if !self.simulation.mobs.iter().any(|m| m.id == id) {
             return None;
         }
         self.enchant_spawn_equipment(id);
@@ -478,7 +478,7 @@ impl Game<'_> {
     /// the break event.
     fn wear_sun_protection(&mut self, id: u32) {
         use horizon_world::player_inventory::EquipmentSlot;
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let body = horizon_client::mobs::drops::body_slot_species(m.species());
@@ -494,7 +494,7 @@ impl Game<'_> {
             return;
         }
         let at = [m.position.x, m.position.y, m.position.z];
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         let amount = m.random.next_int_bound(2).unwrap_or(0) as u32;
@@ -512,7 +512,7 @@ impl Game<'_> {
             .map_or(0, |i| i.max_damage);
         stack.damage += loss;
         let broke = stack.damage >= max;
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         match (body, broke) {
@@ -546,7 +546,7 @@ impl Game<'_> {
         if damage <= 0.0 {
             return;
         }
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let at = [m.position.x, m.position.y, m.position.z];
@@ -577,6 +577,7 @@ impl Game<'_> {
             Some(info.max_damage)
         }
         let Some(body) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == id)
@@ -593,7 +594,7 @@ impl Game<'_> {
         }
         let lost = body.damage + loss;
         let broke = {
-            let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+            let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
                 return;
             };
             if lost >= max {
@@ -615,7 +616,13 @@ impl Game<'_> {
     /// What a converted frog gets once its tadpole has grown up: the spawn
     /// finalization of a conversion, then persistence.
     fn finalize_converted(&mut self, id: u32) {
-        let Some(at) = self.mobs.iter().find(|m| m.id == id).map(|m| m.position) else {
+        let Some(at) = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.position)
+        else {
             return;
         };
         let facts = self.biome_facts(
@@ -624,7 +631,7 @@ impl Game<'_> {
             at.z.floor() as i32,
         );
         let difficulty = self.local_difficulty([at.x, at.y, at.z]);
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             spawning::finalize(m, &facts, &difficulty);
             m.persistent = true;
         }
@@ -648,12 +655,12 @@ impl Game<'_> {
         let from_kind = super::native_hooks::mob_kind(from);
         self.native_living_conversion_pre(from.id, &from_kind, kind, &mut cancel);
         if cancel {
-            match self.mobs.iter_mut().find(|m| m.id == from.id) {
+            match self.simulation.mobs.iter_mut().find(|m| m.id == from.id) {
                 Some(kept) => kept.removed = false,
                 None => {
                     let mut kept = from.clone();
                     kept.removed = false;
-                    self.mobs.push(kept);
+                    self.simulation.mobs.push(kept);
                 }
             }
             return None;
@@ -672,14 +679,15 @@ impl Game<'_> {
         }
         let id = mob.id;
         // ConversionType.SINGLE: the passengers get off and board the new mob.
-        for rider in self.mobs.iter_mut() {
+        for rider in self.simulation.mobs.iter_mut() {
             if rider.extra.mount == Some(from.id) {
                 rider.extra.mount = Some(id);
             }
         }
-        self.mobs.push(mob);
-        self.native_mobs_joined(self.mobs.len() - 1, false);
+        self.simulation.mobs.push(mob);
+        self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
         let transformed_kind = self
+            .simulation
             .mobs
             .last()
             .expect("converted mob was just inserted")
@@ -707,7 +715,7 @@ impl Game<'_> {
         let id = self
             .spawn_mob_spawned(kind, at)
             .ok_or_else(|| format!("unknown or unsupported mob {kind}"))?;
-        if baby && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if baby && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             m.extra.age = if m.species() == Species::Sniffer {
                 horizon_client::mobs::sniffer::BABY_START_AGE
             } else {
@@ -724,7 +732,7 @@ impl Game<'_> {
     }
     pub(super) fn control_mobs_at(&self, radius: f64, center: Vec3) -> serde_json::Value {
         let list: Vec<serde_json::Value> = self
-            .mobs
+            .simulation.mobs
             .iter()
             .filter(|m| m.distance_sqr(center) <= radius * radius)
             .map(|m| {
@@ -787,7 +795,7 @@ impl Game<'_> {
                 state
             })
             .collect();
-        serde_json::json!({ "count": self.mobs.len(), "near": list, "projectiles": self.creatures.projectiles.len() })
+        serde_json::json!({ "count": self.simulation.mobs.len(), "near": list, "projectiles": self.creatures.projectiles.len() })
     }
     /// Highest motion-blocking (no leaves) block + 1 (Heightmap MOTION_BLOCKING_NO_LEAVES).
     pub(super) fn motion_top(&self, x: i32, z: i32) -> i32 {
@@ -937,13 +945,14 @@ impl Game<'_> {
         // LivingEntity.die runs when the killing blow lands: mobs killed
         // since the last tick (by the player, explosions...) die first.
         let killed: Vec<Mob> = self
+            .simulation
             .mobs
             .iter()
-            .filter(|m| !m.alive() && !m.removed && !self.died.contains(&m.id))
+            .filter(|m| !m.alive() && !m.removed && !self.simulation.died.contains(&m.id))
             .cloned()
             .collect();
         for m in killed {
-            self.died.insert(m.id);
+            self.simulation.died.insert(m.id);
             self.mob_died(&m);
         }
         // Their victims have been looted and mourned: no charged creeper is
@@ -955,7 +964,7 @@ impl Game<'_> {
         if round.listening() {
             let ticking = self.entity_ticking_area();
             let mut i = 0;
-            while let Some(m) = self.mobs.get(i) {
+            while let Some(m) = self.simulation.mobs.get(i) {
                 let (x, z) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
                 if self.world.loaded(x, z) && ticking(x, z) {
                     let (id, kind) = (m.id, super::native_ticks::TickKind::Mob(m.kind.clone()));
@@ -965,16 +974,32 @@ impl Game<'_> {
             }
         }
         let uuid = self.level.player_uuid;
-        let mut snapshot: Vec<Seen> = self.mobs.iter().map(|m| seen(m, uuid)).collect();
+        // Freeze ownership before lending immutable inputs to snapshot workers.
+        // Topology is cached by chunk-map membership, never by world edits.
+        let players = self.level_players();
+        self.simulation.regions.rebuild(
+            self.world.chunks.membership_revision(),
+            self.world.chunks.iter().map(|(&chunk, _)| chunk),
+        );
+        let chunk_at = |p: Vec3| (p.x.floor() as i32 >> 4, p.z.floor() as i32 >> 4);
+        self.simulation.regions.index(
+            self.simulation.mobs.iter().map(|m| chunk_at(m.position)),
+            players.iter().map(|p| chunk_at(p.position)),
+        );
+        let mut snapshot: Vec<Seen> =
+            self.simulation
+                .regions
+                .project(&self.simulation.mobs, self.simulation.workers, |m| {
+                    seen(m, uuid)
+                });
         let mut events = Vec::new();
-        let mut mobs = std::mem::take(&mut self.mobs);
+        let mut mobs = std::mem::take(&mut self.simulation.mobs);
         let mut dead = Vec::new();
         let mut corpses = Vec::new();
-        let mut died = std::mem::take(&mut self.died);
+        let mut died = std::mem::take(&mut self.simulation.died);
         let ticking = self.entity_ticking_area();
         // With guests on, each mob sees its nearest player (game/lan_mobs.rs).
         let guests = self.lan_guest_views();
-        let players = self.level_players();
         let nearest = super::natural_spawning::NearestPlayers::new(&players);
         let mut bindings = match self.lan.as_mut() {
             Some(host) if !guests.is_empty() => std::mem::take(&mut host.mob_players),
@@ -1149,15 +1174,15 @@ impl Game<'_> {
             bindings.retain(|id, _| live.contains(id));
             host.mob_players = bindings;
         }
-        // The mobs added during the tick (into the emptied `self.mobs`) come
+        // The mobs added during the tick (into the emptied `self.simulation.mobs`) come
         // first, as `append` put them; with none, the ticked list goes back
         // as it is instead of being copied into a new one, every mob a tick.
-        if self.mobs.is_empty() {
-            self.mobs = mobs;
+        if self.simulation.mobs.is_empty() {
+            self.simulation.mobs = mobs;
         } else {
-            self.mobs.append(&mut mobs);
+            self.simulation.mobs.append(&mut mobs);
         }
-        self.died = died;
+        self.simulation.died = died;
         self.native_tick_post_batch(round);
         // ... and entity event 60 goes out as it is: the poof.
         for (id, at, width, height) in gone {
@@ -1202,7 +1227,7 @@ impl Game<'_> {
         self.sulfur_cube_power_priming();
         // Hurt and death sounds of damage dealt outside the mob ticks.
         let mut queued = Vec::new();
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             queued.append(&mut m.outbox);
         }
         self.handle_mob_events(queued)?;
@@ -1248,8 +1273,8 @@ impl Game<'_> {
         let mut cancel = false;
         self.native_living_death(m.id, &kind, damage_type, attacker, &mut cancel);
         if cancel {
-            self.died.remove(&m.id);
-            if let Some(alive) = self.mobs.iter_mut().find(|o| o.id == m.id) {
+            self.simulation.died.remove(&m.id);
+            if let Some(alive) = self.simulation.mobs.iter_mut().find(|o| o.id == m.id) {
                 alive.health = 1.0;
                 alive.death_time = 0;
             }
@@ -1371,7 +1396,7 @@ impl Game<'_> {
                         m.position.z + off(k / 2),
                     ];
                     if let Some(id) = self.spawn_mob(&m.kind.id, at, m.persistent)
-                        && let Some(c) = self.mobs.iter_mut().find(|c| c.id == id)
+                        && let Some(c) = self.simulation.mobs.iter_mut().find(|c| c.id == id)
                     {
                         horizon_client::mobs::cube::set_size(c, size / 2);
                     }
@@ -1400,6 +1425,7 @@ impl Game<'_> {
         let source = match d.attacker {
             Some(Who::Player) => Some(self.player_entity()),
             Some(Who::Mob(id)) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|o| o.id == id)
@@ -1504,6 +1530,7 @@ impl Game<'_> {
             let source = match d.attacker {
                 Some(Who::Player) => Some(player()),
                 Some(Who::Mob(id)) => self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|o| o.id == id)
@@ -1548,7 +1575,7 @@ impl Game<'_> {
         let vehicle = m
             .extra
             .mount
-            .and_then(|id| self.mobs.iter().find(|o| o.id == id))
+            .and_then(|id| self.simulation.mobs.iter().find(|o| o.id == id))
             .map(|o| LootEntity::new(&o.kind.id));
         let death = drops::Death {
             loot: &loot,
@@ -1567,7 +1594,7 @@ impl Game<'_> {
         if skulls && let Some(Who::Mob(id)) = m.last_damage.and_then(|(d, _)| d.attacker) {
             // Creeper.droppedSkulls: one head per charged explosion.
             self.combat.charged_exploders.retain(|c| *c != id);
-            if let Some(creeper) = self.mobs.iter_mut().find(|o| o.id == id) {
+            if let Some(creeper) = self.simulation.mobs.iter_mut().find(|o| o.id == id) {
                 creeper.extra.charged = false;
             }
         }
@@ -1642,7 +1669,7 @@ impl Game<'_> {
         let aim = self.attacker_aim(source.attacker);
         // So `living_knockback_v2` sees who hit and what they hold.
         let _attacker = self.knockback_scope_for(source.attacker);
-        if let Some(t) = self.mobs.iter_mut().find(|m| m.id == target) {
+        if let Some(t) = self.simulation.mobs.iter_mut().find(|m| m.id == target) {
             let hit = t.damage_aimed(amount, source, aim);
             hurt = hit;
             if hit {
@@ -1673,6 +1700,7 @@ impl Game<'_> {
         if hurt
             && let Some(Who::Mob(attacker)) = source.attacker
             && let Some(m) = self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == attacker && m.species() == Species::Axolotl)
@@ -1699,6 +1727,7 @@ impl Game<'_> {
             return;
         };
         let Some(owner) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == attacker && m.species() == Species::Wolf && m.extra.tame)
@@ -1707,7 +1736,7 @@ impl Game<'_> {
             return;
         };
         let player = owner.and_then(|uuid| self.player_with_uuid(uuid));
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == victim) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == victim) else {
             return;
         };
         m.ai.last_hurt_by_player = if owner.is_some() { 100 } else { 0 };
@@ -1734,7 +1763,7 @@ impl Game<'_> {
     }
     /// `InfestedMobEffect.onMobHurt` for a mob: silverfish from half its height up.
     pub(super) fn mob_infested(&mut self, mob: u32) {
-        if let Some(m) = self.mobs.iter().find(|m| m.id == mob) {
+        if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == mob) {
             let at = [
                 m.position.x,
                 m.position.y + f64::from(m.height()) / 2.0,
@@ -1756,6 +1785,7 @@ impl Game<'_> {
             &self.pack_files(),
         );
         let this = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == mob)
@@ -1901,6 +1931,7 @@ impl Game<'_> {
                 MobEvent::Drown { mob, at } => {
                     self.lan_entity_event(mob as i32, super::combat::DROWN_EVENT, at);
                     let v = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == mob)
@@ -1971,7 +2002,7 @@ impl Game<'_> {
                 MobEvent::GameEvent {
                     event, at, source, ..
                 } if event == "minecraft:flap"
-                    && self.mobs.iter().any(|m| {
+                    && self.simulation.mobs.iter().any(|m| {
                         m.id == source && matches!(m.species(), Species::Chicken | Species::Parrot)
                     }) =>
                 {
@@ -2024,7 +2055,7 @@ impl Game<'_> {
                             }
                         }
                         Who::Mob(id) => {
-                            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                                 m.velocity = v;
                             }
                         }
@@ -2036,15 +2067,16 @@ impl Game<'_> {
                     // `eatEntity` removes it: a removed mob never reaches the
                     // next tick's deaths, so it dies here first.
                     if let Some(m) = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == target && !m.alive() && !m.removed)
                         .cloned()
                     {
-                        if self.died.insert(target) {
+                        if self.simulation.died.insert(target) {
                             self.mob_died(&m);
                         }
-                        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == target) {
+                        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == target) {
                             m.removed = true;
                         }
                     }
@@ -2058,7 +2090,7 @@ impl Game<'_> {
                             }
                         }
                         Who::Mob(id) => {
-                            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                                 m.velocity = m.velocity.add_vector(v);
                             }
                         }
@@ -2085,7 +2117,7 @@ impl Game<'_> {
                         self.knock_back_player(power, x, z, source);
                     }
                     Who::Mob(id) => {
-                        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                             m.knockback(power, x, z, &source);
                         }
                     }
@@ -2099,14 +2131,14 @@ impl Game<'_> {
                             }
                         }
                         Who::Mob(id) => {
-                            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                                 m.position = m.position.add_vector(d);
                             }
                         }
                     }
                 }
                 MobEvent::Wololo { mob } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         // DyeColor.RED.
                         m.extra.color = 14;
                     }
@@ -2146,7 +2178,8 @@ impl Game<'_> {
                     // The exploding mob causes the damage (Creeper.explodeCreeper).
                     let noted = self.combat.explosion_source.is_some();
                     let source_mob = self.combat.explosion_source.or_else(|| {
-                        self.mobs
+                        self.simulation
+                            .mobs
                             .iter()
                             .filter(|m| {
                                 (m.position.x - at[0]).powi(2) + (m.position.z - at[2]).powi(2)
@@ -2201,7 +2234,7 @@ impl Game<'_> {
                     // effect sits inside the branch where the hit landed, and
                     // `LivingEntity.addEffect` takes a mob as well as a player.
                     if self.mob_hits_mob(target, amount, source)
-                        && let Some(t) = self.mobs.iter_mut().find(|m| m.id == target)
+                        && let Some(t) = self.simulation.mobs.iter_mut().find(|m| m.id == target)
                     {
                         t.add_effect(effect, ticks, amplifier);
                     }
@@ -2216,7 +2249,7 @@ impl Game<'_> {
                         Some(from),
                         "minecraft:mob_attack",
                         Some(Some(cube)),
-                    ) && let Some(m) = self.mobs.iter_mut().find(|m| m.id == cube)
+                    ) && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == cube)
                     {
                         let pitch = (m.random.next_float() - m.random.next_float()) * 0.2 + 1.0;
                         let at = m.center();
@@ -2241,7 +2274,7 @@ impl Game<'_> {
                     // Entity.playSound is then skipped) only follows a hit
                     // that landed.
                     if self.mob_hits_mob(target, amount, source)
-                        && let Some(m) = self.mobs.iter_mut().find(|m| m.id == cube)
+                        && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == cube)
                     {
                         let pitch = (m.random.next_float() - m.random.next_float()) * 0.2 + 1.0;
                         let at = m.center();
@@ -2268,10 +2301,13 @@ impl Game<'_> {
                     // and stings, at the fish's own position as
                     // `Entity.playSound` puts it, and not when it is silent.
                     let landed = self.mob_hits_mob(target, amount, source);
-                    if landed && let Some(t) = self.mobs.iter_mut().find(|m| m.id == target) {
+                    if landed
+                        && let Some(t) = self.simulation.mobs.iter_mut().find(|m| m.id == target)
+                    {
                         t.add_effect("minecraft:poison", poison_ticks, 0);
                     }
-                    if landed && let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if landed && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob)
+                    {
                         let at = [m.position.x, m.position.y, m.position.z];
                         if !m.silent {
                             self.handle_mob_events(vec![MobEvent::Sound(
@@ -2307,6 +2343,7 @@ impl Game<'_> {
                             };
                             let hurt = self.mob_hits_mob(id, 10.0, source);
                             let resistance = self
+                                .simulation
                                 .mobs
                                 .iter()
                                 .find(|m| m.id == id)
@@ -2327,7 +2364,7 @@ impl Game<'_> {
                 }
                 MobEvent::FinishAdmiring { mob } => self.finish_admiring(mob),
                 MobEvent::Hiss { mob } => {
-                    if let Some(m) = self.mobs.iter().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == mob) {
                         let at = m.center();
                         let sound = horizon_client::mobs::finalize::variant_sound(m, "hiss")
                             .unwrap_or("entity.cat.hiss");
@@ -2345,7 +2382,7 @@ impl Game<'_> {
                         }
                     }
                     Who::Mob(id) => {
-                        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                             m.velocity.y += up;
                         }
                     }
@@ -2379,24 +2416,24 @@ impl Game<'_> {
                 MobEvent::ParrotToShoulder { mob } => self.parrot_to_shoulder(mob),
                 MobEvent::Infested { mob } => self.mob_infested(mob),
                 MobEvent::Gift { target, item } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == target)
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == target)
                         && m.saddle_item().is_none()
                     {
                         m.set_saddle(Some(ItemStack::new(item, 1)));
                     }
                 }
                 MobEvent::HurtSelf { mob, kind, amount } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         m.damage(amount, horizon_client::mobs::Damage::of(kind));
                     }
                 }
                 MobEvent::SetTarget { mob, target } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         m.ai.target = Some(target);
                     }
                 }
                 MobEvent::HuntHoglin { mob, target, ticks } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         m.extra.ints[0] = ticks;
                         if m.ai.target.is_none() {
                             m.ai.target = Some(Who::Mob(target));
@@ -2441,8 +2478,8 @@ impl Game<'_> {
                 MobEvent::Spawn(mut m) => {
                     self.next_entity += 1;
                     m.id = self.next_entity;
-                    self.mobs.push(*m);
-                    self.native_mobs_joined(self.mobs.len() - 1, false);
+                    self.simulation.mobs.push(*m);
+                    self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
                 }
                 MobEvent::SpawnKind { kind, at, setup } => {
                     if let Some(id) = self.spawn_mob(&kind, at, setup.persistent) {
@@ -2454,7 +2491,7 @@ impl Game<'_> {
                     // `Piglin.finishConversion` and `Hoglin.finishConversion`:
                     // the converted mob is nauseous for 10 seconds.
                     if matches!(kind, "minecraft:zombified_piglin" | "minecraft:zoglin")
-                        && let Some(m) = self.mobs.iter_mut().find(|m| Some(m.id) == id)
+                        && let Some(m) = self.simulation.mobs.iter_mut().find(|m| Some(m.id) == id)
                     {
                         m.add_effect("minecraft:nausea", 200, 0);
                     }
@@ -2566,6 +2603,7 @@ impl Game<'_> {
                     // BreakDoorGoal.tick: removeBlock, then level events 1021
                     // and 2001 with the state that is there now.
                     let kind = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == mob)
@@ -2632,7 +2670,7 @@ impl Game<'_> {
                             .clone();
                         self.level_set_with_flags(pos, state, flags)?;
                         if let Some(mob) = mob
-                            && let Some(m) = self.mobs.iter().find(|m| m.id == mob)
+                            && let Some(m) = self.simulation.mobs.iter().find(|m| m.id == mob)
                         {
                             let kind = m.kind.id.clone();
                             self.native_entity_change_block(mob, &kind, pos, &old_name, name);
@@ -2787,6 +2825,7 @@ impl Game<'_> {
                         .list
                         .retain(|e| e.id != "mining_fatigue");
                     let source = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == mob)
@@ -2795,7 +2834,7 @@ impl Game<'_> {
                 }
                 MobEvent::DolphinTreasure { mob } => {
                     // ServerLevel.findNearestMapStructure(#dolphin_located, 50).
-                    let Some(at) = self.mobs.iter().find(|m| m.id == mob).map(|m| {
+                    let Some(at) = self.simulation.mobs.iter().find(|m| m.id == mob).map(|m| {
                         [
                             m.position.x.floor() as i32,
                             m.position.y.floor() as i32,
@@ -2810,7 +2849,7 @@ impl Game<'_> {
                         .locator()
                         .filter(|_| !names.is_empty())
                         .and_then(|t| t.locate(&names, at, 50));
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         m.extra.home = found.map(|(_, p)| p);
                     }
                 }
@@ -2830,7 +2869,7 @@ impl Game<'_> {
                         }
                     }
                     Who::Mob(id) => {
-                        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                             m.ignite_for_ticks(seconds * 20);
                         }
                     }
@@ -2840,34 +2879,38 @@ impl Game<'_> {
                     partner,
                     llama,
                 } => {
-                    let mob_count = self.mobs.len();
+                    let mob_count = self.simulation.mobs.len();
                     self.breed(parent, partner, llama);
-                    let child = self.mobs.get(mob_count).map(|m| m.id);
+                    let child = self.simulation.mobs.get(mob_count).map(|m| m.id);
                     self.native_entity_breed(parent, partner, child);
                 }
                 MobEvent::LockGaze { mob, partner } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         horizon_client::mobs::animal_brain::lock_gaze(m, partner);
                     }
                 }
                 MobEvent::BreedTarget { mob, partner } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         horizon_client::mobs::animal_brain::set_breed_partner(m, partner);
                     }
                 }
                 MobEvent::Retreat { mob, from, at } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         horizon_client::mobs::piglin::receive_retreat(m, from, at);
                     }
                 }
                 MobEvent::StartRiding { rider, vehicle } => {
-                    horizon_client::mobs::riders::start_riding(&mut self.mobs, rider, vehicle);
+                    horizon_client::mobs::riders::start_riding(
+                        &mut self.simulation.mobs,
+                        rider,
+                        vehicle,
+                    );
                 }
                 // Applied after the fish's tick (`apply_brain_events`).
                 MobEvent::StartFollowing { .. } | MobEvent::SchoolSize { .. } => {}
                 MobEvent::LeashBreak { mob, drop, sound } => self.break_leash(mob, drop, sound),
                 MobEvent::NotifyLeashHolder { holder } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == holder) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == holder) {
                         horizon_client::mobs::happy_ghast::notify_leash_holder(m);
                     }
                 }
@@ -2892,7 +2935,7 @@ impl Game<'_> {
                 MobEvent::Reinforcements { mob, target } => self.call_reinforcements(mob, target),
                 MobEvent::VillagerMeet { mob, other } => self.villager_meet(mob, other),
                 MobEvent::VillagerOffers { mob } => {
-                    if let Some(i) = self.mobs.iter().position(|m| m.id == mob) {
+                    if let Some(i) = self.simulation.mobs.iter().position(|m| m.id == mob) {
                         self.ensure_offers(i);
                     }
                 }
@@ -2908,7 +2951,7 @@ impl Game<'_> {
                 }
                 MobEvent::ThrowGift { table, from, to } => self.throw_gift(&table, from, to),
                 MobEvent::PatrolTarget { mob, target } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         horizon_client::mobs::raider::set_patrol_target(m, target);
                     }
                 }
@@ -2917,7 +2960,7 @@ impl Game<'_> {
                     target,
                     aggressive,
                 } => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
                         m.ai.target = Some(target);
                         m.ai.aggressive |= aggressive;
                     }
@@ -3008,7 +3051,7 @@ impl Game<'_> {
                 f64::from(pos[2]) + 0.3,
             ];
             if let Some(id) = self.spawn_mob("minecraft:turtle", at, true)
-                && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
             {
                 m.extra.age = -24000;
                 m.extra.home = Some(pos);
@@ -3019,7 +3062,7 @@ impl Game<'_> {
         }
     }
     fn apply_setup(&mut self, id: u32, setup: &SpawnSetup) {
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         if setup.baby {
@@ -3080,7 +3123,7 @@ impl Game<'_> {
             Vec3::new(block[0] + 1.0, block[1] + 1.0, block[2] + 1.0),
         )
         .inflate(Vec3::new(32.0, 10.0, 32.0));
-        for m in self.mobs.iter_mut() {
+        for m in self.simulation.mobs.iter_mut() {
             if bindings.get(&m.id).copied() == conn && m.bounds().intersects(area) {
                 horizon_client::mobs::ai::forgive_dead_player(m);
             }
@@ -3093,7 +3136,13 @@ impl Game<'_> {
         partner: u32,
         llama: Option<Box<horizon_client::mobs::llama::Offspring>>,
     ) {
-        let Some(p) = self.mobs.iter().find(|m| m.id == parent).cloned() else {
+        let Some(p) = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == parent)
+            .cloned()
+        else {
             return;
         };
         // BabyEntitySpawnEvent: not for an egg (turtle, frog, sniffer).
@@ -3105,7 +3154,8 @@ impl Game<'_> {
             let mule = matches!(
                 (
                     p.species(),
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .find(|m| m.id == partner)
                         .map(|m| m.species())
@@ -3127,7 +3177,7 @@ impl Game<'_> {
             self.native_baby_entity_spawn(parent, partner, player, &kind, &mut cancel);
             if cancel {
                 breeding_credit(&mut self.love_cause, parent, partner);
-                if let Some(q) = self.mobs.iter_mut().find(|m| m.id == partner) {
+                if let Some(q) = self.simulation.mobs.iter_mut().find(|m| m.id == partner) {
                     q.extra.age = 6000;
                     q.extra.in_love = 0;
                 }
@@ -3139,6 +3189,7 @@ impl Game<'_> {
         if let Some(cause) = breeding_credit(&mut self.love_cause, parent, partner) {
             let parent = self.mob_entity(&p);
             let partner_view = self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == partner)
@@ -3151,7 +3202,8 @@ impl Game<'_> {
             if matches!(
                 (
                     p.species(),
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .find(|m| m.id == partner)
                         .map(|m| m.species())
@@ -3169,11 +3221,16 @@ impl Game<'_> {
                 g.trigger_bred(&parent, &partner_view, (!turtle).then_some(&child));
             });
         }
-        if let Some(q) = self.mobs.iter_mut().find(|m| m.id == partner) {
+        if let Some(q) = self.simulation.mobs.iter_mut().find(|m| m.id == partner) {
             q.extra.age = 6000;
             q.extra.in_love = 0;
         }
-        let q = self.mobs.iter().find(|m| m.id == partner).cloned();
+        let q = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == partner)
+            .cloned();
         // Animal.finalizeSpawnChildFromBreeding: entity event 18 for the parent.
         self.mob_event_particles(parent, 18);
         // Sniffer.spawnChildFromBreeding: an egg instead of a baby.
@@ -3187,7 +3244,7 @@ impl Game<'_> {
             // One `new ExperienceOrb` of 1 to 7 from the mother's random (not
             // split up as `ExperienceOrb.award` does).
             if self.ui.rules.bool("mob_drops")
-                && let Some(m) = self.mobs.iter_mut().find(|m| m.id == parent)
+                && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == parent)
             {
                 let xp = 1 + m.random.next_int_bound(7).unwrap_or(0) as u32;
                 self.add_orb([p.position.x, p.position.y, p.position.z], xp);
@@ -3201,17 +3258,21 @@ impl Game<'_> {
         // else either parent's variant. The draws come from the mother's random.
         let axolotl = if p.species() == Species::Axolotl {
             let other = q.as_ref().map_or(p.extra.variant, |q| q.extra.variant);
-            self.mobs.iter_mut().find(|m| m.id == parent).map(|m| {
-                if m.random.next_int_bound(1200).unwrap_or(1) == 0 {
-                    // Axolotl.Variant.getRareSpawnVariant: the one blue, still a draw.
-                    let _ = m.random.next_int_bound(1);
-                    4
-                } else if m.random.next_boolean() {
-                    p.extra.variant
-                } else {
-                    other
-                }
-            })
+            self.simulation
+                .mobs
+                .iter_mut()
+                .find(|m| m.id == parent)
+                .map(|m| {
+                    if m.random.next_int_bound(1200).unwrap_or(1) == 0 {
+                        // Axolotl.Variant.getRareSpawnVariant: the one blue, still a draw.
+                        let _ = m.random.next_int_bound(1);
+                        4
+                    } else if m.random.next_boolean() {
+                        p.extra.variant
+                    } else {
+                        other
+                    }
+                })
         } else {
             None
         };
@@ -3221,15 +3282,19 @@ impl Game<'_> {
         let mooshroom = if p.species() == Species::Mooshroom {
             let mate = q.as_ref().map_or(p.extra.variant, |q| q.extra.variant);
             let own = p.extra.variant;
-            self.mobs.iter_mut().find(|m| m.id == parent).map(|m| {
-                if own == mate && m.random.next_int_bound(1024).unwrap_or(1) == 0 {
-                    if own == 1 { 0 } else { 1 }
-                } else if m.random.next_boolean() {
-                    own
-                } else {
-                    mate
-                }
-            })
+            self.simulation
+                .mobs
+                .iter_mut()
+                .find(|m| m.id == parent)
+                .map(|m| {
+                    if own == mate && m.random.next_int_bound(1024).unwrap_or(1) == 0 {
+                        if own == 1 { 0 } else { 1 }
+                    } else if m.random.next_boolean() {
+                        own
+                    } else {
+                        mate
+                    }
+                })
         } else {
             None
         };
@@ -3241,7 +3306,7 @@ impl Game<'_> {
             _ => p.kind.id.clone(),
         };
         if let Some(id) = self.spawn_mob(&kind, [p.position.x, p.position.y, p.position.z], true)
-            && let Some(child) = self.mobs.iter_mut().find(|m| m.id == id)
+            && let Some(child) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
         {
             child.extra.age = -24000;
             // No Mob.finalizeSpawn either: no follow range bonus, right-handed.
@@ -3332,7 +3397,7 @@ impl Game<'_> {
                         p.extra.color,
                         other.extra.color,
                     );
-                    if let Some(c) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(c) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         c.extra.color = mixed;
                     }
                 }
@@ -3360,7 +3425,7 @@ impl Game<'_> {
                         p.extra.color,
                         other.extra.color,
                     );
-                    if let Some(c) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(c) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         c.extra.color = mixed;
                     }
                 }
@@ -3411,7 +3476,7 @@ impl Game<'_> {
                     p.extra.color,
                     other.extra.color,
                 );
-                if let Some(c) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(c) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     c.extra.color = mixed;
                 }
             }
@@ -3530,7 +3595,8 @@ impl Game<'_> {
             None => from
                 .filter(|_| !projectile && damage_type != "minecraft:player_attack")
                 .and_then(|from| {
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .filter(|m| m.alive())
                         .min_by(|a, b| {
@@ -3622,7 +3688,7 @@ impl Game<'_> {
         if outcome.hurt || outcome.sound {
             let source = attacker
                 .or(owner)
-                .and_then(|id| self.mobs.iter().find(|m| m.id == id))
+                .and_then(|id| self.simulation.mobs.iter().find(|m| m.id == id))
                 .map(|m| self.mob_entity(m));
             self.trigger_entity_hurt_player(&horizon_client::advancements::DamageView {
                 kind: damage_type.to_owned(),
@@ -3807,6 +3873,7 @@ impl Game<'_> {
         {
             let targets = self.projectile_targets();
             let breezes: Vec<u32> = self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|m| m.alive() && m.species() == Species::Breeze)
@@ -4100,7 +4167,7 @@ impl Game<'_> {
             && let Hit::Entity {
                 who: Who::Mob(id), ..
             } = hit
-            && self.mobs.iter().any(|m| m.id == id)
+            && self.simulation.mobs.iter().any(|m| m.id == id)
         {
             host.mob_players.insert(id, conn);
         }
@@ -4315,6 +4382,7 @@ impl Game<'_> {
     }
     pub(super) fn projectile_targets(&self) -> Vec<(Who, Aabb)> {
         let mut targets: Vec<(Who, Aabb)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())
@@ -4591,6 +4659,7 @@ impl Game<'_> {
                 let mut trident = p.clone();
                 let victim = match who {
                     Who::Mob(id) => self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == id)
@@ -4604,9 +4673,14 @@ impl Game<'_> {
                         [p.previous.x, p.previous.y, p.previous.z],
                         "minecraft:trident",
                     ),
-                    Who::Mob(id) => self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
-                        m.damage_projectile(amount, source, aim, [p.velocity.x, p.velocity.z])
-                    }),
+                    Who::Mob(id) => self
+                        .simulation
+                        .mobs
+                        .iter_mut()
+                        .find(|m| m.id == id)
+                        .is_some_and(|m| {
+                            m.damage_projectile(amount, source, aim, [p.velocity.x, p.velocity.z])
+                        }),
                 };
                 let outcome = if hurt {
                     EntityHit::Hurt
@@ -4658,17 +4732,34 @@ impl Game<'_> {
                         hurt
                     }
                     Who::Mob(id) => {
-                        let hurt = self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
-                            m.damage_projectile(amount, source, aim, [p.velocity.x, p.velocity.z])
-                        });
-                        dodged = !hurt
-                            && self.mobs.iter().find(|m| m.id == id).is_some_and(|m| {
-                                m.species() == Species::Enderman
-                                    && horizon_client::mobs::enderman::dodges(m, &source)
+                        let hurt = self
+                            .simulation
+                            .mobs
+                            .iter_mut()
+                            .find(|m| m.id == id)
+                            .is_some_and(|m| {
+                                m.damage_projectile(
+                                    amount,
+                                    source,
+                                    aim,
+                                    [p.velocity.x, p.velocity.z],
+                                )
                             });
+                        dodged = !hurt
+                            && self
+                                .simulation
+                                .mobs
+                                .iter()
+                                .find(|m| m.id == id)
+                                .is_some_and(|m| {
+                                    m.species() == Species::Enderman
+                                        && horizon_client::mobs::enderman::dodges(m, &source)
+                                });
                         if p.owner == Some(Who::Player) {
                             self.last_hurt_by_player.insert(id, self.lan_acting);
-                            if hurt && let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+                            if hurt
+                                && let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id)
+                            {
                                 // LivingEntity.hurtServer: PLAYER_HURT_ENTITY.
                                 let victim = self.mob_entity(m);
                                 let spectral = p.arrow.as_ref().is_some_and(|a| {
@@ -4689,7 +4780,7 @@ impl Game<'_> {
                             // AbstractArrow.onHitEntity: KILLED_BY_ARROW for a kill
                             // (piercing arrows are not modelled).
                             if hurt
-                                && let Some(m) = self.mobs.iter().find(|m| m.id == id)
+                                && let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id)
                                 && !m.alive()
                             {
                                 let victim = self.mob_entity(m);
@@ -4712,6 +4803,7 @@ impl Game<'_> {
                         .and_then(|pl| pl.attribute("minecraft:knockback_resistance").ok())
                         .unwrap_or(0.0),
                     Who::Mob(id) => self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == id)
@@ -4725,6 +4817,7 @@ impl Game<'_> {
                     let victim = match who {
                         Who::Player => Some("minecraft:player"),
                         Who::Mob(id) => self
+                            .simulation
                             .mobs
                             .iter()
                             .find(|m| m.id == id)
@@ -4733,6 +4826,7 @@ impl Game<'_> {
                     let owner = match p.owner {
                         Some(Who::Player) => Some("minecraft:player"),
                         Some(Who::Mob(id)) => self
+                            .simulation
                             .mobs
                             .iter()
                             .find(|m| m.id == id)
@@ -4801,7 +4895,7 @@ impl Game<'_> {
                 if let Hit::Entity {
                     who: Who::Mob(id), ..
                 } = hit
-                    && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     // Snowball.onHitEntity: 3 damage to blazes, 0 otherwise.
                     let amount = if m.species() == Species::Blaze {
@@ -4829,6 +4923,7 @@ impl Game<'_> {
                     } => {
                         let push = [p.velocity.x, p.velocity.z];
                         let hurt = self
+                            .simulation
                             .mobs
                             .iter_mut()
                             .find(|m| m.id == id)
@@ -4839,7 +4934,7 @@ impl Game<'_> {
                         // LivingEntity.hurtServer: PLAYER_HURT_ENTITY.
                         if hurt
                             && p.owner == Some(Who::Player)
-                            && let Some(m) = self.mobs.iter().find(|m| m.id == id)
+                            && let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id)
                         {
                             let victim = self.mob_entity(m);
                             let direct = horizon_client::advancements::EntityView {
@@ -4866,7 +4961,7 @@ impl Game<'_> {
                 if let Hit::Entity {
                     who: Who::Mob(id), ..
                 } = hit
-                    && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     m.damage_projectile(0.0, source, aim, [p.velocity.x, p.velocity.z]);
                 } else if let Hit::Entity {
@@ -4885,7 +4980,7 @@ impl Game<'_> {
                     };
                     for _ in 0..n {
                         if let Some(id) = self.spawn_mob("minecraft:chicken", atp, true)
-                            && let Some(c) = self.mobs.iter_mut().find(|m| m.id == id)
+                            && let Some(c) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                         {
                             c.extra.age = -24000;
                         }
@@ -4898,7 +4993,7 @@ impl Game<'_> {
                 if let Hit::Entity {
                     who: Who::Mob(id), ..
                 } = hit
-                    && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     m.damage_projectile(0.0, source, aim, [p.velocity.x, p.velocity.z]);
                 } else if let Hit::Entity {
@@ -4995,21 +5090,30 @@ impl Game<'_> {
                         }
                     }
                     Who::Mob(id) => {
-                        let hurt = self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
-                            let remaining = m.fire_ticks;
-                            if !m.kind.flags.fire_immune {
-                                m.ignite_for_ticks(100);
-                            }
-                            let hurt =
-                                m.damage_projectile(5.0, source, aim, [p.velocity.x, p.velocity.z]);
-                            if !hurt {
-                                m.fire_ticks = remaining;
-                            }
-                            hurt
-                        });
+                        let hurt = self
+                            .simulation
+                            .mobs
+                            .iter_mut()
+                            .find(|m| m.id == id)
+                            .is_some_and(|m| {
+                                let remaining = m.fire_ticks;
+                                if !m.kind.flags.fire_immune {
+                                    m.ignite_for_ticks(100);
+                                }
+                                let hurt = m.damage_projectile(
+                                    5.0,
+                                    source,
+                                    aim,
+                                    [p.velocity.x, p.velocity.z],
+                                );
+                                if !hurt {
+                                    m.fire_ticks = remaining;
+                                }
+                                hurt
+                            });
                         if hurt {
                             self.player_hurt_mob(p, id);
-                        } else if !self.mobs.iter().any(|m| m.id == id) {
+                        } else if !self.simulation.mobs.iter().any(|m| m.id == id) {
                             // SmallFireball.onHitEntity: 5 damage to a boat or minecart.
                             self.hurt_vehicle(p, id, 5.0);
                         }
@@ -5053,9 +5157,20 @@ impl Game<'_> {
                             );
                         }
                         Who::Mob(id) => {
-                            if self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
-                                m.damage_projectile(6.0, source, aim, [p.velocity.x, p.velocity.z])
-                            }) {
+                            if self
+                                .simulation
+                                .mobs
+                                .iter_mut()
+                                .find(|m| m.id == id)
+                                .is_some_and(|m| {
+                                    m.damage_projectile(
+                                        6.0,
+                                        source,
+                                        aim,
+                                        [p.velocity.x, p.velocity.z],
+                                    )
+                                })
+                            {
                                 self.player_hurt_mob(p, id);
                             }
                         }
@@ -5103,7 +5218,12 @@ impl Game<'_> {
                     } => self.player.as_ref().map(|pv| pv.position),
                     Hit::Entity {
                         who: Who::Mob(id), ..
-                    } => self.mobs.iter().find(|m| m.id == id).map(|m| m.position),
+                    } => self
+                        .simulation
+                        .mobs
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(|m| m.position),
                     _ => None,
                 };
                 let owner = self.potion_owner(p.owner);
@@ -5124,7 +5244,7 @@ impl Game<'_> {
                     );
                 }
                 Who::Mob(id) => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         m.damage_projectile(1.0, source, aim, [p.velocity.x, p.velocity.z]);
                     }
                 }
@@ -5144,7 +5264,7 @@ impl Game<'_> {
                     }
                 }
                 Who::Mob(id) => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                         && m.damage_projectile(4.0, source, aim, [p.velocity.x, p.velocity.z])
                     {
                         m.add_effect("minecraft:levitation", 200, 0);
@@ -5240,14 +5360,14 @@ impl Game<'_> {
     /// used up; a locked mob stays (`setPersistenceRequired`), and the lock's
     /// use or unuse sound plays at its block for everyone near.
     pub(super) fn set_age_locked(&mut self, index: usize) {
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if m.species() == Species::Tadpole {
             horizon_client::mobs::aquatic::set_age_locked_data(m);
         } else {
             horizon_client::mobs::ai::set_age_locked_data(m);
         }
         self.consume_held();
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         let locked = m.extra.age_locked;
         if locked {
             m.persistent = true;
@@ -5279,9 +5399,9 @@ impl Game<'_> {
             // applies (`mob_hit`): a mob in its death animation is not clicked
             // by either path, so naming one in a packet must not reach the
             // feed, shear, leash or name paths either.
-            Some(t) => Self::named_entity(&self.mobs, t.id, |m| m.id)
+            Some(t) => Self::named_entity(&self.simulation.mobs, t.id, |m| m.id)
                 .filter(|&i| {
-                    let m = &self.mobs[i];
+                    let m = &self.simulation.mobs[i];
                     named_mob_pickable(m.alive(), m.id, self.riding, self.remote_camera_id())
                 })
                 .map(|i| (i, 0.0)),
@@ -5309,7 +5429,7 @@ impl Game<'_> {
             .held()
             .is_some_and(|stack| &*stack.item == "minecraft:shears")
         {
-            let mob = &self.mobs[index];
+            let mob = &self.simulation.mobs[index];
             let shearable = match mob.species() {
                 Species::Sheep => !mob.extra.sheared && !mob.is_baby(),
                 Species::Mooshroom => !mob.is_baby(),
@@ -5342,7 +5462,7 @@ impl Game<'_> {
             let used = self.held().cloned();
             if self.interact_leash(index, &item) {
                 if let Some(stack) = &used {
-                    let target = self.mob_entity(&self.mobs[index]);
+                    let target = self.mob_entity(&self.simulation.mobs[index]);
                     self.trigger_item_entity(
                         "minecraft:player_interacted_with_entity",
                         stack,
@@ -5361,21 +5481,21 @@ impl Game<'_> {
         // Bucketable.bucketMobPickup: a water bucket scoops up a fish, a
         // tadpole or an axolotl, with the data its bucket carries.
         if item == "minecraft:water_bucket"
-            && self.mobs[index].alive()
-            && let Some((bucket, sound)) = bucketable(self.mobs[index].species())
+            && self.simulation.mobs[index].alive()
+            && let Some((bucket, sound)) = bucketable(self.simulation.mobs[index].species())
         {
             let mut filled = ItemStack::new(bucket, 1);
             filled.extra = Some(Box::new(horizon_client::entity_nbt::bucket_components(
-                &self.mobs[index],
+                &self.simulation.mobs[index],
             )));
             self.audio
-                .play(sound, Some(self.mobs[index].center()), 1.0, 1.0);
+                .play(sound, Some(self.simulation.mobs[index].center()), 1.0, 1.0);
             self.trigger_item("minecraft:filled_bucket", &filled);
             let species = bucket.trim_end_matches("_bucket").to_owned();
-            let id = self.mobs[index].id as i32;
+            let id = self.simulation.mobs[index].id as i32;
             // Leashable.dropLeash, then discard.
             self.break_leash(id as u32, true, false);
-            self.mobs[index].removed = true;
+            self.simulation.mobs[index].removed = true;
             if self.creative {
                 if let Some(rest) = self.give(filled) {
                     self.spawn_item(rest, self.eye_position().unwrap_or([0.0; 3]), [0.0; 3], 40);
@@ -5392,8 +5512,10 @@ impl Game<'_> {
         }
         // AgeableMob.mobInteract: a golden dandelion on a baby freezes its
         // growth, or lets it grow again.
-        if self.mobs[index].alive() && self.age_lock_takes(&self.mobs[index], &item) {
-            let entity_id = self.mobs[index].id;
+        if self.simulation.mobs[index].alive()
+            && self.age_lock_takes(&self.simulation.mobs[index], &item)
+        {
+            let entity_id = self.simulation.mobs[index].id;
             self.set_age_locked(index);
             if let (Some(player), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone())
             {
@@ -5401,11 +5523,11 @@ impl Game<'_> {
                     player,
                     &name,
                     entity_id,
-                    self.mobs[index].extra.age_locked,
+                    self.simulation.mobs[index].extra.age_locked,
                 );
             }
             if let Some(stack) = &held {
-                let target = self.mob_entity(&self.mobs[index]);
+                let target = self.mob_entity(&self.simulation.mobs[index]);
                 self.trigger_item_entity("minecraft:player_interacted_with_entity", stack, &target);
             }
             self.swing_arm();
@@ -5415,7 +5537,9 @@ impl Game<'_> {
         // The hand's slot (Player.interactOn passes the hand).
         let selected = self.held_slot();
         // Panda.mobInteract: bamboo, or a click on a panda lying on its back.
-        if self.mobs[index].species() == Species::Panda && self.mobs[index].alive() {
+        if self.simulation.mobs[index].species() == Species::Panda
+            && self.simulation.mobs[index].alive()
+        {
             let taken = self.interact_panda(index, &item);
             if taken {
                 self.swing_arm();
@@ -5435,7 +5559,7 @@ impl Game<'_> {
         }
         if self.interact_sulfur_cube(index, &item) {
             if let Some(stack) = &held {
-                let target = self.mob_entity(&self.mobs[index]);
+                let target = self.mob_entity(&self.simulation.mobs[index]);
                 self.trigger_item_entity("minecraft:player_interacted_with_entity", stack, &target);
             }
             self.swing_arm();
@@ -5443,7 +5567,7 @@ impl Game<'_> {
         }
         if self.interact_armadillo(index, &item) {
             if let Some(stack) = &held {
-                let target = self.mob_entity(&self.mobs[index]);
+                let target = self.mob_entity(&self.simulation.mobs[index]);
                 self.trigger_item_entity("minecraft:player_interacted_with_entity", stack, &target);
             }
             self.swing_arm();
@@ -5463,7 +5587,7 @@ impl Game<'_> {
             return Ok(true);
         }
         // PiglinAi.mobInteract: hand over something gold to admire.
-        if self.mobs[index].alive() && self.give_piglin(index, &item) {
+        if self.simulation.mobs[index].alive() && self.give_piglin(index, &item) {
             self.swing_arm();
             if !creative && let Some(stack) = self.stack_in_mut(selected).as_mut() {
                 stack.count -= 1;
@@ -5508,7 +5632,7 @@ impl Game<'_> {
             || self.keys.contains(&winit::keyboard::KeyCode::ShiftRight);
         let held_damage = held.as_ref().map_or(0, |h| h.damage as i32);
         let held_extra = held.as_ref().and_then(|h| h.extra.clone());
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if !m.alive() {
             return Ok(false);
         }
@@ -5768,12 +5892,12 @@ impl Game<'_> {
                     m.extra.sitting = true;
                 }
                 // TamableAnimal.spawnTamingParticles (entity event 7 or 6).
-                self.mob_event_particles(self.mobs[index].id, if tamed { 7 } else { 6 });
+                self.mob_event_particles(self.simulation.mobs[index].id, if tamed { 7 } else { 6 });
                 if tamed {
-                    let view = self.mob_entity(&self.mobs[index]);
+                    let view = self.mob_entity(&self.simulation.mobs[index]);
                     self.trigger_entity("minecraft:tame_animal", "entity", &view);
                 }
-                let m = &self.mobs[index];
+                let m = &self.simulation.mobs[index];
                 self.world.modified.insert((
                     m.position.x.floor() as i32 >> 4,
                     m.position.z.floor() as i32 >> 4,
@@ -5859,12 +5983,12 @@ impl Game<'_> {
                 }
                 eat = eating_sound(m, &mut self.world.random);
                 // TamableAnimal.spawnTamingParticles (entity event 7 or 6).
-                self.mob_event_particles(self.mobs[index].id, if tamed { 7 } else { 6 });
+                self.mob_event_particles(self.simulation.mobs[index].id, if tamed { 7 } else { 6 });
                 if tamed {
-                    let view = self.mob_entity(&self.mobs[index]);
+                    let view = self.mob_entity(&self.simulation.mobs[index]);
                     self.trigger_entity("minecraft:tame_animal", "entity", &view);
                 }
-                let m = &self.mobs[index];
+                let m = &self.simulation.mobs[index];
                 self.world.modified.insert((
                     m.position.x.floor() as i32 >> 4,
                     m.position.z.floor() as i32 >> 4,
@@ -5932,9 +6056,9 @@ impl Game<'_> {
                     m.extra.owner = Some(acting);
                 }
                 // TamableAnimal.spawnTamingParticles (entity event 7 or 6).
-                self.mob_event_particles(self.mobs[index].id, if tamed { 7 } else { 6 });
+                self.mob_event_particles(self.simulation.mobs[index].id, if tamed { 7 } else { 6 });
                 if tamed {
-                    let view = self.mob_entity(&self.mobs[index]);
+                    let view = self.mob_entity(&self.simulation.mobs[index]);
                     self.trigger_entity("minecraft:tame_animal", "entity", &view);
                 }
             }
@@ -5958,7 +6082,7 @@ impl Game<'_> {
                 m.extra.age += ((left / 20) as f32 * 0.1) as i32 * 20;
                 // One happy villager particle at rest about the body.
                 self.particles_around_mob(
-                    self.mobs[index].id,
+                    self.simulation.mobs[index].id,
                     "happy_villager",
                     horizon_client::particles::Burst::HORSE_EATING,
                 );
@@ -6023,10 +6147,10 @@ impl Game<'_> {
                         }
                         // Animal.setInLove: entity event 18 (a baby that
                         // only grew is not in love).
-                        if self.mobs[index].extra.in_love > 0 {
-                            let id = self.mobs[index].id;
+                        if self.simulation.mobs[index].extra.in_love > 0 {
+                            let id = self.simulation.mobs[index].id;
                             self.love_cause.insert(id, self.lan_acting);
-                            let kind = self.mobs[index].kind.id.clone();
+                            let kind = self.simulation.mobs[index].kind.id.clone();
                             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
                             self.mob_event_particles(id, 18);
                         }
@@ -6043,14 +6167,14 @@ impl Game<'_> {
         }
         if ignited_creeper {
             self.native_creeper_ignite(
-                self.mobs[index].id,
+                self.simulation.mobs[index].id,
                 horizon_client::lan::playerdata::ints_uuid(acting),
                 &item,
             );
         }
         if let Some(trusts) = ocelot_trust {
             // `spawnTrustingParticles` on the clients: entity event 41 (hearts) or 40 (smoke).
-            self.mob_event_particles(self.mobs[index].id, if trusts { 41 } else { 40 });
+            self.mob_event_particles(self.simulation.mobs[index].id, if trusts { 41 } else { 40 });
         }
         if let Some(fresh) = stew_particles {
             // `SpellParticleOption.create(EFFECT, -1, 1)` is the plain white
@@ -6080,13 +6204,13 @@ impl Game<'_> {
         }
         // PlayerInteractTrigger: the item used on the mob, once the interaction took.
         if let Some(stack) = &held {
-            let target = self.mob_entity(&self.mobs[index]);
+            let target = self.mob_entity(&self.simulation.mobs[index]);
             self.trigger_item_entity("minecraft:player_interacted_with_entity", stack, &target);
         }
         // Turtle.ageBoundaryReached: food that finishes a baby's growth.
-        if baby_turtle && !self.mobs[index].is_baby() {
+        if baby_turtle && !self.simulation.mobs[index].is_baby() {
             self.handle_mob_events(vec![MobEvent::GiftLoot {
-                mob: self.mobs[index].id,
+                mob: self.simulation.mobs[index].id,
                 table: "minecraft:gameplay/turtle_grow",
                 at: feet,
             }])?;
@@ -6133,7 +6257,7 @@ impl Game<'_> {
         }
         if let Some(stack) = armor_drop {
             // Mob.shearItem: PLAYER_SHEARED_EQUIPMENT with the armor and the wolf.
-            let target = self.mob_entity(&self.mobs[index]);
+            let target = self.mob_entity(&self.simulation.mobs[index]);
             self.trigger_item_entity("minecraft:player_sheared_equipment", &stack, &target);
             self.spawn_item(stack, [center[0], center[1] + 0.5, center[2]], [0.0; 3], 10);
         }
@@ -6188,7 +6312,7 @@ impl Game<'_> {
     /// pumpkin or the mushrooms come off (the shearing loot table), the shear
     /// game event is posted and the tool takes one damage.
     fn interact_shear_mob(&mut self, index: usize, item: &str) -> bool {
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         if item != "minecraft:shears" || !m.alive() || m.extra.sheared {
             return false;
         }
@@ -6209,7 +6333,7 @@ impl Game<'_> {
         let mob = (m.id, super::native_hooks::mob_kind(m));
         let tool = self.held().cloned();
         self.audio.play(sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
-        self.mobs[index].extra.sheared = true;
+        self.simulation.mobs[index].extra.sheared = true;
         let mut stacks = self.sequence_loot(table, table, tool.as_ref());
         let origin = [at.x, at.y, at.z];
         self.native_use_drops(
@@ -6231,7 +6355,7 @@ impl Game<'_> {
     /// `Armadillo.mobInteract`: a brush brushes a scute off an adult
     /// (`brushOffScute`) and loses 16 durability.
     fn interact_armadillo(&mut self, index: usize, item: &str) -> bool {
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         if item != "minecraft:brush"
             || m.species() != Species::Armadillo
             || !m.alive()
@@ -6244,7 +6368,7 @@ impl Game<'_> {
         let tool = self.held().cloned();
         let table = "minecraft:brush/armadillo";
         let mut stacks = self.sequence_loot(table, table, tool.as_ref());
-        let kind = super::native_hooks::mob_kind(&self.mobs[index]);
+        let kind = super::native_hooks::mob_kind(&self.simulation.mobs[index]);
         self.native_use_drops(
             table,
             feet,
@@ -6358,7 +6482,7 @@ impl Game<'_> {
         let Some(stack) = self.held().cloned() else {
             return false;
         };
-        let parent = &self.mobs[index];
+        let parent = &self.simulation.mobs[index];
         if !parent.alive()
             || !horizon_client::mobs::finalize::spawn_egg_is_for(&stack.item, &parent.kind.id)
             || !horizon_client::mobs::drops::can_be_baby(parent.species())
@@ -6375,14 +6499,15 @@ impl Game<'_> {
         let (species, variant, color) =
             (parent.species(), parent.extra.variant, parent.extra.color);
         let mob_type = parent.kind.clone();
-        let target = self.mob_entity(&self.mobs[index]);
+        let target = self.mob_entity(&self.simulation.mobs[index]);
         let id = if species == Species::Piglin {
             // SpawnEggItem.spawnOffspringFromSpawnEgg: a non-AgeableMob is
             // constructed, then setBaby(true), without finalizeSpawn. Giving
             // it adult spawn gear first leaves the baby holding a weapon.
             self.next_entity += 1;
             let id = self.next_entity;
-            self.mobs
+            self.simulation
+                .mobs
                 .push(Mob::new(id, mob_type, Vec3::new(at[0], at[1], at[2]), 0.0));
             id
         } else {
@@ -6391,18 +6516,18 @@ impl Game<'_> {
             };
             id
         };
-        if let Some(child) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(child) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::mobs::finalize::spawn_egg_offspring(child, species, variant, color);
         }
         if species == Species::Piglin {
-            self.native_mobs_joined(self.mobs.len() - 1, false);
+            self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
         }
         // `Mob.checkAndHandleImportantInteractions` then calls
         // `onOffspringSpawnedFromEgg`: `Fox`'s makes the baby trust the player
         // who used the egg (a fox egg used on a block trusts nobody).
         if species == Species::Fox {
             let spawner = self.acting_player_uuid();
-            if let Some(child) = self.mobs.iter_mut().find(|m| m.id == id) {
+            if let Some(child) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 horizon_client::mobs::fox::add_trusted_entity(child, spawner);
             }
         }
@@ -6489,7 +6614,7 @@ impl Game<'_> {
         };
         // SpawnEggItem.spawnMob: `EntityType.create` finalizes the mob, then
         // `PostSpawnProcessor` puts the egg's components on it.
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::entity_nbt::apply_item_components(m, stack);
         }
         self.apply_spawn_egg_entity_data(id, stack);
@@ -6511,10 +6636,10 @@ impl Game<'_> {
     /// `TypedEntityData.loadInto`: the mob's own compound, the data merged over
     /// it, loaded back into the same mob (`/data merge entity`'s loader).
     pub(super) fn apply_spawn_egg_entity_data(&mut self, id: u32, stack: &ItemStack) {
-        let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) else {
             return;
         };
-        let kind = self.mobs[i].kind.id.clone();
+        let kind = self.simulation.mobs[i].kind.id.clone();
         let op = self.acting_player_is_op();
         let Some(data) = horizon_client::block_entity_item::spawn_egg_entity_data(stack, &kind, op)
         else {
@@ -6538,7 +6663,7 @@ impl Game<'_> {
                 ))
             }
             Who::Mob(id) => {
-                let m = self.mobs.iter().find(|m| m.id == id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
                 Some(glam::DVec3::new(
                     m.previous.x + (m.position.x - m.previous.x) * alpha,
                     m.previous.y
@@ -6557,7 +6682,7 @@ impl Game<'_> {
         use horizon_client::particles::{ParticleOptions, ParticleType};
         let mut swimming = Vec::new();
         let mut beams = Vec::new();
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             if !m.alive() || !matches!(m.species(), Species::Guardian | Species::ElderGuardian) {
                 continue;
             }
@@ -6699,7 +6824,7 @@ impl Game<'_> {
                 == super::perspective::CameraType::ThirdPersonFront,
             ..Default::default()
         });
-        for mob in &self.mobs {
+        for mob in &self.simulation.mobs {
             let entity_start = out.len();
             self.mark_motion(entity_start, (1 << 32) | u64::from(mob.id));
             let outline = self.mob_outline(mob);

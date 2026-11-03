@@ -235,7 +235,7 @@ impl Game<'_> {
         {
             out.push(PLAYER);
         }
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             if !m.removed && m.bounds().intersects(area) {
                 out.push(u64::from(m.id));
             }
@@ -252,7 +252,7 @@ impl Game<'_> {
             .get(&pos)
             .and_then(|b| b.nearby.clone())
             .unwrap_or_default();
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             if m.alive()
                 && !m.removed
                 && nearby.contains(&u64::from(m.id))
@@ -374,7 +374,7 @@ impl Game<'_> {
                         alive: p.alive,
                         raider: false,
                     });
-                    let mobs = &self.mobs;
+                    let mobs = &self.simulation.mobs;
                     let entity = |h: u64| {
                         if h == PLAYER {
                             return player;
@@ -415,7 +415,12 @@ impl Game<'_> {
                             self.particles.add(&options, p, [0.0; 3]);
                         }
                         // makeRaidersGlow (the server's effect).
-                        for m in self.mobs.iter_mut().filter(|_| self.remote.is_none()) {
+                        for m in self
+                            .simulation
+                            .mobs
+                            .iter_mut()
+                            .filter(|_| self.remote.is_none())
+                        {
                             if glow.contains(&u64::from(m.id)) {
                                 m.add_effect("minecraft:glowing", 60, 0);
                             }
@@ -658,6 +663,7 @@ impl Game<'_> {
             _ if !hunting => None,
             None => self.conduit_new_target(pos),
             Some(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id && !m.removed)
@@ -675,7 +681,7 @@ impl Game<'_> {
         };
         let Some(m) = conduit
             .target
-            .and_then(|id| self.mobs.iter_mut().find(|m| m.id == id))
+            .and_then(|id| self.simulation.mobs.iter_mut().find(|m| m.id == id))
         else {
             return;
         };
@@ -693,6 +699,7 @@ impl Game<'_> {
             Vec3::new(x + 9.0, y + 9.0, z + 9.0),
         );
         let near: Vec<(u32, bool, Vec3, f64)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.hostile() && !m.removed && m.bounds().intersects(area))
@@ -719,7 +726,11 @@ impl Game<'_> {
     /// The conduit's `destroyTarget` as the client draws it.
     fn conduit_target(&self, pos: [i32; 3]) -> Option<ConduitTarget> {
         let id = self.be_anims.conduit_servers.get(&pos)?.target?;
-        let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
+        let m = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == id && !m.removed)?;
         Some(ConduitTarget {
             position: [m.position.x, m.position.y, m.position.z],
             eye_y: m.eye_y(),

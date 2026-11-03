@@ -144,8 +144,8 @@ impl Game<'_> {
                     self.next_entity += 1;
                     mob.id = self.next_entity;
                     let id = mob.id;
-                    self.mobs.push(mob);
-                    self.native_mobs_joined(self.mobs.len() - 1, false);
+                    self.simulation.mobs.push(mob);
+                    self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
                     self.enchant_spawn_equipment(id);
                     self.halloween_spawn_head(id);
                     self.spawn_jockeys(id, false);
@@ -298,7 +298,7 @@ impl Game<'_> {
     }
     /// `LivingEntity.makePoofParticles` (entity event 20) for a mob.
     pub(super) fn mob_poof(&mut self, id: u32) {
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let at = m.position;
@@ -308,7 +308,7 @@ impl Game<'_> {
     /// `Mob.handleEntityEvent` 20 (`spawnAnim` on a client): the poof about
     /// mob `id`.
     pub(super) fn poof_particles(&mut self, id: u32) {
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let (at, w, h) = (m.position, f64::from(m.width()), f64::from(m.height()));

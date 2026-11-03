@@ -798,7 +798,7 @@ impl Game<'_> {
             && let Some((index, _)) = self.mob_hit()
         {
             let (kind, position, id) = {
-                let m = &self.mobs[index];
+                let m = &self.simulation.mobs[index];
                 (m.kind.id.clone(), m.position, m.id)
             };
             if query {
@@ -891,6 +891,7 @@ impl Game<'_> {
                 // Entity.position() when the answer comes: where it is now,
                 // else where it was last.
                 let position = self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id)
@@ -953,7 +954,7 @@ impl Game<'_> {
         }
         let lerp = |a: f64, b: f64| a + f64::from(alpha) * (b - a);
         let lerpf = |a: f32, b: f32| a + alpha * (b - a);
-        for m in self.mobs.iter() {
+        for m in self.simulation.mobs.iter() {
             if m.removed || m.invisible || m.has_effect("minecraft:invisibility") {
                 continue;
             }

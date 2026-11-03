@@ -55,7 +55,7 @@ impl Game<'_> {
             // knot's id (handleEntityLinkPacket's delayed holder); now it can
             // be tied to the fence.
             self.remote_knots.insert(id, block);
-            for m in &mut self.mobs {
+            for m in &mut self.simulation.mobs {
                 if m.extra.leash == Some(Holder::Mob(id)) {
                     m.extra.leash = Some(Holder::Knot(block));
                 }

@@ -139,7 +139,7 @@ impl Game<'_> {
         self.block_ticks = Ticks::new(0);
         self.tick_chunks.clear();
         self.sync_tick_chunks();
-        self.mobs.clear();
+        self.simulation.mobs.clear();
         self.dropped.clear();
         self.creatures.projectiles.clear();
         self.tnts.clear();
@@ -272,7 +272,7 @@ impl Game<'_> {
                 Some(Target::Mob(h)) => horizon_client::mobs::leash::Holder::Mob(*h),
                 _ => continue,
             };
-            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == *id) {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == *id) {
                 m.extra.leash = Some(holder);
             }
         }
@@ -281,7 +281,7 @@ impl Game<'_> {
         self.world.block_log = Some(Vec::new());
         self.audio.capture = Some(Vec::new());
         LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
-        let old_mobs: Vec<u32> = self.mobs.iter().map(|m| m.id).collect();
+        let old_mobs: Vec<u32> = self.simulation.mobs.iter().map(|m| m.id).collect();
         let old_stands: Vec<u32> = self.armor_stands.iter().map(|s| s.id).collect();
 
         let pos = &case["pos"];
@@ -658,15 +658,16 @@ impl Game<'_> {
         let (bonus, hurt) = match targets.first() {
             Some(&Target::Mob(id)) => {
                 let index = self
+                    .simulation
                     .mobs
                     .iter()
                     .position(|m| m.id == id)
                     .ok_or("the target is gone")?;
-                let kind = self.mobs[index].kind.id.clone();
+                let kind = self.simulation.mobs[index].kind.id.clone();
                 let bonus = self.smash_damage_bonus(&kind);
                 let hurt = self.hurt_by_player(index, base + bonus, source);
                 // The hurt sound the mob raised, where it stands.
-                for event in std::mem::take(&mut self.mobs[index].outbox) {
+                for event in std::mem::take(&mut self.simulation.mobs[index].outbox) {
                     if let horizon_client::mobs::MobEvent::Sound(s, at, volume, pitch) = event {
                         self.audio
                             .play(&format!("minecraft:{s}"), Some(at), volume, pitch);
@@ -707,7 +708,7 @@ impl Game<'_> {
         ));
         for (i, t) in targets.iter().enumerate() {
             let (health, v) = match *t {
-                Target::Mob(id) => match self.mobs.iter().find(|m| m.id == id) {
+                Target::Mob(id) => match self.simulation.mobs.iter().find(|m| m.id == id) {
                     Some(m) => (num(f64::from(m.health)), m.velocity),
                     None => continue,
                 },
@@ -999,7 +1000,7 @@ impl Game<'_> {
                 mob_set_slot(&mut mob, slot, stack);
             }
         }
-        self.mobs.push(mob);
+        self.simulation.mobs.push(mob);
         Ok(Target::Mob(id))
     }
 
@@ -1027,7 +1028,7 @@ impl Game<'_> {
                 }
             }
             Target::Mob(id) => {
-                let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+                let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
                     return line + "removed";
                 };
                 line.push_str(&m.kind.id);
@@ -1050,17 +1051,22 @@ impl Game<'_> {
                         let _ = write!(line, " {name}={item}x1");
                     }
                 }
-                let ready =
-                    match s {
-                        Species::Sheep => Some(!x.sheared && !m.is_baby()),
-                        Species::Mooshroom => Some(!m.is_baby()),
-                        Species::Bogged => Some(!x.sheared),
-                        Species::SnowGolem => Some(!x.sheared),
-                        Species::CopperGolem => Some(self.golem_shearable(
-                            self.mobs.iter().position(|o| o.id == id).unwrap_or(0),
-                        )),
-                        _ => None,
-                    };
+                let ready = match s {
+                    Species::Sheep => Some(!x.sheared && !m.is_baby()),
+                    Species::Mooshroom => Some(!m.is_baby()),
+                    Species::Bogged => Some(!x.sheared),
+                    Species::SnowGolem => Some(!x.sheared),
+                    Species::CopperGolem => Some(
+                        self.golem_shearable(
+                            self.simulation
+                                .mobs
+                                .iter()
+                                .position(|o| o.id == id)
+                                .unwrap_or(0),
+                        ),
+                    ),
+                    _ => None,
+                };
                 if let Some(r) = ready {
                     line.push_str(if r { " ready" } else { " unready" });
                 }
@@ -1098,7 +1104,12 @@ impl Game<'_> {
             }
             l
         };
-        for m in self.mobs.iter().filter(|m| !old_mobs.contains(&m.id)) {
+        for m in self
+            .simulation
+            .mobs
+            .iter()
+            .filter(|m| !old_mobs.contains(&m.id))
+        {
             let (p, v) = (m.position, m.velocity);
             out.push(line(&m.kind.id, [p.x, p.y, p.z], [v.x, v.y, v.z], ""));
         }

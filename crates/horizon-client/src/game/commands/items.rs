@@ -198,7 +198,7 @@ impl Game<'_> {
             Slot::Offhand => self.offhand.clone(),
             Slot::Ender(i) => self.ender_items.get(*i).cloned().flatten(),
             Slot::Mob(id, key) => {
-                let m = self.mobs.iter().find(|m| m.id == *id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == *id)?;
                 let item = match *key {
                     "mainhand" => &m.extra.main_hand,
                     "offhand" => &m.extra.off_hand,
@@ -297,7 +297,7 @@ impl Game<'_> {
                 None => false,
             },
             Slot::Mob(id, key) => {
-                let Some(m) = self.mobs.iter_mut().find(|m| m.id == *id) else {
+                let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == *id) else {
                     return false;
                 };
                 let item = stack.as_ref().map(|s| s.item.clone());

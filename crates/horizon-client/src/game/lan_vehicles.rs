@@ -227,7 +227,7 @@ impl Game<'_> {
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
         let boat = self.boats.iter().position(|b| b.id == vehicle);
         let cart = self.carts.iter().any(|c| c.id == vehicle);
-        let mount = self.mobs.iter().any(|m| m.id == vehicle);
+        let mount = self.simulation.mobs.iter().any(|m| m.id == vehicle);
         let cushion = self.cushions.iter().any(|c| c.id == vehicle);
         // The vehicle is gone (broken, in another level) or the rider died:
         // its client drops it with the entity or the death screen.
@@ -252,7 +252,8 @@ impl Game<'_> {
         // is not held against the rider's next move, which would fail, be
         // sent back, and fail again on every answer.
         let at = boat.map(|i| self.boats[i].position).or_else(|| {
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .find(|m| m.id == vehicle && equine::moved_by_client(m))
                 .map(|m| m.position)
@@ -402,7 +403,8 @@ impl Game<'_> {
         // on the client is put back.
         let boat = vehicle.and_then(|v| self.boats.iter().position(|b| b.id == v));
         let mount = vehicle.and_then(|v| {
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .position(|m| m.id == v && equine::moved_by_client(m))
         });
@@ -420,7 +422,7 @@ impl Game<'_> {
                 b.on_ground,
             )
         } else if let Some(i) = mount {
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             let step = m.kind.step_height as f32;
             (
                 m.id,
@@ -482,7 +484,7 @@ impl Game<'_> {
         // around its box grown by 0.0625 and stretched 0.55 down (water holds a boat up). A flying or
         // no-gravity mount, and a server that allows flight, never float.
         let (gravity, no_gravity) = match mount {
-            Some(i) => (0.08, self.mobs[i].no_gravity),
+            Some(i) => (0.08, self.simulation.mobs[i].no_gravity),
             None => (0.04, false),
         };
         let around = moved_box
@@ -505,7 +507,7 @@ impl Game<'_> {
         if let Some(i) = mount {
             // absSnapTo: where and how its rider's client turned it; the
             // rider sits on it from its own ride tick.
-            let m = &mut self.mobs[i];
+            let m = &mut self.simulation.mobs[i];
             m.position = target;
             m.yaw = p.yaw;
             m.head_pitch = p.pitch;

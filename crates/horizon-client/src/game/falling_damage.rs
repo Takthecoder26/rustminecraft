@@ -22,7 +22,7 @@ impl Game<'_> {
                     horizon_client::mobs::DamageKind::FallingBlock
                 };
                 falling_block::hurt_mobs_with_kind(
-                    &mut self.mobs,
+                    &mut self.simulation.mobs,
                     block.position,
                     impact.amount,
                     mob_kind,

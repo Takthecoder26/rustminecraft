@@ -107,7 +107,7 @@ impl Game<'_> {
             Target::Mob(id) => {
                 // `saveWithoutId` writes the entity as saved, riders under
                 // `Passengers`: `/data get` reads the same tree persistence does (#1519).
-                let i = self.mobs.iter().position(|m| m.id == id)?;
+                let i = self.simulation.mobs.iter().position(|m| m.id == id)?;
                 self.mob_tree_nbt(i)
             }
             Target::Item(id) => {
@@ -286,6 +286,7 @@ impl Game<'_> {
             Target::Mob(id) => {
                 let uuid = self.uuid_for(id);
                 let kind = self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id)
@@ -301,7 +302,7 @@ impl Game<'_> {
                     Some(self.pack.assets.registry),
                 )
                 .ok_or_else(stale)?;
-                if let Some(slot) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(slot) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     // Runtime-only state (AI, animation) carries over.
                     let old = std::mem::replace(slot, new);
                     slot.ai = old.ai;
@@ -906,7 +907,7 @@ impl Game<'_> {
         }
         // The root of the stack is the first entity spawned.
         let id = before + 1;
-        if self.mobs.iter().any(|m| m.id == id) {
+        if self.simulation.mobs.iter().any(|m| m.id == id) {
             Some(Target::Mob(id))
         } else if self.dropped.iter().any(|e| e.id == id) {
             Some(Target::Item(id))
@@ -949,7 +950,7 @@ impl Game<'_> {
         }
         set_key(&mut tag, "id", Tag::String(kind.into()));
         place_summoned(&mut tag, pos);
-        let from = self.mobs.len();
+        let from = self.simulation.mobs.len();
         let canceled = self.persist.joins_canceled;
         let target = self.spawn_entity_from_nbt(tag);
         self.native_mobs_joined(from, false);

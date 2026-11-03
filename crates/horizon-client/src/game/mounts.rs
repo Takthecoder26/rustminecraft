@@ -78,12 +78,12 @@ pub(super) fn dismounts_underwater(species: Species) -> bool {
 impl Game<'_> {
     pub(super) fn mount_index(&self) -> Option<usize> {
         let id = self.riding?;
-        self.mobs.iter().position(|m| m.id == id)
+        self.simulation.mobs.iter().position(|m| m.id == id)
     }
     /// `Pig` / `Strider.mobInteract`: saddle an adult, or ride a saddled one.
     fn interact_steerable(&mut self, index: usize, item: &str) -> bool {
         let held = self.inventory[self.selected].clone();
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if m.is_baby() || !m.alive() || Some(m.id) == self.riding {
             return false;
         }
@@ -125,7 +125,9 @@ impl Game<'_> {
         let Some(i) = self.mount_index() else {
             return false;
         };
-        if self.mobs[i].species() != species || !equine::boost(&mut self.mobs[i]) {
+        if self.simulation.mobs[i].species() != species
+            || !equine::boost(&mut self.simulation.mobs[i])
+        {
             return false;
         }
         if !self.creative
@@ -157,7 +159,7 @@ impl Game<'_> {
     /// `AbstractHorse.mobInteract`. Returns whether the click was used.
     pub(super) fn interact_mount(&mut self, index: usize, item: &str) -> bool {
         let held = self.held().cloned();
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         let species = m.species();
         // A server player rides it already (`isVehicle`: no seat, no feeding).
         if self.ridden_by_guest(m.id) {
@@ -184,6 +186,7 @@ impl Game<'_> {
         let id = m.id;
         if !matches!(species, Species::Camel | Species::CamelHusk)
             && self
+                .simulation
                 .mobs
                 .iter()
                 .any(|p| p.extra.mount == Some(id) && !p.removed && p.alive())
@@ -204,7 +207,7 @@ impl Game<'_> {
             .any(|s| &*s.item == "minecraft:golden_dandelion");
         let mut events = Vec::new();
         match equine::held_item(
-            &mut self.mobs[index],
+            &mut self.simulation.mobs[index],
             item,
             sneaking,
             dandelion,
@@ -217,7 +220,7 @@ impl Game<'_> {
             }
             None => {}
         }
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         // AbstractHorse.mobInteract: shift + use opens a tamed adult's inventory.
         if !m.is_baby() && m.extra.tame && sneaking {
             self.open_mount_menu(index);
@@ -226,7 +229,7 @@ impl Game<'_> {
         if self.feed_mount(index, item) {
             return true;
         }
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if m.is_baby() {
             return false;
         }
@@ -268,11 +271,11 @@ impl Game<'_> {
             return true;
         }
         // doPlayerRide
-        let id = self.mobs[index].id;
+        let id = self.simulation.mobs[index].id;
         if !self.native_may_board(id) {
             return true;
         }
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         m.extra.flag = false;
         m.extra.counter = 0;
         self.yaw = m.yaw;
@@ -284,7 +287,7 @@ impl Game<'_> {
     }
     /// `AbstractHorse.handleEating`.
     fn feed_mount(&mut self, index: usize, item: &str) -> bool {
-        let species = self.mobs[index].species();
+        let species = self.simulation.mobs[index].species();
         let camel = species == Species::Camel;
         // CamelHusk.isFood: rabbit's feet (and it never falls in love).
         if species == Species::CamelHusk && item != "minecraft:rabbit_foot" {
@@ -307,7 +310,7 @@ impl Game<'_> {
             "minecraft:golden_apple" | "minecraft:enchanted_golden_apple" => (10.0, 240, 10, true),
             _ => return false,
         };
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if matches!(m.species(), Species::SkeletonHorse | Species::ZombieHorse) {
             return false;
         }
@@ -351,7 +354,7 @@ impl Game<'_> {
         // Animal.setInLove: entity event 18.
         if loved {
             self.love_cause.insert(id, self.lan_acting);
-            let kind = self.mobs[index].kind.id.clone();
+            let kind = self.simulation.mobs[index].kind.id.clone();
             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
             self.mob_event_particles(id, 18);
         }
@@ -361,7 +364,8 @@ impl Game<'_> {
     /// `LocalPlayer.aiStep`'s riding jump: the bar charges while jump is
     /// held; on release, the jump's strength (0 when there is none).
     pub(super) fn charge_mount_jump(&mut self, i: usize, keys: Keys) -> f32 {
-        let saddled = self.mobs[i].extra.saddled && Self::jumps(self.mobs[i].species());
+        let saddled =
+            self.simulation.mobs[i].extra.saddled && Self::jumps(self.simulation.mobs[i].species());
         let mut jump = 0.0;
         if saddled {
             let st = &mut self.mount;
@@ -410,13 +414,13 @@ impl Game<'_> {
         let Some(i) = self.mount_index() else {
             return false;
         };
-        if keys.shift || !self.mobs[i].alive() {
+        if keys.shift || !self.simulation.mobs[i].alive() {
             self.dismount_mount();
             return true;
         }
         // `LivingEntity.baseTick`: a rider whose eyes are in water gets off a mount of the
         // `dismounts_underwater` tag (a server's player too: `leave_guest` tells their client).
-        if dismounts_underwater(self.mobs[i].species()) && self.rider_eyes_in_water() {
+        if dismounts_underwater(self.simulation.mobs[i].species()) && self.rider_eyes_in_water() {
             self.dismount_mount();
             return true;
         }
@@ -424,12 +428,12 @@ impl Game<'_> {
         let forward = f32::from(u8::from(keys.forward)) - f32::from(u8::from(keys.backward));
         // LocalPlayer.aiStep: the riding jump charges while space is held.
         let steer = steering_item(
-            self.mobs[i].species(),
+            self.simulation.mobs[i].species(),
             self.held().map(|s| s.item.as_ref()),
             self.offhand.as_ref().map(|s| s.item.as_ref()),
         );
         let jump = self.charge_mount_jump(i, keys);
-        let m = &mut self.mobs[i];
+        let m = &mut self.simulation.mobs[i];
         if jump > 0.0 {
             // AbstractHorse.onPlayerJump: slide on the keys and rear (horses,
             // donkeys and mules).
@@ -444,7 +448,7 @@ impl Game<'_> {
                 self.audio.play(&sound, Some(at), 0.4, 1.0);
             }
         }
-        let m = &mut self.mobs[i];
+        let m = &mut self.simulation.mobs[i];
         let pending = m.rider.map_or(0.0, |r| r.jump);
         m.rider = Some(equine::Rider {
             strafe,
@@ -465,12 +469,13 @@ impl Game<'_> {
     /// zombie on a chicken): with their eyes in water they get off it.
     pub(super) fn dismount_underwater_mob_riders(&mut self) {
         let swimmers: Vec<u32> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive() && m.fluids.eye_in_water)
             .filter_map(|m| {
                 let mount = m.extra.mount?;
-                let under = self.mobs.iter().find(|v| v.id == mount)?;
+                let under = self.simulation.mobs.iter().find(|v| v.id == mount)?;
                 dismounts_underwater(under.species()).then_some(m.id)
             })
             .collect();
@@ -483,7 +488,7 @@ impl Game<'_> {
         let Some(i) = self.mount_index() else {
             return;
         };
-        let m = &self.mobs[i];
+        let m = &self.simulation.mobs[i];
         let mut at = Vec3::new(m.position.x, m.position.y + seat(m.species()), m.position.z);
         if horizon_client::mobs::camel::is_camel(m.species()) {
             // Camel.getPassengerAttachmentPoint: the driver half a block
@@ -549,7 +554,7 @@ impl Game<'_> {
             return;
         }
         self.riding = None;
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         m.rider = None;
@@ -590,13 +595,14 @@ impl Game<'_> {
     /// the `tame_animal` trigger.
     fn tame_mount(&mut self, mob: u32) {
         let owner = self.acting_player_uuid();
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
             m.extra.owner = Some(owner);
             m.persistent = true;
             // AbstractHorse.tameWithName: entity event 7, spawnTamingParticles(true).
             self.mob_event_particles(mob, 7);
         }
         if let Some(view) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == mob)
@@ -605,6 +611,7 @@ impl Game<'_> {
             self.trigger_entity("minecraft:tame_animal", "entity", &view);
         }
         if let Some(kind) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == mob)
@@ -690,12 +697,13 @@ impl Game<'_> {
             self.lan = Some(host);
         }
         let rider = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == mob)
             .and_then(|m| m.extra.rider);
         if let Some(rider) = rider
-            && let Some(r) = self.mobs.iter_mut().find(|m| m.id == rider)
+            && let Some(r) = self.simulation.mobs.iter_mut().find(|m| m.id == rider)
         {
             let mut events = Vec::new();
             r.cause_fall_damage_from(distance, modifier, &mut events);
@@ -728,8 +736,9 @@ impl Game<'_> {
     /// `Player.jumpableVehicle`: a saddled mount that jumps (not a pig or a
     /// strider, which a saddle only steers).
     pub(super) fn jumpable_mount(&self) -> bool {
-        self.mount_index()
-            .is_some_and(|i| self.mobs[i].extra.saddled && Self::jumps(self.mobs[i].species()))
+        self.mount_index().is_some_and(|i| {
+            self.simulation.mobs[i].extra.saddled && Self::jumps(self.simulation.mobs[i].species())
+        })
     }
     /// `willPrioritizeJumpInfo`: charging a jump or recharging.
     pub(super) fn mount_jumping(&self) -> bool {
@@ -742,7 +751,7 @@ impl Game<'_> {
         let Some(i) = self.mount_index() else {
             return 0;
         };
-        let m = &self.mobs[i];
+        let m = &self.simulation.mobs[i];
         let hearts = horizon_client::hud_layout::vehicle_max_hearts(m.attrs.max_health);
         let draws = horizon_client::hud_layout::vehicle_health(w, h, hearts, m.health);
         self.gui_layer("minecraft:vehicle_health", batch, |g, batch| {
@@ -755,7 +764,7 @@ impl Game<'_> {
         let Some(i) = self.mount_index() else {
             return;
         };
-        let m = &self.mobs[i];
+        let m = &self.simulation.mobs[i];
         // JumpableVehicleBar: `getJumpCooldown`, which only the camel's and
         // the nautilus' dash have; a horse always shows the progress.
         let cooldown = i32::from(

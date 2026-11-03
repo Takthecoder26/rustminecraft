@@ -2444,7 +2444,7 @@ impl Game<'_> {
                     self.level.set_difficulty(self.ui.difficulty);
                     self.sync_rules();
                     if self.ui.difficulty == 0 {
-                        self.mobs.retain(|m| !m.hostile());
+                        self.simulation.mobs.retain(|m| !m.hostile());
                     }
                     host.hub
                         .broadcast(&C::ChangeDifficulty(play::ChangeDifficulty {
@@ -2903,11 +2903,16 @@ impl Game<'_> {
             let on = (0..3).all(|k| (point[k] - inside[k]).abs() < 0.1);
             Some(if on { inside } else { middle })
         };
-        let mob_box = self.mobs.iter().find(|m| m.id as i32 == id).map(|m| {
-            let b = m.bounds();
-            let (mn, mx) = (b.min_position(), b.max_position());
-            ([mn.x, mn.y, mn.z], [mx.x, mx.y, mx.z])
-        });
+        let mob_box = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id as i32 == id)
+            .map(|m| {
+                let b = m.bounds();
+                let (mn, mx) = (b.min_position(), b.max_position());
+                ([mn.x, mn.y, mn.z], [mx.x, mx.y, mx.z])
+            });
         let centre = match mob_box {
             Some((lo, hi)) => visible_aim_point(eye, lo, hi, |p| self.block_between(eye, p)),
             None if self.object_target(id).is_some() => object()?,
@@ -2976,7 +2981,7 @@ impl Game<'_> {
         {
             return Some(g.bounds());
         }
-        if let Some(m) = self.mobs.iter().find(|m| m.id as i32 == id) {
+        if let Some(m) = self.simulation.mobs.iter().find(|m| m.id as i32 == id) {
             return Some(m.bounds());
         }
         if let Some((lo, hi, _)) = self.object_target(id) {
@@ -3093,12 +3098,13 @@ impl Game<'_> {
             return;
         }
         if let Some(index) = self
+            .simulation
             .mobs
             .iter()
             .position(|m| m.id as i32 == id && m.alive())
             .filter(|_| self.dragon.as_ref().is_none_or(|d| d.id as i32 != id))
         {
-            if host.hub.guests[gi].vehicle == Some(self.mobs[index].id) {
+            if host.hub.guests[gi].vehicle == Some(self.simulation.mobs[index].id) {
                 return;
             }
             // A mace's smash sets the attacker's velocity and sends it at once, before the
@@ -4006,7 +4012,8 @@ impl Game<'_> {
                         ..Default::default()
                     })
                     .or_else(|| {
-                        self.mobs
+                        self.simulation
+                            .mobs
                             .iter()
                             .find(|m| m.id == id)
                             .map(|m| self.mob_entity(m))
@@ -4270,7 +4277,10 @@ impl Game<'_> {
         let Some(index) = first_spin_target(
             swept,
             riding,
-            self.mobs.iter().map(|m| (m.id, m.removed, m.bounds())),
+            self.simulation
+                .mobs
+                .iter()
+                .map(|m| (m.id, m.removed, m.bounds())),
         ) else {
             return;
         };
@@ -4646,7 +4656,7 @@ impl Game<'_> {
         let Some(Some(index)) = self.as_guest(host, conn, |g| g.mount_index()) else {
             return;
         };
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         let Some((sound, volume)) = crate::game::mounts::start_riding_jump(m, data) else {
             return;
         };

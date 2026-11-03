@@ -220,10 +220,14 @@ impl Game<'_> {
                 ([at.x, at.y, at.z], [v.x, v.y, v.z])
             })
         } else {
-            self.mobs.iter().find(|m| m.id == id as u32).map(|m| {
-                let (at, v) = (m.position, m.velocity);
-                ([at.x, at.y, at.z], [v.x, v.y, v.z])
-            })
+            self.simulation
+                .mobs
+                .iter()
+                .find(|m| m.id == id as u32)
+                .map(|m| {
+                    let (at, v) = (m.position, m.velocity);
+                    ([at.x, at.y, at.z], [v.x, v.y, v.z])
+                })
         };
         if let Some((at, v)) = body {
             self.drown_particles(at, v);
@@ -231,7 +235,7 @@ impl Game<'_> {
     }
     /// The display name of a mob: its custom name or its type's name.
     pub(super) fn mob_display_name(&self, id: u32) -> Option<Text> {
-        let m = self.mobs.iter().find(|m| m.id == id)?;
+        let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
         Some(match &m.custom_name {
             Some(name) => Text::literal(name.clone()),
             None => Text::translate(&format!("entity.{}", m.kind.id.replace(':', ".")), &[]),
@@ -248,7 +252,7 @@ impl Game<'_> {
             self.note_named_attacker(damage_type, mob, name);
         }
     }
-    /// `note_attacker` for an entity that is not one of `self.mobs` (the
+    /// `note_attacker` for an entity that is not one of `self.simulation.mobs` (the
     /// ender dragon).
     pub(super) fn note_named_attacker(&mut self, damage_type: &str, id: u32, name: Text) {
         self.note_player_attacker(damage_type, id, name, None);
@@ -428,7 +432,7 @@ impl Game<'_> {
     }
     /// The display component of a custom-named held stack.
     fn mob_main_hand_name(&self, id: u32) -> Option<Text> {
-        let m = self.mobs.iter().find(|m| m.id == id)?;
+        let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
         let mut stack = m.extra.main_hand_stack()?.clone();
         if !has_custom_name(&stack) {
             return None;

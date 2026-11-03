@@ -87,9 +87,13 @@ impl Game<'_> {
                 let g = self.command_guest(conn)?;
                 player_slot(&g.inventory, g.selected, &g.armor, &g.offhand, slot)
             }
-            Target::Mob(id) => {
-                self.mobs.iter().find(|m| m.id == id)?.equipment_stacks()[slot as usize].clone()
-            }
+            Target::Mob(id) => self
+                .simulation
+                .mobs
+                .iter()
+                .find(|m| m.id == id)?
+                .equipment_stacks()[slot as usize]
+                .clone(),
             Target::Stand(id) => self
                 .armor_stands
                 .iter()

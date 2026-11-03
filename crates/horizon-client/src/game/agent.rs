@@ -456,7 +456,7 @@ impl Game<'_> {
             v
         });
         let entity = self.mob_hit().map(|(i, d)| {
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             json!({ "id": m.id, "type": m.kind.id, "health": m.health, "distance": d,
                     "pos": [m.position.x, m.position.y, m.position.z] })
         });
@@ -692,7 +692,7 @@ impl Game<'_> {
         };
         // CAN_BE_PICKED's isPickable (`!isRemoved`): a dead-but-tracked mob
         // — a fake player the server keeps at health 0 — is still here.
-        for m in self.mobs.iter().filter(|m| !m.removed) {
+        for m in self.simulation.mobs.iter().filter(|m| !m.removed) {
             let mut v = json!({ "id": m.id, "kind": "mob", "health": m.health, "baby": m.is_baby(), "hurt_time": m.hurt_time });
             // VillagerData as this game knows it: on a client, what the
             // server's synched data says.
@@ -1247,6 +1247,7 @@ impl Game<'_> {
                     Some("entity") => {
                         let id: u32 = a.get(1, "ID")?.parse()?;
                         let m = self
+                            .simulation
                             .mobs
                             .iter()
                             .find(|m| m.id == id)
@@ -1284,6 +1285,7 @@ impl Game<'_> {
                 let id = a.pos.first().map(|i| i.parse::<u32>()).transpose()?;
                 if let Some(id) = id {
                     let m = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == id)
@@ -1293,7 +1295,7 @@ impl Game<'_> {
                 }
                 let target = self
                     .mob_hit()
-                    .map(|(i, _)| (self.mobs[i].id, self.mobs[i].health));
+                    .map(|(i, _)| (self.simulation.mobs[i].id, self.simulation.mobs[i].health));
                 if id.is_some() && target.map(|t| t.0) != id {
                     return Err("that entity is out of reach or hidden; get closer".into());
                 }
@@ -1989,7 +1991,7 @@ impl Game<'_> {
                 if self.ticks < *report_tick && !timed_out {
                     return None;
                 }
-                let now = id.and_then(|id| self.mobs.iter().find(|m| m.id == id));
+                let now = id.and_then(|id| self.simulation.mobs.iter().find(|m| m.id == id));
                 Some(json!({
                     "ok": true,
                     "target": id,

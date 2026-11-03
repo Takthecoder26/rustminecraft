@@ -62,7 +62,7 @@ impl Game<'_> {
         let [x, y, z] = velocity;
         with_entity_mut!(self, h, e => *e.velocity_mut() = Vec3::new(x, y, z));
         if let EntityHandle::Mob(i) = h {
-            self.mobs[i].needs_sync = true;
+            self.simulation.mobs[i].needs_sync = true;
         }
         true
     }

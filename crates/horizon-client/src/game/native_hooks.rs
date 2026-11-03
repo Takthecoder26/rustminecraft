@@ -7671,7 +7671,12 @@ impl Game<'_> {
             .is_some_and(|p| p.entity_id == attacker)
         {
             [self.stack_in(self.selected).cloned(), self.offhand.clone()]
-        } else if let Some(mob) = self.mobs.iter().find(|m| m.id as i32 == attacker) {
+        } else if let Some(mob) = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id as i32 == attacker)
+        {
             [mob.extra.main_hand_stack().cloned(), None]
         } else {
             [None, None]
@@ -9163,21 +9168,24 @@ impl Game<'_> {
     pub(super) fn native_mobs_joined(&mut self, from: usize, natural: bool) {
         // A mod can keep a mob out; it is then taken out and not told of.
         self.native_joins_flush(false, 0);
-        for i in from..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in from..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             let (kind, pos) = (mob_kind(m), [m.position.x, m.position.y, m.position.z]);
             self.native_mob_spawned(self.dim.id(), &kind, pos, natural);
         }
     }
     /// The acting player's blow killed mob `index`.
     pub(super) fn native_kill_event(&mut self, index: usize) {
-        let (entity, kind) = (self.mobs[index].id, mob_kind(&self.mobs[index]));
+        let (entity, kind) = (
+            self.simulation.mobs[index].id,
+            mob_kind(&self.simulation.mobs[index]),
+        );
         let player = self.native_acting_id();
         self.native_mob_killed(player, entity, &kind);
     }
     /// The acting player's hit landed on mob `index`, holding `stack`.
     pub(super) fn native_hurt_enemy_event(&mut self, stack: &ItemStack, index: usize) {
-        let mob = &self.mobs[index];
+        let mob = &self.simulation.mobs[index];
         let kind = ["minecraft:", mob.kind.id.trim_start_matches("minecraft:")].concat();
         self.native_hurt_enemy(stack, mob.id, &kind);
     }

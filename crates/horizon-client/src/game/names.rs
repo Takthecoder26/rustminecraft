@@ -25,7 +25,7 @@ impl Game<'_> {
         else {
             return false;
         };
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         if !m.alive() {
             return false;
         }
@@ -65,7 +65,7 @@ impl Game<'_> {
     fn other_players(&self) -> Vec<(&Mob, String)> {
         let mut out = Vec::new();
         for (id, name) in self.remote_player_names() {
-            if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+            if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
                 out.push((m, name));
             }
         }
@@ -104,7 +104,7 @@ impl Game<'_> {
     /// Each name tag this frame.
     fn name_tags(&self, camera: glam::DVec3, alpha: f64) -> Vec<NameTag> {
         let hooks = !mod_api::mods().is_empty();
-        let target = self.mob_hit().map(|(i, _)| self.mobs[i].id);
+        let target = self.mob_hit().map(|(i, _)| self.simulation.mobs[i].id);
         let viewer = self.player_team();
         let mut tags = Vec::new();
         let players = self.other_players();
@@ -114,7 +114,7 @@ impl Game<'_> {
                 .map(|(player, _)| player.id)
                 .collect::<std::collections::HashSet<u32>>()
         });
-        let named = self.mobs.iter().filter_map(|m| {
+        let named = self.simulation.mobs.iter().filter_map(|m| {
             if player_ids.as_ref().is_some_and(|ids| ids.contains(&m.id)) {
                 return None;
             }
@@ -138,8 +138,12 @@ impl Game<'_> {
             .map(|(m, name)| (m, name, true));
         // Who is riding whom: asked once per tag below, and rescanning every mob
         // for each tag made this quadratic in the number of loaded mobs.
-        let ridden: std::collections::HashSet<u32> =
-            self.mobs.iter().filter_map(|o| o.extra.mount).collect();
+        let ridden: std::collections::HashSet<u32> = self
+            .simulation
+            .mobs
+            .iter()
+            .filter_map(|o| o.extra.mount)
+            .collect();
         for (m, name, player) in named.chain(players) {
             if !m.alive() {
                 continue;

@@ -35,10 +35,10 @@ impl Game<'_> {
     /// `ServerPlayer.setEntityOnShoulder` for a parrot that touched its
     /// owner: stored in the first free slot, the parrot gone from the world.
     pub(super) fn parrot_to_shoulder(&mut self, mob: u32) {
-        let Some(i) = self
-            .mobs
-            .iter()
-            .position(|m| m.id == mob && m.alive() && !m.removed && m.species() == Species::Parrot)
+        let Some(i) =
+            self.simulation.mobs.iter().position(|m| {
+                m.id == mob && m.alive() && !m.removed && m.species() == Species::Parrot
+            })
         else {
             return;
         };
@@ -46,7 +46,10 @@ impl Game<'_> {
             return;
         };
         // The acting player must be the saved owner (`getOwner`).
-        if !horizon_client::mobs::tame::owned_by(self.mobs[i].extra.owner, self.acting_uuid()) {
+        if !horizon_client::mobs::tame::owned_by(
+            self.simulation.mobs[i].extra.owner,
+            self.acting_uuid(),
+        ) {
             return;
         }
         if self.riding.is_some()
@@ -70,7 +73,7 @@ impl Game<'_> {
         }
         let (uuid, now) = (self.acting_uuid(), self.world.game_time);
         self.creatures.shoulder_time.insert(uuid, now);
-        self.mobs[i].removed = true;
+        self.simulation.mobs[i].removed = true;
     }
 
     /// `ServerPlayer.handleShoulderEntities`: the parrots leave the shoulder
@@ -129,6 +132,7 @@ impl Game<'_> {
         let at = [p.position.x, p.position.y, p.position.z];
         let alive = !p.health.dead_or_dying();
         let nearby: Vec<_> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive() && !m.removed && m.bounds().intersects(area))

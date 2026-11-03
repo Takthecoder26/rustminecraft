@@ -659,7 +659,7 @@ impl Game<'_> {
                     self.portals.carried_at.insert(id, c.position);
                 } else if let Some(b) = self.boats.iter().find(|b| b.id == id) {
                     self.portals.carried_at.insert(id, b.position);
-                } else if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+                } else if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
                     self.portals.carried_at.insert(id, m.position);
                 }
                 self.portals.carrying.push((self.dim, id, entry));
@@ -717,7 +717,12 @@ impl Game<'_> {
     /// `Entity.canUsePortal(false)` for a primed TNT: it carries no mob.
     pub(super) fn tnt_can_use_portal(&self, id: u32) -> bool {
         // Id 0: not tracked yet, nothing to key its portal state by.
-        id != 0 && !self.mobs.iter().any(|m| m.extra.mount == Some(id))
+        id != 0
+            && !self
+                .simulation
+                .mobs
+                .iter()
+                .any(|m| m.extra.mount == Some(id))
     }
     /// `canUsePortal(false)` of a boat or minecart: it is nobody's passenger;
     /// the mobs riding it, and on a server the players, cross with it.
@@ -750,7 +755,7 @@ impl Game<'_> {
     /// (`AbstractBoat` and `AbstractMinecart.getRelativePortalPosition`).
     pub(super) fn vehicle_plan(&self, id: u32, entry: BlockPos) -> Option<Plan> {
         let at = |own: Vec3| self.portals.carried_at.get(&id).copied().unwrap_or(own);
-        if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
             return Some(self.entity_plan(entry, at(m.position), m.width(), m.height(), true));
         }
         if let Some(b) = self.boats.iter().find(|b| b.id == id) {
@@ -1002,8 +1007,8 @@ impl Game<'_> {
             self.forget_entity(id);
             self.portals.arrivals.push(Arrival { plan, tag });
             self.portals.dirty = true;
-        } else if let Some(i) = self.mobs.iter().position(|m| m.id == id) {
-            let m = &self.mobs[i];
+        } else if let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) {
+            let m = &self.simulation.mobs[i];
             let plan = self.entity_plan(entry, m.position, m.width(), m.height(), true);
             if !self.may_enter(plan.dim) {
                 return;
@@ -1015,7 +1020,7 @@ impl Game<'_> {
             }
             let mut gone = vec![id];
             gone.extend(self.remove_mob_riders(id));
-            self.mobs.retain(|m| m.id != id);
+            self.simulation.mobs.retain(|m| m.id != id);
             for g in gone {
                 self.detach_entity(g);
             }
@@ -1129,7 +1134,8 @@ impl Game<'_> {
         while k < tree.len() {
             let v = tree[k];
             tree.extend(
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .filter(|m| m.extra.mount == Some(v))
                     .map(|m| m.id),
@@ -1137,7 +1143,7 @@ impl Game<'_> {
             k += 1;
         }
         tree.remove(0);
-        self.mobs.retain(|m| !tree.contains(&m.id));
+        self.simulation.mobs.retain(|m| !tree.contains(&m.id));
         tree
     }
     /// The chunks of the arrivals still waiting to land in `dim`, for the

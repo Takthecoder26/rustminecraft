@@ -153,7 +153,7 @@ impl Game<'_> {
             return;
         };
         let vehicle_id = vehicle as u32;
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             // `Entity.isVehicle` (the saddle reins of a ridden horse): the
             // server sends no rider on the mob itself, only this list.
             if m.id == vehicle_id {
@@ -207,13 +207,17 @@ impl Game<'_> {
         } else if self.riding == Some(vehicle_id) {
             // The server takes the player out, then teleports it.
             self.riding = None;
-            if let Some(m) = self.mob_index.get_mut(&mut self.mobs, vehicle_id) {
+            if let Some(m) = self
+                .simulation
+                .mob_index
+                .get_mut(&mut self.simulation.mobs, vehicle_id)
+            {
                 m.rider = None;
             }
             // HappyGhast.removePassenger: a still timeout of 10 (the server's
             // STAYS_STILL confirms it), and the rider lands on top of the ghast
             // (`place_ghast_under`).
-            if let Some(m) = self.mobs.iter_mut().find(|m| {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| {
                 m.id == vehicle_id && m.species() == horizon_client::mobs::Species::HappyGhast
             }) {
                 m.extra.counter = 10;
@@ -246,10 +250,10 @@ impl Game<'_> {
         let Some(id) = self.riding else {
             return false;
         };
-        if let Some(i) = self.mobs.iter().position(|m| m.id == id) {
+        if let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) {
             // LocalPlayer.aiStep: the jump bar charges while jump is held.
             let jump = self.charge_mount_jump(i, keys);
-            if self.drives(&self.mobs[i]) {
+            if self.drives(&self.simulation.mobs[i]) {
                 self.drive_mount(i, keys, jump);
             }
             // Another animal moves on the server with the rider's input
@@ -350,7 +354,10 @@ impl Game<'_> {
     pub(super) fn remote_move_vehicle(&mut self, position: [f64; 3], yaw: f32) {
         let at = Vec3::new(position[0], position[1], position[2]);
         if let Some(id) = self.driven_mount().map(|m| m.id)
-            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, id)
+            && let Some(m) = self
+                .simulation
+                .mob_index
+                .get_mut(&mut self.simulation.mobs, id)
         {
             m.previous = at;
             m.position = at;
@@ -427,7 +434,10 @@ impl Game<'_> {
     /// The mount this client moves, if the player rides one.
     pub(super) fn driven_mount(&self) -> Option<&Mob> {
         let id = self.riding?;
-        self.mobs.iter().find(|m| m.id == id && self.drives(m))
+        self.simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == id && self.drives(m))
     }
 
     /// `LocalPlayer.aiStep` and `LivingEntity.travelRidden` on the
@@ -442,7 +452,7 @@ impl Game<'_> {
         }
         let strafe = f32::from(u8::from(keys.left)) - f32::from(u8::from(keys.right));
         let forward = f32::from(u8::from(keys.forward)) - f32::from(u8::from(keys.backward));
-        let m = &mut self.mobs[i];
+        let m = &mut self.simulation.mobs[i];
         if jump > 0.0 && equine::is_equine(m.species()) {
             // LocalPlayer.aiStep also runs `onPlayerJump` here: the mount slides
             // on the rider's keys and rears while the server does the same.
@@ -461,7 +471,7 @@ impl Game<'_> {
             jumping: keys.jump,
             client: false,
         });
-        let mut mob = self.mobs.remove(i);
+        let mut mob = self.simulation.mobs.remove(i);
         let mut random = self.world.random.clone();
         let mut events = Vec::new();
         {
@@ -471,7 +481,7 @@ impl Game<'_> {
         // Only the server's packets take the mount away.
         mob.removed = false;
         self.world.random = random;
-        self.mobs.insert(i, mob);
+        self.simulation.mobs.insert(i, mob);
         // #4821: footstep, gallop, breathe, splash and landing sounds from mob.tick
         let _ = self.handle_mob_events(events);
     }

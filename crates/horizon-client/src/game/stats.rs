@@ -291,7 +291,8 @@ impl Game<'_> {
         );
         let climbing = p.last_climbable.is_some() && d.y > 0.0;
         let riding = self.riding.map(|id| {
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .find(|m| m.id == id)
                 .map(|m| m.species())

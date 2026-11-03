@@ -2308,6 +2308,7 @@ impl Game<'_> {
             };
             // Keep team lookup in Game (including tamed pets' owner teams).
             let allowed: Vec<bool> = self
+                .simulation
                 .mobs
                 .iter()
                 .map(|m| {
@@ -2317,7 +2318,7 @@ impl Game<'_> {
                     )
                 })
                 .collect();
-            for (mob, allowed) in self.mobs.iter_mut().zip(allowed) {
+            for (mob, allowed) in self.simulation.mobs.iter_mut().zip(allowed) {
                 horizon_client::mobs::dragon_contacts::contact(mob, &frame, allowed);
             }
         }
@@ -3513,7 +3514,7 @@ impl Game<'_> {
                     Vec3::new(c.position.x + 1.0, c.position.y + 2.0, c.position.z + 1.0),
                 )
             })
-            || self.mobs.iter().any(|m| {
+            || self.simulation.mobs.iter().any(|m| {
                 let w = f64::from(m.width()) / 2.0;
                 let h = f64::from(m.height());
                 touches(

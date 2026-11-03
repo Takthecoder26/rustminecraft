@@ -65,13 +65,13 @@ impl TrialSpawnerLevel for GameLevel<'_, '_> {
     }
     fn entity_block(&self, uuid: Uuid) -> Option<[i32; 3]> {
         let (id, _) = self.game.persist.uuids.iter().find(|(_, u)| **u == uuid)?;
-        let m = self.game.mobs.iter().find(|m| m.id == *id)?;
+        let m = self.game.simulation.mobs.iter().find(|m| m.id == *id)?;
         (!m.removed && m.alive())
             .then(|| [m.position.x, m.position.y, m.position.z].map(|v| v.floor() as i32))
     }
     fn entity_box(&self, uuid: Uuid) -> Option<([f64; 3], f32)> {
         let (id, _) = self.game.persist.uuids.iter().find(|(_, u)| **u == uuid)?;
-        let m = self.game.mobs.iter().find(|m| m.id == *id)?;
+        let m = self.game.simulation.mobs.iter().find(|m| m.id == *id)?;
         let b = m.bounds();
         (!m.removed && m.alive()).then(|| {
             (
@@ -251,7 +251,7 @@ impl Game<'_> {
                 TrialEvent::Discard(uuid) => {
                     let id = self.persist.uuids.iter().find(|(_, u)| **u == uuid);
                     if let Some((id, _)) = id
-                        && let Some(m) = self.mobs.iter_mut().find(|m| m.id == *id)
+                        && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == *id)
                     {
                         m.removed = true;
                     }

@@ -127,7 +127,7 @@ impl Game<'_> {
     /// `AbstractWindCharge.onHitEntity`: one point of damage.
     fn wind_charge_damage(&mut self, p: &Projectile, who: Who) {
         let owner_breeze = matches!(p.owner, Some(Who::Mob(id))
-            if self.mobs.iter().any(|m| m.id == id && m.species() == Species::Breeze));
+            if self.simulation.mobs.iter().any(|m| m.id == id && m.species() == Species::Breeze));
         match who {
             Who::Player => {
                 if !self.creative {
@@ -157,7 +157,7 @@ impl Game<'_> {
                     attacker: p.owner,
                     from: Some([p.previous.x, p.previous.y, p.previous.z]),
                 };
-                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     // Breeze.isInvulnerableTo: its own kind's charges.
                     if owner_breeze && m.species() == Species::Breeze {
                         return;

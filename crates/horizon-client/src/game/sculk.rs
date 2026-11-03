@@ -199,6 +199,7 @@ impl Game<'_> {
             Some("dig") => {
                 // Let every warden's minute of calm run out.
                 for m in self
+                    .simulation
                     .mobs
                     .iter_mut()
                     .filter(|m| m.species() == Species::Warden)
@@ -498,7 +499,7 @@ impl Game<'_> {
     }
     /// `GameEvent.Context.of(mob, state)`.
     pub(super) fn mob_context(&self, id: u32, state: Option<BlockStateId>) -> Context {
-        self.context_of_mob(self.mobs.iter().find(|m| m.id == id), id, state)
+        self.context_of_mob(self.simulation.mobs.iter().find(|m| m.id == id), id, state)
     }
     fn context_of_mob(&self, mob: Option<&Mob>, id: u32, state: Option<BlockStateId>) -> Context {
         Context {
@@ -552,11 +553,15 @@ impl Game<'_> {
         for key in near {
             self.sculk_listen(key, event, pos, &ctx);
         }
-        for i in 0..self.mobs.len() {
-            if self.mobs[i].species() == Species::Warden && self.mobs[i].alive() {
+        for i in 0..self.simulation.mobs.len() {
+            if self.simulation.mobs[i].species() == Species::Warden
+                && self.simulation.mobs[i].alive()
+            {
                 self.warden_listen(i, event, pos, &ctx);
             }
-            if self.mobs[i].species() == Species::Allay && self.mobs[i].alive() {
+            if self.simulation.mobs[i].species() == Species::Allay
+                && self.simulation.mobs[i].alive()
+            {
                 self.allay_listen(i, event, pos, &ctx);
             }
         }
@@ -576,6 +581,7 @@ impl Game<'_> {
     /// the end-of-tick scan then knows this damage.
     pub(super) fn mob_damage_event(&mut self, id: u32) {
         if let Some(t) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == id)
@@ -593,6 +599,7 @@ impl Game<'_> {
                 .as_ref()
                 .map(|p| [p.position.x, p.position.y, p.position.z]),
             Who::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -729,12 +736,19 @@ impl Game<'_> {
     fn warden_listen(&mut self, index: usize, event: &'static str, pos: [f64; 3], ctx: &Context) {
         let now = self.world.game_time;
         let (occludes, world) = (&self.sculk.tables.occludes, &self.world);
-        let avoided = warden::listen(&mut self.mobs[index], now, event, pos, ctx, |a, b| {
-            sculk::is_occluded(a, b, |p| {
-                let state = world.block(p.x, p.y, p.z);
-                occludes.get(state.0 as usize).copied().unwrap_or(false)
-            })
-        });
+        let avoided = warden::listen(
+            &mut self.simulation.mobs[index],
+            now,
+            event,
+            pos,
+            ctx,
+            |a, b| {
+                sculk::is_occluded(a, b, |p| {
+                    let state = world.block(p.x, p.y, p.z);
+                    occludes.get(state.0 as usize).copied().unwrap_or(false)
+                })
+            },
+        );
         if avoided {
             self.trigger_player("minecraft:avoid_vibration");
         }
@@ -747,7 +761,7 @@ impl Game<'_> {
         let (occludes, world) = (&self.sculk.tables.occludes, &self.world);
         let dimension = self.dim.id();
         allay::listen(
-            &mut self.mobs[index],
+            &mut self.simulation.mobs[index],
             now,
             event,
             pos,
@@ -911,7 +925,7 @@ impl Game<'_> {
         Ok(())
     }
     fn rides_player(&self, who: Option<Who>) -> bool {
-        matches!(who, Some(Who::Mob(id)) if self.mobs.iter().any(|m| m.id == id && m.rider.is_some()))
+        matches!(who, Some(Who::Mob(id)) if self.simulation.mobs.iter().any(|m| m.id == id && m.rider.is_some()))
     }
     /// `SculkSensorBlock.activate`.
     fn activate_sensor(
@@ -956,7 +970,7 @@ impl Game<'_> {
     fn sculk_step_on(&mut self) {
         self.sculk_step_on_player();
         let mut standing: Vec<(Who, [f64; 3])> = Vec::new();
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             if m.alive() && m.on_ground {
                 standing.push((Who::Mob(m.id), [m.position.x, m.position.y, m.position.z]));
             }
@@ -986,7 +1000,7 @@ impl Game<'_> {
             }
             let state = self.world.block(key.0, key.1, key.2);
             let is_warden = matches!(who, Who::Mob(id)
-                if self.mobs.iter().any(|m| m.id == id && m.species() == Species::Warden));
+                if self.simulation.mobs.iter().any(|m| m.id == id && m.species() == Species::Warden));
             match self.kind_of_state(state.0) {
                 KIND_SENSOR | KIND_CALIBRATED => {
                     if is_warden || !self.res.behaviours().sculk_sensor_can_activate(state) {
@@ -1055,7 +1069,7 @@ impl Game<'_> {
     /// `WardenSpawnTracker.tryWarn` for the one player.
     fn try_to_warn(&mut self, key: (i32, i32, i32)) -> bool {
         let c = center(key);
-        let warden_nearby = self.mobs.iter().any(|m| {
+        let warden_nearby = self.simulation.mobs.iter().any(|m| {
             m.species() == Species::Warden
                 && m.alive()
                 && (m.position.x - c[0]).abs() < 24.0
@@ -1168,8 +1182,8 @@ impl Game<'_> {
             if !self.warden_fits(&mob) {
                 continue;
             }
-            self.mobs.push(mob);
-            self.native_mobs_joined(self.mobs.len() - 1, false);
+            self.simulation.mobs.push(mob);
+            self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
             return true;
         }
         false
@@ -1202,6 +1216,7 @@ impl Game<'_> {
             .any(|p| p.alive && !p.spectator && p.bounds.intersects(bounds));
         if player_blocks
             || self
+                .simulation
                 .mobs
                 .iter()
                 .any(|m| !m.removed && m.alive() && m.bounds().intersects(bounds))
@@ -1737,6 +1752,7 @@ impl Game<'_> {
             u32,
             bool,
         )> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())
@@ -1794,7 +1810,7 @@ impl Game<'_> {
                 }
             }
         }
-        let alive: FxHashSet<u32> = self.mobs.iter().map(|m| m.id).collect();
+        let alive: FxHashSet<u32> = self.simulation.mobs.iter().map(|m| m.id).collect();
         self.sculk.damaged.retain(|id, _| alive.contains(id));
         self.sculk.steps.retain(|who, _| match who {
             Who::Player => true,
@@ -1807,7 +1823,7 @@ impl Game<'_> {
     }
     /// Where the vehicle `id` stands: a mob, boat, minecart or cushion.
     fn vehicle_position(&self, id: u32) -> Option<[f64; 3]> {
-        let p = if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+        let p = if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
             m.position
         } else if let Some(b) = self.boats.iter().find(|b| b.id == id) {
             b.position

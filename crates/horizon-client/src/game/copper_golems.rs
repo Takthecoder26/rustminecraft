@@ -80,6 +80,7 @@ impl Game<'_> {
                 ),
             );
             let count = self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|m| {
@@ -141,13 +142,13 @@ impl Game<'_> {
     }
     /// `CopperGolem.turnToStatue`, which its weathering asked for.
     pub(super) fn golem_become_statue(&mut self, id: u32) {
-        let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) else {
             return;
         };
-        let mut m = self.mobs[i].clone();
+        let mut m = self.simulation.mobs[i].clone();
         self.golem_turn_to_statue(&mut m);
-        if let Some(i) = self.mobs.iter().position(|x| x.id == id) {
-            self.mobs[i] = m;
+        if let Some(i) = self.simulation.mobs.iter().position(|x| x.id == id) {
+            self.simulation.mobs[i] = m;
         }
     }
     fn golem_turn_to_statue(&mut self, m: &mut Mob) {
@@ -242,7 +243,7 @@ impl Game<'_> {
         let Some(id) = self.spawn_mob("minecraft:copper_golem", at, true) else {
             return false;
         };
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             m.yaw = yaw;
             m.previous_yaw = yaw;
             m.body_yaw = yaw;
@@ -267,23 +268,25 @@ impl Game<'_> {
     }
     /// `CopperGolem.mobInteract`; true when handled.
     pub(super) fn interact_copper_golem(&mut self, index: usize, item: &str) -> bool {
-        if self.mobs[index].species() != Species::CopperGolem || !self.mobs[index].alive() {
+        if self.simulation.mobs[index].species() != Species::CopperGolem
+            || !self.simulation.mobs[index].alive()
+        {
             return false;
         }
         let at = {
-            let m = &self.mobs[index];
+            let m = &self.simulation.mobs[index];
             [m.position.x, m.position.y, m.position.z]
         };
         if item.is_empty() {
             // Empty hand: the golem throws what it carries back.
-            let Some(h) = held(&self.mobs[index]).cloned() else {
+            let Some(h) = held(&self.simulation.mobs[index]).cloned() else {
                 return false;
             };
-            set_held(&mut self.mobs[index], None);
+            set_held(&mut self.simulation.mobs[index], None);
             // BehaviorUtils.throwItem: from 0.3 below the golem's eyes towards
             // the player's feet at 0.3 blocks a tick, default pickup delay.
             let p = self.player.as_ref().map(|p| p.position);
-            let eye = self.mobs[index].eye_height();
+            let eye = self.simulation.mobs[index].eye_height();
             let from = [at[0], at[1] + eye - f64::from(0.3f32), at[2]];
             let v = p.map_or([0.0; 3], |p| {
                 let d = [p.x - at[0], p.y - at[1], p.z - at[2]];
@@ -299,30 +302,30 @@ impl Game<'_> {
         }
         let name = item;
         let is_axe = name.ends_with("_axe");
-        let waxed = self.mobs[index].extra.vector[0] as i64 == -2;
+        let waxed = self.simulation.mobs[index].extra.vector[0] as i64 == -2;
         if name == "minecraft:shears" && self.golem_shearable(index) {
             // CopperGolem.shear: the sound, the antenna slot emptied (an
             // unequip) and the flower dropped 1.5 up.
             self.audio
                 .play("minecraft:entity.copper_golem.shear", Some(at), 1.0, 1.0);
-            let antenna = self.mobs[index].saddle_item();
-            self.mobs[index].set_saddle(None);
-            let id = self.mobs[index].id;
+            let antenna = self.simulation.mobs[index].saddle_item();
+            self.simulation.mobs[index].set_saddle(None);
+            let id = self.simulation.mobs[index].id;
             let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(id)), None);
             self.post_game_event("minecraft:unequip", at, ctx);
             if let Some(a) = antenna {
-                let p = self.mobs[index].position;
+                let p = self.simulation.mobs[index].position;
                 self.spawn_at_location(p, 1.5, a);
             }
             self.damage_held_tool();
             return true;
         }
         let block = {
-            let p = self.mobs[index].position;
+            let p = self.simulation.mobs[index].position;
             [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]
         };
         if name == "minecraft:honeycomb" && !waxed {
-            self.mobs[index].extra.vector[0] = -2.0;
+            self.simulation.mobs[index].extra.vector[0] = -2.0;
             self.level_event_at(3003, block, 0);
             self.audio
                 .play("minecraft:item.honeycomb.wax_on", Some(at), 1.0, 1.0);
@@ -330,15 +333,15 @@ impl Game<'_> {
             return true;
         }
         if is_axe && waxed {
-            self.mobs[index].extra.vector[0] = -1.0;
+            self.simulation.mobs[index].extra.vector[0] = -1.0;
             self.audio
                 .play("minecraft:item.axe.scrape", Some(at), 1.0, 1.0);
             self.level_event_at(3004, block, 0);
             self.damage_held_tool();
             return true;
         }
-        if is_axe && self.mobs[index].extra.variant > 0 {
-            let m = &mut self.mobs[index];
+        if is_axe && self.simulation.mobs[index].extra.variant > 0 {
+            let m = &mut self.simulation.mobs[index];
             m.extra.vector[0] = -1.0;
             m.extra.variant = horizon_client::mobs::copper_golem::weather_previous(m.extra.variant);
             self.audio
@@ -351,7 +354,7 @@ impl Game<'_> {
     }
     /// `readyForShearing`: the antenna holds a flower shears take.
     pub(super) fn golem_shearable(&self, index: usize) -> bool {
-        self.mobs[index].saddle_item().is_some_and(|a| {
+        self.simulation.mobs[index].saddle_item().is_some_and(|a| {
             self.res
                 .items()
                 .item_tags

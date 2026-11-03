@@ -57,7 +57,7 @@ impl Game<'_> {
                 item,
             ));
         }
-        for m in self.mobs.iter().filter(|m| !m.removed) {
+        for m in self.simulation.mobs.iter().filter(|m| !m.removed) {
             let (level, item) = brighter(
                 [m.extra.main_hand.as_deref(), m.extra.off_hand.as_deref()],
                 m.fire_ticks > 0,

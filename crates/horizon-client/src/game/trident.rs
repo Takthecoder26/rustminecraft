@@ -592,7 +592,7 @@ impl Game<'_> {
                 let margin = f64::from(((t.age as i32 - 2) as f32 / 20.0).clamp(0.0, 0.3));
                 let grow = Vec3::new(margin, margin, margin);
                 if !t.dealt_damage {
-                    for m in self.mobs.iter().filter(|m| m.alive()) {
+                    for m in self.simulation.mobs.iter().filter(|m| m.alive()) {
                         if let Some(d) =
                             segment_box(t.position, t.velocity, m.bounds().inflate(grow))
                             && hit_mob.is_none_or(|(_, best)| d < best)
@@ -635,6 +635,7 @@ impl Game<'_> {
                     // ThrownTrident.getDamage: `EnchantmentHelper.modifyDamage` on 8
                     // (impaling hits `#sensitive_to_impaling`, the aquatic tag).
                     let victim = self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == id)
@@ -670,7 +671,7 @@ impl Game<'_> {
                     t.dealt_damage = true;
                     let mut hurt_at = None;
                     let aim = self.attacker_aim(Some(Who::Player));
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         let from = Some([t.position.x, t.position.y, t.position.z]);
                         let hurt = m.damage_projectile(
                             damage,
@@ -701,7 +702,7 @@ impl Game<'_> {
                         self.channel_lightning(at, t.guest);
                     }
                     if hurt_at.is_some()
-                        && let Some(m) = self.mobs.iter().find(|m| m.id == id)
+                        && let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id)
                     {
                         // LivingEntity.hurtServer: PLAYER_HURT_ENTITY.
                         let victim = self.mob_entity(m);

@@ -121,6 +121,7 @@ impl Game<'_> {
                 .command_guest(conn)
                 .map_or([0.0; 2], |g| [g.yaw, g.pitch]),
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -162,6 +163,7 @@ impl Game<'_> {
                 .map_or(1.62, |p| f64::from(p.dimensions.eye_height)),
             Target::Guest(conn) => self.command_guest(conn).map_or(1.62, |g| g.eye_height()),
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -663,6 +665,7 @@ impl Game<'_> {
                 // OwnableEntity.getOwner → EntityReference.getLivingEntity:
                 // a marker or a display with that UUID is not an owner.
                 Target::Mob(id) => self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id)
@@ -688,6 +691,7 @@ impl Game<'_> {
             // Leashable.getLeashHolder: a fence knot is not an entity here.
             Some("leasher") => match entity {
                 Target::Mob(id) => self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id)
@@ -743,6 +747,7 @@ impl Game<'_> {
                     .into_iter()
                     .collect(),
                 Target::Mob(id) => self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id && m.kind.id == "minecraft:vex")
@@ -755,7 +760,13 @@ impl Game<'_> {
             },
             Some("vehicle") => self.ride_vehicle(entity).into_iter().collect(),
             Some("controller") | Some("passengers") => match entity {
-                Target::Mob(id) if self.mobs.iter().any(|m| m.id == id && m.rider.is_some()) => {
+                Target::Mob(id)
+                    if self
+                        .simulation
+                        .mobs
+                        .iter()
+                        .any(|m| m.id == id && m.rider.is_some()) =>
+                {
                     vec![Target::Player]
                 }
                 _ => Vec::new(),
@@ -764,6 +775,7 @@ impl Game<'_> {
                 let attacker = c.literals.last().is_some_and(|l| l == "attacker");
                 match entity {
                     Target::Mob(id) => self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|m| m.id == id)

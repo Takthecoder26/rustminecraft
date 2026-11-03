@@ -743,6 +743,7 @@ impl Game<'_> {
     fn targets_at(&self, p: Pos) -> Vec<Target> {
         let block = block_box(p);
         let mut found: Vec<(u32, Target)> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
@@ -875,7 +876,7 @@ impl Game<'_> {
                 allows("minecraft:armor_stand") && self.armor_stands[i].equipment[s].is_none()
             }),
             Target::Mob(i) => {
-                let m = &self.mobs[i];
+                let m = &self.simulation.mobs[i];
                 m.alive()
                     && mob_can_use_slot(m, slot)
                     && allows(&m.kind.id)
@@ -919,7 +920,7 @@ impl Game<'_> {
                 (Some(stand.position), sound)
             }
             Target::Mob(i) => {
-                let m = &mut self.mobs[i];
+                let m = &mut self.simulation.mobs[i];
                 mob_set_slot(m, slot, one);
                 // setGuaranteedDrop / setPersistenceRequired.
                 m.persistent = true;
@@ -936,7 +937,7 @@ impl Game<'_> {
                 self.audio.play(&sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
             }
             let who = match target {
-                Target::Mob(i) => Some(horizon_client::mobs::Who::Mob(self.mobs[i].id)),
+                Target::Mob(i) => Some(horizon_client::mobs::Who::Mob(self.simulation.mobs[i].id)),
                 Target::Player | Target::Stand(_) => None,
             };
             let ctx = self.who_context(who, None);
@@ -956,23 +957,23 @@ impl Game<'_> {
     }
     /// After `EntityType.spawn` / `MobBucketItem.spawn`: `mob.playAmbientSound()`.
     fn mob_ambient(&mut self, id: u32) -> Result<()> {
-        let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) else {
             return Ok(());
         };
-        let mut m = self.mobs.remove(i);
+        let mut m = self.simulation.mobs.remove(i);
         let mut events = Vec::new();
         {
             let w = self.mob_world_base(&[]);
             horizon_client::mobs::ai::ambient_sound(&mut m, &w, &mut events);
         }
-        self.mobs.insert(i, m);
+        self.simulation.mobs.insert(i, m);
         self.handle_mob_events(events)
     }
     /// A mob a bucket emptied: `setFromBucket` keeps it, then it calls out.
     /// Fish and axolotls carry the flag itself (saved as `FromBucket`, read by
     /// `requiresCustomPersistence`); the others stay persistent instead.
     pub(super) fn mob_placed(&mut self, id: u32) -> Result<()> {
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             if matches!(
                 m.species(),
                 Species::Cod
@@ -1000,7 +1001,7 @@ impl Game<'_> {
             return Ok((Some(stack), CLICK));
         };
         // EntityType.create: `finalizeSpawn` first, the egg's components after.
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             horizon_client::entity_nbt::apply_item_components(m, &stack);
         }
         // EntityType.updateCustomEntityTag: a configured egg
@@ -1165,7 +1166,7 @@ impl Game<'_> {
         let front = offset(pos, facing);
         for target in self.targets_at(front) {
             let Target::Mob(i) = target else { continue };
-            let m = &mut self.mobs[i];
+            let m = &mut self.simulation.mobs[i];
             if matches!(
                 m.species(),
                 Species::Donkey | Species::Mule | Species::Llama | Species::TraderLlama
@@ -1312,7 +1313,7 @@ impl Game<'_> {
             // MobBucketItem.checkExtraContent: the mob (from the bucket, so
             // persistent) calls out, then ENTITY_PLACE.
             if let Some(id) = self.spawn_mob_at(kind, target, true) {
-                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     horizon_client::entity_nbt::apply_item_components(m, &stack);
                 }
                 self.mob_placed(id)?;
@@ -1375,7 +1376,7 @@ impl Game<'_> {
         // tryIgniteExplosiveEntities: the first sulfur cube that can explode is primed.
         let cube = self.targets_at(target).into_iter().find_map(|t| match t {
             Target::Mob(i) => {
-                let m = &self.mobs[i];
+                let m = &self.simulation.mobs[i];
                 (m.species() == Species::SulfurCube
                     && m.alive()
                     && !sulfur_cube::primed(m)
@@ -1387,8 +1388,10 @@ impl Game<'_> {
         if let Some(i) = cube {
             // primeTime(false): the fuse is lit only while TNT explodes; the
             // ignition counts either way.
-            if self.ui.rules.bool("tnt_explodes") && sulfur_cube::prime(&mut self.mobs[i], false) {
-                let m = &mut self.mobs[i];
+            if self.ui.rules.bool("tnt_explodes")
+                && sulfur_cube::prime(&mut self.simulation.mobs[i], false)
+            {
+                let m = &mut self.simulation.mobs[i];
                 let (at, id) = (m.position, m.id);
                 let mut events = Vec::new();
                 m.voice("entity.tnt.primed", &mut events);
@@ -1822,8 +1825,8 @@ impl Game<'_> {
     pub(super) fn convert_mob(&mut self, index: usize, kind: &str) -> Option<u32> {
         let t = self.res.mob_types().get(kind).cloned()?;
         let (old_id, old_kind) = (
-            self.mobs[index].id,
-            super::native_hooks::mob_kind(&self.mobs[index]),
+            self.simulation.mobs[index].id,
+            super::native_hooks::mob_kind(&self.simulation.mobs[index]),
         );
         // LivingConversionEvent.Pre: a canceled conversion leaves the mob.
         let mut cancel = false;
@@ -1831,7 +1834,7 @@ impl Game<'_> {
         if cancel {
             return None;
         }
-        let old = &self.mobs[index];
+        let old = &self.simulation.mobs[index];
         self.next_entity += 1;
         let mut mob = Mob::new(self.next_entity, t, old.position, old.yaw);
         mob.previous = old.previous;
@@ -1860,9 +1863,9 @@ impl Game<'_> {
             *slot = None;
         }
         let id = mob.id;
-        self.mobs[index].removed = true;
-        self.mobs.push(mob);
-        self.native_mobs_joined(self.mobs.len() - 1, false);
+        self.simulation.mobs[index].removed = true;
+        self.simulation.mobs.push(mob);
+        self.native_mobs_joined(self.simulation.mobs.len() - 1, false);
         self.native_entity_transform(old_id, &old_kind, id, kind);
         self.native_living_conversion_post(old_id, &old_kind, id, kind);
         Some(id)
@@ -1877,7 +1880,7 @@ impl Game<'_> {
                 return Ok(true);
             }
             let Target::Mob(i) = t else { continue };
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             if !m.alive() {
                 continue;
             }
@@ -1891,13 +1894,13 @@ impl Game<'_> {
                     // passenger attachment, and nothing is swallowed for 5 s.
                     let height = f64::from(m.height());
                     let id = m.id;
-                    if let Some(body) = self.mobs[i].extra.body.take() {
+                    if let Some(body) = self.simulation.mobs[i].extra.body.take() {
                         self.spawn_at_location(at, height, ItemStack::new(&body, 1));
                     }
                     // setItemSlot(BODY, EMPTY): an unequip.
                     let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(id)), None);
                     self.post_game_event("minecraft:unequip", [at.x, at.y, at.z], ctx);
-                    self.mobs[i].extra.ints[3] = sulfur_cube::PICKUP_TIMER;
+                    self.simulation.mobs[i].extra.ints[3] = sulfur_cube::PICKUP_TIMER;
                     self.audio
                         .play("minecraft:entity.sulfur_cube.eject", sound_at, 1.0, 1.0);
                 }
@@ -1919,7 +1922,7 @@ impl Game<'_> {
                             };
                             self.spawn_at_location(at, 1.0, one);
                             // Sheep.shear nudges each item with the sheep's own random.
-                            let r = &mut self.mobs[i].random;
+                            let r = &mut self.simulation.mobs[i].random;
                             let push = [
                                 f64::from((r.next_float() - r.next_float()) * 0.1),
                                 f64::from(r.next_float() * 0.05),
@@ -1934,7 +1937,7 @@ impl Game<'_> {
                             }
                         }
                     }
-                    self.mobs[i].extra.sheared = true;
+                    self.simulation.mobs[i].extra.sheared = true;
                 }
                 Species::Bogged if !m.extra.sheared => {
                     let height = f64::from(m.height());
@@ -1948,13 +1951,13 @@ impl Game<'_> {
                     for stack in drops {
                         self.spawn_at_location(at, height, stack);
                     }
-                    self.mobs[i].extra.sheared = true;
+                    self.simulation.mobs[i].extra.sheared = true;
                 }
                 Species::SnowGolem if !m.extra.sheared => {
                     let eye = m.eye_height();
                     self.audio
                         .play("minecraft:entity.snow_golem.shear", sound_at, 1.0, 1.0);
-                    self.mobs[i].extra.sheared = true;
+                    self.simulation.mobs[i].extra.sheared = true;
                     let drops = self.sequence_loot(
                         "minecraft:shearing/snow_golem",
                         "minecraft:shearing/snow_golem",
@@ -1968,10 +1971,10 @@ impl Game<'_> {
                 Species::CopperGolem if self.golem_shearable(i) => {
                     self.audio
                         .play("minecraft:entity.copper_golem.shear", sound_at, 1.0, 1.0);
-                    let antenna = self.mobs[i].saddle_item();
-                    let id = self.mobs[i].id;
+                    let antenna = self.simulation.mobs[i].saddle_item();
+                    let id = self.simulation.mobs[i].id;
                     // setItemSlot(EQUIPMENT_SLOT_ANTENNA, EMPTY): an unequip.
-                    self.mobs[i].set_saddle(None);
+                    self.simulation.mobs[i].set_saddle(None);
                     let ctx = self.who_context(Some(horizon_client::mobs::Who::Mob(id)), None);
                     self.post_game_event("minecraft:unequip", [at.x, at.y, at.z], ctx);
                     if let Some(antenna) = antenna {
@@ -2028,7 +2031,7 @@ impl Game<'_> {
         use horizon_client::mobs::{Who, leash::Holder};
         let (holder, centre, own) = match t {
             Target::Mob(i) => {
-                let m = &self.mobs[i];
+                let m = &self.simulation.mobs[i];
                 let b = m.bounds();
                 (Holder::Mob(m.id), b.center(), Some(i))
             }
@@ -2042,6 +2045,7 @@ impl Game<'_> {
         };
         let area = Aabb::new(centre, centre).inflate(Vec3::new(16.0, 16.0, 16.0));
         let mut leashed: Vec<(u32, usize)> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
@@ -2051,14 +2055,14 @@ impl Game<'_> {
             .map(|(j, m)| (m.id, j))
             .collect();
         leashed.sort_unstable();
-        let own_leashed = own.is_some_and(|i| self.mobs[i].extra.leash.is_some());
+        let own_leashed = own.is_some_and(|i| self.simulation.mobs[i].extra.leash.is_some());
         if leashed.is_empty() && !own_leashed {
             return false;
         }
         // Leashable.dropLeash: a lead item at the leashed entity's feet.
         let drop = |game: &mut Self, j: usize| {
-            if horizon_client::mobs::leash::remove(&mut game.mobs[j]).is_some() {
-                let at = game.mobs[j].position;
+            if horizon_client::mobs::leash::remove(&mut game.simulation.mobs[j]).is_some() {
+                let at = game.simulation.mobs[j].position;
                 game.spawn_at_location(at, 0.0, ItemStack::new("minecraft:lead", 1));
             }
         };
@@ -2070,7 +2074,7 @@ impl Game<'_> {
         }
         let (at, who) = match t {
             Target::Mob(i) => {
-                let m = &self.mobs[i];
+                let m = &self.simulation.mobs[i];
                 (m.position, Who::Mob(m.id))
             }
             _ => (
@@ -2092,15 +2096,17 @@ impl Game<'_> {
             .targets_at(target)
             .into_iter()
             .filter_map(|t| match t {
-                Target::Mob(i) if self.mobs[i].species() == Species::Armadillo => Some(i),
+                Target::Mob(i) if self.simulation.mobs[i].species() == Species::Armadillo => {
+                    Some(i)
+                }
                 _ => None,
             })
             .collect();
         for i in armadillos {
-            if self.mobs[i].is_baby() {
+            if self.simulation.mobs[i].is_baby() {
                 continue;
             }
-            let at = self.mobs[i].position;
+            let at = self.simulation.mobs[i].position;
             let drops = self.sequence_loot(
                 "minecraft:brush/armadillo",
                 "minecraft:brush/armadillo",
@@ -2115,7 +2121,7 @@ impl Game<'_> {
                 1.0,
                 1.0,
             );
-            let who = horizon_client::mobs::Who::Mob(self.mobs[i].id);
+            let who = horizon_client::mobs::Who::Mob(self.simulation.mobs[i].id);
             let ctx = self.who_context(Some(who), None);
             self.post_game_event("minecraft:entity_interact", [at.x, at.y, at.z], ctx);
             return (self.hurt_and_break(stack, 16), optional_event("brush"));
@@ -2130,21 +2136,23 @@ impl Game<'_> {
             .targets_at(target)
             .into_iter()
             .filter_map(|t| match t {
-                Target::Mob(i) if self.mobs[i].species() == Species::SulfurCube => Some(i),
+                Target::Mob(i) if self.simulation.mobs[i].species() == Species::SulfurCube => {
+                    Some(i)
+                }
                 _ => None,
             })
             .collect();
         for i in cubes {
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             if m.is_baby() || m.extra.body.as_deref() == Some(&*stack.item) {
                 continue;
             }
             let (at, height) = (m.position, f64::from(m.height()));
             // The swallowed block comes out on top (the passenger attachment).
-            if let Some(old) = self.mobs[i].extra.body.take() {
+            if let Some(old) = self.simulation.mobs[i].extra.body.take() {
                 self.spawn_at_location(at, height, ItemStack::new(&old, 1));
             }
-            let m = &mut self.mobs[i];
+            let m = &mut self.simulation.mobs[i];
             m.extra.body = Some(stack.item.clone());
             m.persistent = true;
             let (at, id) = (m.position, m.id);

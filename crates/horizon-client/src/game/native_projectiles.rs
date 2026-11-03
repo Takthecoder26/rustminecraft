@@ -133,7 +133,7 @@ impl Game<'_> {
                 (crystal.map_or(0, |c| c.id), "minecraft:end_crystal".into())
             };
         }
-        if let Some(mob) = self.mobs.iter().find(|m| m.id == id) {
+        if let Some(mob) = self.simulation.mobs.iter().find(|m| m.id == id) {
             return (id, mob_kind(mob));
         }
         if let Some(cart) = self.carts.iter().find(|c| c.id == id) {

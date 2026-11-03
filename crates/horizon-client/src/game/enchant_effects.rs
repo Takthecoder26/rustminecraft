@@ -183,7 +183,9 @@ impl Game<'_> {
         let Some(held) = self.held().cloned() else {
             return;
         };
-        let Some(m) = self.mobs.get(mob) else { return };
+        let Some(m) = self.simulation.mobs.get(mob) else {
+            return;
+        };
         let kind = m.kind.id.clone();
         let victim = m.id;
         let ctx = EffectContext {
@@ -246,7 +248,7 @@ impl Game<'_> {
             }
         }
         if ignite > 0.0
-            && let Some(m) = self.mobs.get_mut(mob)
+            && let Some(m) = self.simulation.mobs.get_mut(mob)
             && !m.kind.flags.fire_immune
         {
             m.ignite_for_ticks((ignite * 20.0) as i32);
@@ -363,7 +365,7 @@ impl Game<'_> {
     /// random duration and amplifier between the level-based bounds.
     fn apply_mob_effect(&mut self, mob: usize, effect: &serde_json::Value, level: u32) {
         use horizon_client::enchant::level_value;
-        let Some(m) = self.mobs.get_mut(mob) else {
+        let Some(m) = self.simulation.mobs.get_mut(mob) else {
             return;
         };
         let ids: Vec<&str> = match &effect["to_apply"] {
@@ -457,11 +459,16 @@ impl Game<'_> {
     /// `affected: attacker` effect of `Enchantment.doPostAttack` hurts the
     /// entity that caused the hit.
     pub(super) fn thorns(&mut self, attacker: u32) {
-        let Some(index) = self.mobs.iter().position(|m| m.id == attacker && m.alive()) else {
+        let Some(index) = self
+            .simulation
+            .mobs
+            .iter()
+            .position(|m| m.id == attacker && m.alive())
+        else {
             return;
         };
         for damage in self.thorns_damage() {
-            let m = &mut self.mobs[index];
+            let m = &mut self.simulation.mobs[index];
             m.hurt(damage, None, &mut self.world.random);
             let center = [m.position.x, m.position.y, m.position.z];
             self.audio

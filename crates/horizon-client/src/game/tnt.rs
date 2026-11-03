@@ -452,7 +452,12 @@ impl Game<'_> {
             if id == 0 {
                 continue;
             }
-            for m in self.mobs.iter_mut().filter(|m| m.extra.mount == Some(id)) {
+            for m in self
+                .simulation
+                .mobs
+                .iter_mut()
+                .filter(|m| m.extra.mount == Some(id))
+            {
                 // Primed TNT's box is 0.98 wide.
                 let offset = horizon_client::mobs::riders::vehicle_attachment(m, 0.98);
                 m.position = tnt_seat(pos, offset);

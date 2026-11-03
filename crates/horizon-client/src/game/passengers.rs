@@ -54,14 +54,14 @@ impl Game<'_> {
         if !self.native_mob_may_ride(rider, vehicle, true) {
             return false;
         }
-        riders::link(&mut self.mobs, rider, vehicle);
+        riders::link(&mut self.simulation.mobs, rider, vehicle);
         true
     }
     /// Riders sit on their vehicles (`Entity.positionRider`), mobs or boats,
     /// and let go when the vehicle dies or is gone.
     pub(super) fn sync_riders(&mut self) {
         // Entity.baseTick.
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             if m.extra.boarding_cooldown > 0 {
                 m.extra.boarding_cooldown -= 1;
             }
@@ -75,35 +75,36 @@ impl Game<'_> {
             .filter(|&id| id != 0)
             .collect();
         let index: HashMap<u32, usize> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
             .map(|(i, m)| (m.id, i))
             .collect();
         let mut riding: HashMap<u32, u32> = HashMap::new();
-        for i in 0..self.mobs.len() {
-            let Some(v) = self.mobs[i].extra.mount else {
+        for i in 0..self.simulation.mobs.len() {
+            let Some(v) = self.simulation.mobs[i].extra.mount else {
                 continue;
             };
             // Not a text display: a server's display mounts come through
             // `remote_set_passengers`, which seats them in `position_riders`.
-            let valid = self.mobs[i].alive()
-                && !self.mobs[i].removed
+            let valid = self.simulation.mobs[i].alive()
+                && !self.simulation.mobs[i].removed
                 && (boats.contains(&v)
                     || carts.contains(&v)
                     || tnts.contains(&v)
-                    || index
-                        .get(&v)
-                        .is_some_and(|&j| self.mobs[j].alive() && !self.mobs[j].removed));
+                    || index.get(&v).is_some_and(|&j| {
+                        self.simulation.mobs[j].alive() && !self.simulation.mobs[j].removed
+                    }));
             if valid {
-                riding.insert(v, self.mobs[i].id);
+                riding.insert(v, self.simulation.mobs[i].id);
             } else {
-                let m = &mut self.mobs[i];
+                let m = &mut self.simulation.mobs[i];
                 m.extra.mount = None;
                 m.extra.passenger = false;
             }
         }
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             m.extra.rider = riding.get(&m.id).copied();
         }
         self.position_riders();
@@ -116,6 +117,7 @@ impl Game<'_> {
         self.seat_cart_mobs();
         self.seat_tnt_mobs();
         let index: HashMap<u32, usize> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
@@ -123,8 +125,8 @@ impl Game<'_> {
             .collect();
         // Riders of riders settle over a few passes.
         for pass in 0..3 {
-            for i in 0..self.mobs.len() {
-                let Some(v) = self.mobs[i].extra.mount else {
+            for i in 0..self.simulation.mobs.len() {
+                let Some(v) = self.simulation.mobs[i].extra.mount else {
                     continue;
                 };
                 let Some(&j) = index.get(&v) else {
@@ -139,7 +141,7 @@ impl Game<'_> {
                     else {
                         continue;
                     };
-                    let m = &mut self.mobs[i];
+                    let m = &mut self.simulation.mobs[i];
                     // EntityType.TEXT_DISPLAY's box is zero wide.
                     let offset = riders::vehicle_attachment(m, 0.0);
                     m.position = Vec3::new(at.x, at.y - offset, at.z);
@@ -151,16 +153,17 @@ impl Game<'_> {
                     m.ai.nav.stop();
                     continue;
                 };
-                let vehicle = &self.mobs[j];
+                let vehicle = &self.simulation.mobs[j];
                 let mut attach = riders::passenger_attachment(vehicle);
                 if horizon_client::mobs::camel::is_camel(vehicle.species()) {
                     // Camel.getPassengerAttachmentPoint: the seat follows the
                     // rider's place in `getPassengers` (load order).
-                    let aboard: Vec<usize> = (0..self.mobs.len())
-                        .filter(|&k| self.mobs[k].extra.mount == Some(v))
+                    let aboard: Vec<usize> = (0..self.simulation.mobs.len())
+                        .filter(|&k| self.simulation.mobs[k].extra.mount == Some(v))
                         .collect();
                     let seat = aboard.iter().position(|&k| k == i).unwrap_or(0);
-                    let animal = horizon_client::mobs::drops::is_animal(self.mobs[i].species());
+                    let animal =
+                        horizon_client::mobs::drops::is_animal(self.simulation.mobs[i].species());
                     attach = horizon_client::mobs::camel::passenger_attachment_at(
                         vehicle,
                         seat,
@@ -172,7 +175,7 @@ impl Game<'_> {
                 let (yaw, prev_yaw) = (vehicle.yaw, vehicle.previous_yaw);
                 let (body, prev_body) = (vehicle.body_yaw, vehicle.previous_body_yaw);
                 let vehicle_width = vehicle.width();
-                let m = &mut self.mobs[i];
+                let m = &mut self.simulation.mobs[i];
                 let offset = riders::vehicle_attachment(m, vehicle_width);
                 m.position = riders::seat(attach, offset, pos, yaw);
                 m.previous = riders::seat(attach, offset, prev, prev_yaw);
@@ -241,7 +244,7 @@ impl Game<'_> {
             let Some(&j) = index.get(&vehicle).filter(|_| Some(vehicle) != me) else {
                 continue;
             };
-            let vehicle = &self.mobs[j];
+            let vehicle = &self.simulation.mobs[j];
             let attach = riders::passenger_attachment(vehicle);
             let at = riders::seat(attach, 0.0, vehicle.position, vehicle.yaw);
             let before = riders::seat(attach, 0.0, vehicle.previous, vehicle.previous_yaw);
@@ -293,7 +296,7 @@ impl Game<'_> {
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
         if let Some(&j) = index.get(&vehicle) {
-            let v = &self.mobs[j];
+            let v = &self.simulation.mobs[j];
             let at = riders::seat(riders::passenger_attachment(v), 0.0, v.position, v.yaw);
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
@@ -350,7 +353,7 @@ impl Game<'_> {
     /// chickens, skeletons on spiders, piglins and baby striders on striders,
     /// zombies on zombie horses.
     pub(super) fn spawn_jockeys(&mut self, id: u32, natural: bool) {
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let (species, baby) = (m.species(), m.is_baby());
@@ -388,7 +391,7 @@ impl Game<'_> {
                         )) =>
             {
                 if let Some(zombie) = self.spawn_mob("minecraft:zombie", at, false) {
-                    if let Some(z) = self.mobs.iter_mut().find(|m| m.id == zombie) {
+                    if let Some(z) = self.simulation.mobs.iter_mut().find(|m| m.id == zombie) {
                         z.extra.set_main_hand(Some("minecraft:iron_spear".into()));
                     }
                     self.mount_mob(zombie, id);
@@ -418,7 +421,7 @@ impl Game<'_> {
         if !room || self.world.random.next_float() >= 0.1 {
             return;
         }
-        if let Some(h) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(h) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             h.extra.set_main_hand(Some("minecraft:iron_spear".into()));
         }
         let Some(camel) = self.spawn_mob("minecraft:camel_husk", at, false) else {
@@ -431,7 +434,7 @@ impl Game<'_> {
     /// outside the rivers and oceans that breed more drowned, ride a zombie
     /// nautilus.
     fn spawn_zombie_nautilus_jockey(&mut self, id: u32, at: [f64; 3]) {
-        let Some(d) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(d) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         if d.extra.main_hand.as_deref() != Some("minecraft:trident")
@@ -458,7 +461,8 @@ impl Game<'_> {
         }
     }
     fn free_chicken_near(&self, at: [f64; 3]) -> Option<u32> {
-        self.mobs
+        self.simulation
+            .mobs
             .iter()
             .find(|c| {
                 c.species() == Species::Chicken
@@ -472,7 +476,7 @@ impl Game<'_> {
             .map(|c| c.id)
     }
     fn make_chicken_jockey(&mut self, chicken: u32) {
-        if let Some(c) = self.mobs.iter_mut().find(|m| m.id == chicken) {
+        if let Some(c) = self.simulation.mobs.iter_mut().find(|m| m.id == chicken) {
             c.extra.jockey = true;
         }
     }
@@ -486,12 +490,12 @@ impl Game<'_> {
             }
             if let Some(piglin) = self.spawn_mob("minecraft:zombified_piglin", at, false) {
                 let baby = self.world.random.next_float() < CHICKEN_JOCKEY_ODDS;
-                if let Some(p) = self.mobs.iter_mut().find(|m| m.id == piglin) {
+                if let Some(p) = self.simulation.mobs.iter_mut().find(|m| m.id == piglin) {
                     p.extra
                         .set_main_hand(Some("minecraft:warped_fungus_on_a_stick".into()));
                     p.extra.age = if baby { i32::MIN / 2 } else { 0 };
                 }
-                if let Some(s) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(s) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     s.extra.saddled = true;
                 }
                 self.mount_mob(piglin, id);
@@ -499,7 +503,7 @@ impl Game<'_> {
         } else if self.world.random.next_int_bound(10).unwrap_or(1) == 0
             && let Some(baby) = self.spawn_mob("minecraft:strider", at, false)
         {
-            if let Some(b) = self.mobs.iter_mut().find(|m| m.id == baby) {
+            if let Some(b) = self.simulation.mobs.iter_mut().find(|m| m.id == baby) {
                 b.extra.age = -24000;
             }
             self.mount_mob(baby, id);
@@ -518,7 +522,7 @@ impl Game<'_> {
             .map(|p| p.position)
             .collect();
         let mut sprung = Vec::new();
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             if m.species() != Species::SkeletonHorse || !m.extra.trap || !m.alive() {
                 continue;
             }
@@ -541,7 +545,7 @@ impl Game<'_> {
         }
     }
     fn spring_skeleton_trap(&mut self, id: u32) {
-        let Some(horse) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(horse) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         horse.extra.trap = false;
@@ -561,7 +565,7 @@ impl Game<'_> {
                 self.world.random.triangle(0.0, 1.1485),
                 self.world.random.triangle(0.0, 1.1485),
             );
-            if let Some(h) = self.mobs.iter_mut().find(|m| m.id == other) {
+            if let Some(h) = self.simulation.mobs.iter_mut().find(|m| m.id == other) {
                 h.invulnerable = TRAP_INVULNERABLE;
                 h.extra.tame = true;
                 h.extra.age = 0;
@@ -576,7 +580,7 @@ impl Game<'_> {
     /// has a helm.
     fn trap_skeleton(&mut self, at: [f64; 3]) -> Option<u32> {
         let id = self.spawn_mob("minecraft:skeleton", at, true)?;
-        let m = self.mobs.iter_mut().find(|m| m.id == id)?;
+        let m = self.simulation.mobs.iter_mut().find(|m| m.id == id)?;
         m.invulnerable = TRAP_INVULNERABLE;
         if m.extra.head.is_none() {
             m.extra.head = Some("minecraft:iron_helmet".into());

@@ -1377,7 +1377,7 @@ impl Game<'_> {
             "using": self.using,
             "render_distance": self.streaming.radius,
             "chunks": self.world.chunks.len(),
-            "mobs": self.mobs.len(),
+            "mobs": self.simulation.mobs.len(),
             "block_entities": self.world.block_entities.len(),
             "pending_chunks": self.streaming.pending() + self.pending_uploads.len() + self.remote_backlog(),
             "generated_chunks": self.streaming.generated_total,

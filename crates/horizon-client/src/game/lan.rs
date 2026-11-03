@@ -1739,7 +1739,12 @@ impl Game<'_> {
         after: u32,
     ) {
         out.clear();
-        for m in self.mobs.iter().filter(|m| !m.removed && m.id > after) {
+        for m in self
+            .simulation
+            .mobs
+            .iter()
+            .filter(|m| !m.removed && m.id > after)
+        {
             // The lead's holder: the player the mob sees, another mob or a
             // fence knot (game/lan_entities.rs).
             let player_entity = mob_players
@@ -2249,7 +2254,7 @@ impl Game<'_> {
         }
         // An animal whose rider left the game (or the level) stops taking
         // its input.
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             if m.rider.is_some()
                 && self.riding != Some(m.id)
                 && !host.hub.guests.iter().any(|g| g.vehicle == Some(m.id))
@@ -2294,7 +2299,7 @@ impl Game<'_> {
                 }
             }
             // ServerEntity.sendChanges clears needsSync once it has looked.
-            for m in &mut self.mobs {
+            for m in &mut self.simulation.mobs {
                 m.needs_sync = false;
             }
             for p in &mut self.creatures.projectiles {
@@ -2799,7 +2804,7 @@ impl Game<'_> {
         }
         // Hurt and death animations of mobs.
         let mut seen = HashMap::new();
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             let dead = !m.alive();
             let old = host
                 .mob_state

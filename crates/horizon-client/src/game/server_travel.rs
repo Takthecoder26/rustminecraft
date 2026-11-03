@@ -444,7 +444,7 @@ impl Game<'_> {
         // where they ride it again (`Entity.teleportCrossDimension`). It
         // keeps its entity id, so the ride is never broken.
         let vehicle = g.vehicle.filter(|id| {
-            self.mobs.iter().any(|m| m.id == *id)
+            self.simulation.mobs.iter().any(|m| m.id == *id)
                 || self.boats.iter().any(|b| b.id == *id)
                 || self.carts.iter().any(|c| c.id == *id)
         });
@@ -799,8 +799,8 @@ impl Game<'_> {
             self.boats.push(b);
         } else if let Some(c) = take_vehicle(&mut parked.carts, id, at, yaw, motion) {
             self.carts.push(c);
-        } else if let Some(m) = take_vehicle(&mut parked.mobs, id, at, yaw, motion) {
-            self.mobs.push(m);
+        } else if let Some(m) = take_vehicle(&mut parked.simulation.mobs, id, at, yaw, motion) {
+            self.simulation.mobs.push(m);
         } else {
             return;
         }

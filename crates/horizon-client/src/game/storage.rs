@@ -109,7 +109,7 @@ impl Game<'_> {
                 f64::from(key.2 + 1),
             ),
         );
-        self.mobs.iter().any(|m| {
+        self.simulation.mobs.iter().any(|m| {
             m.species() == horizon_client::mobs::Species::Cat
                 && m.alive()
                 && horizon_client::mobs::tame::cat_sitting(m)

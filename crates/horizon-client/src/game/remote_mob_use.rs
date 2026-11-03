@@ -13,7 +13,7 @@ impl Game<'_> {
     /// Whether mob `i` takes a right click with `hand`'s item on this
     /// client (`Mob.interact`'s result consumes the action).
     pub(super) fn remote_mob_takes(&self, i: usize, hand: Hand) -> bool {
-        let Some(m) = self.mobs.get(i).filter(|m| m.alive()) else {
+        let Some(m) = self.simulation.mobs.get(i).filter(|m| m.alive()) else {
             return false;
         };
         let stack = match hand {
@@ -106,7 +106,12 @@ impl Game<'_> {
     /// villager particle. The server draws it on its own level only, so no
     /// packet brings it.
     pub(super) fn remote_feed_particles(&mut self, i: usize, hand: Hand) {
-        let Some(m) = self.mobs.get(i).filter(|m| m.alive() && m.is_baby()) else {
+        let Some(m) = self
+            .simulation
+            .mobs
+            .get(i)
+            .filter(|m| m.alive() && m.is_baby())
+        else {
             return;
         };
         let stack = match hand {

@@ -117,12 +117,12 @@ impl Game<'_> {
         }
         let mut remaining = 20;
         let mut amounts: Vec<(std::sync::Arc<str>, i32)> = Vec::new();
-        let slots = villager::ext(&self.mobs[mob]).map_or(0, |e| e.inventory.len());
+        let slots = villager::ext(&self.simulation.mobs[mob]).map_or(0, |e| e.inventory.len());
         'slots: for slot in (0..slots).rev() {
             if remaining <= 0 {
                 break;
             }
-            let stack = villager::ext_mut(&mut self.mobs[mob]).inventory[slot].clone();
+            let stack = villager::ext_mut(&mut self.simulation.mobs[mob]).inventory[slot].clone();
             if !matches!(
                 &*stack.item,
                 "minecraft:wheat_seeds" | "minecraft:beetroot_seeds"
@@ -171,7 +171,7 @@ impl Game<'_> {
         self.with_level(|b, level, ticks| b.composter_layer(level, ticks, at, layers));
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
         let _ = self.process_level_events();
-        let inventory = &mut villager::ext_mut(&mut self.mobs[mob]).inventory;
+        let inventory = &mut villager::ext_mut(&mut self.simulation.mobs[mob]).inventory;
         inventory[slot].count -= 1;
         if inventory[slot].count == 0 {
             inventory.remove(slot);

@@ -139,7 +139,7 @@ impl Game<'_> {
         for &(vehicle, guest) in guests {
             riding.add(vehicle as i32, guest);
         }
-        for m in self.mobs.iter().filter(|m| !m.removed) {
+        for m in self.simulation.mobs.iter().filter(|m| !m.removed) {
             if let Some(vehicle) = m.extra.mount {
                 riding.add(vehicle as i32, m.id as i32);
             }
@@ -496,6 +496,7 @@ impl Game<'_> {
         // LeashFenceKnotEntity: one per fence post with a lead on it
         // (`notifyLeasheeRemoved` discards it once the last lead is gone).
         let knots: Vec<[i32; 3]> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| !m.removed)

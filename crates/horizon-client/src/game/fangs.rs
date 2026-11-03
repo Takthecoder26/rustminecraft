@@ -120,6 +120,7 @@ impl Game<'_> {
         // `EvokerFangs.dealDamageTo`: indirectMagic(fangs, owner) while the
         // owner lives, plain magic (nobody to name) once it is gone.
         let owner = self
+            .simulation
             .mobs
             .iter()
             .any(|m| m.id == f.owner && m.alive())
@@ -148,6 +149,7 @@ impl Game<'_> {
             )
         };
         let illagers: Vec<u32> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| illager(m.species()))
@@ -155,7 +157,7 @@ impl Game<'_> {
             .collect();
         // A missing owner hurts everyone (`currentOwner == null`).
         let owner_known = illagers.contains(&f.owner);
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             let ally = owner_known
                 && (illager(m.species())
                     || m.species() == Species::Vex

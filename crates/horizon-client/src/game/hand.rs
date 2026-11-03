@@ -268,7 +268,7 @@ impl Game<'_> {
         let look = v3(super::view_vector(self.yaw, self.pitch));
         let reach = attack_reach(range, self.creative);
         let camera = self.remote_camera_id();
-        let boxes: Vec<(usize, Aabb)> = (self.mobs.iter().enumerate())
+        let boxes: Vec<(usize, Aabb)> = (self.simulation.mobs.iter().enumerate())
             .filter(|(_, m)| !m.removed && Some(m.id) != self.riding && Some(m.id) != camera)
             .map(|(i, m)| (i, m.bounds()))
             .collect();

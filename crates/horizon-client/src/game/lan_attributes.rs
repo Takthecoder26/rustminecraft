@@ -70,6 +70,7 @@ impl Game<'_> {
     /// mobs that wear or hold something, since the mob does not know items.
     pub(super) fn refresh_gear_knockback_resistance(&mut self) {
         let values: Vec<Option<f64>> = self
+            .simulation
             .mobs
             .iter()
             .map(|m| {
@@ -87,7 +88,7 @@ impl Game<'_> {
                 .then(|| self.mob_knockback_resistance(m))
             })
             .collect();
-        for (m, value) in self.mobs.iter_mut().zip(values) {
+        for (m, value) in self.simulation.mobs.iter_mut().zip(values) {
             m.gear_knockback_resistance = value;
         }
     }

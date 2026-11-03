@@ -341,7 +341,7 @@ impl Game<'_> {
         // attributes (the happy ghast's is 8, the default 4).
         let mount = self
             .riding
-            .and_then(|id| self.mobs.iter().find(|m| m.id == id))
+            .and_then(|id| self.simulation.mobs.iter().find(|m| m.id == id))
             .map(|m| {
                 let attribute = |name: &str, default: f64| {
                     m.kind.attributes.get(name).copied().unwrap_or(default)

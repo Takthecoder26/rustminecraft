@@ -301,6 +301,7 @@ mod shelf;
 mod shield;
 mod shoulders;
 mod sign_edit;
+mod simulation;
 mod skin_models;
 mod sniffers;
 mod social;
@@ -2601,9 +2602,7 @@ struct Game<'a> {
     /// Chunks a respawn search waits for this tick, kept loading beside the
     /// player's own (taken by `update_world`).
     spawn_wait: Vec<(i32, i32)>,
-    mobs: horizon_client::join_seq::JoinList<Mob>,
-    /// `mobs` by network id, for the packets that name one (`game/mob_index.rs`).
-    mob_index: mob_index::MobIndex,
+    simulation: simulation::LevelSimulation,
     creatures: creatures::Creatures,
     sculk: sculk::SculkState,
     raiding: raids::Raiding,
@@ -2623,9 +2622,6 @@ struct Game<'a> {
     /// Animals a player fed into love (`Animal.loveCause`), with the guest it was by
     /// connection (None: the host). Breeding credits them, wherever they are.
     love_cause: HashMap<u32, Option<u32>>,
-    /// Mobs whose death (`LivingEntity.die`) has been handled.
-    /// Looked up per mob each tick: a fast hasher (never iterated).
-    died: horizon_client::fast_hash::FxHashSet<u32>,
     /// Client-ticked block-entity animation state (`game/block_entity_anims.rs`).
     be_anims: horizon_client::block_entity_anim::BlockEntityAnims,
     /// Item being used (eaten): hotbar slot and ticks used.
@@ -2880,8 +2876,6 @@ struct Game<'a> {
     creaking: creaking::CreakingState,
     /// Monster spawners' display mobs (`game/spawner.rs`).
     spawners: spawner::SpawnerState,
-    /// Reused candidate buffers for natural spawning.
-    spawn_scratch: natural_spawning::SpawnScratch,
     trident_model: Option<horizon_client::mobs::Part>,
     arrow_model: Option<horizon_client::mobs::Part>,
     bee_stinger_model: Option<horizon_client::mobs::Part>,
@@ -10811,7 +10805,7 @@ impl Game<'_> {
             self.yaw
         };
         laps.lap("eg_prep");
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             // Blaze.isOnFire: a charged blaze burns.
             let blazing = m.species() == horizon_client::mobs::Species::Blaze && m.extra.flag;
             if (m.is_on_fire() || blazing) && !m.removed {
@@ -10971,7 +10965,7 @@ impl Game<'_> {
                 )
             };
             let mut casters: Vec<(glam::DVec3, f32, f32)> =
-                horizon_client::shadows::mob_casters(&self.mobs, a).collect();
+                horizon_client::shadows::mob_casters(&self.simulation.mobs, a).collect();
             let item = horizon_client::shadows::shadow_params("minecraft:item");
             casters.extend(
                 self.dropped
@@ -11465,7 +11459,7 @@ impl Game<'_> {
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
         let mut best: Option<(usize, f64)> = None;
-        for (i, m) in self.mobs.iter().enumerate() {
+        for (i, m) in self.simulation.mobs.iter().enumerate() {
             // ProjectileUtil.getEntityHitResult: the mob the player rides
             // shares its root vehicle and is never the hit, nor is the
             // camera entity the pick starts from. EntitySelector.CAN_BE_PICKED
@@ -11706,7 +11700,7 @@ impl Game<'_> {
     /// sounds.
     pub(super) fn attack_mob(&mut self, index: usize) {
         let _attacker = self.knockback_scope(self.player.as_ref().map_or(0, |p| p.entity_id));
-        let target_kind = self.mobs[index].kind.id.clone();
+        let target_kind = self.simulation.mobs[index].kind.id.clone();
         let target_kind = format!("minecraft:{}", target_kind.trim_start_matches("minecraft:"));
         let (amount, scale, crit, magic) = self.melee_damage(&target_kind, true);
         let sweep = self.sweep_attack_position(scale, crit);
@@ -11719,18 +11713,18 @@ impl Game<'_> {
                 .play("minecraft:entity.player.attack.knockback", from, 1.0, 1.0);
         }
         // LivingEntity.setLastHurtMob (tamed wolves join in).
-        self.combat.last_hurt_mob = Some((self.mobs[index].id, self.world.game_time));
-        let old_health = self.mobs[index].health;
+        self.combat.last_hurt_mob = Some((self.simulation.mobs[index].id, self.world.game_time));
+        let old_health = self.simulation.mobs[index].health;
         let source = match from {
             Some(f) => self.attack_source(f),
             None => horizon_client::mobs::Damage::of(horizon_client::mobs::DamageKind::Generic),
         };
         let landed = self.hurt_by_player(index, amount, source);
-        if landed && old_health > 0.0 && !self.mobs[index].alive() {
+        if landed && old_health > 0.0 && !self.simulation.mobs[index].alive() {
             self.native_kill_event(index);
         }
         if landed {
-            let victim = self.mob_entity(&self.mobs[index]);
+            let victim = self.mob_entity(&self.simulation.mobs[index]);
             self.player_hit(
                 &victim,
                 creatures::damage_type(source.kind, true),
@@ -11745,22 +11739,28 @@ impl Game<'_> {
             p.attack_log.push(horizon_client::health::AttackRecord {
                 game_time: p.health.game_time(),
                 target: target_kind.clone(),
-                id: self.mobs[index].id,
-                killed: landed && !self.mobs[index].alive(),
+                id: self.simulation.mobs[index].id,
+                killed: landed && !self.simulation.mobs[index].alive(),
                 amount,
                 scale,
                 crit,
                 landed,
-                dealt: old_health - self.mobs[index].health,
+                dealt: old_health - self.simulation.mobs[index].health,
             });
         }
         if landed {
             if knockback > 0.0 {
                 let (xd, zd) = self.extra_knockback_direction();
-                self.mobs[index].knockback_effect(f64::from(knockback), xd, zd, &source, amount);
+                self.simulation.mobs[index].knockback_effect(
+                    f64::from(knockback),
+                    xd,
+                    zd,
+                    &source,
+                    amount,
+                );
                 self.stop_sprint_after_extra_knockback();
             }
-            let mob = &self.mobs[index];
+            let mob = &self.simulation.mobs[index];
             // Player.damageStatsAndHearts: the damage the hit actually did.
             let actual = old_health - mob.health;
             // Player.attack: crit emitter and damage indicator hearts.
@@ -11773,7 +11773,7 @@ impl Game<'_> {
             if crit {
                 self.critical_hit(
                     self.lan_acting,
-                    self.mobs[index].id as i32,
+                    self.simulation.mobs[index].id as i32,
                     feet,
                     width,
                     height,
@@ -11784,7 +11784,7 @@ impl Game<'_> {
             if magic {
                 self.critical_hit(
                     self.lan_acting,
-                    self.mobs[index].id as i32,
+                    self.simulation.mobs[index].id as i32,
                     feet,
                     width,
                     height,
@@ -11815,7 +11815,7 @@ impl Game<'_> {
                 });
             }
             self.last_hurt_by_player
-                .insert(self.mobs[index].id, self.lan_acting);
+                .insert(self.simulation.mobs[index].id, self.lan_acting);
             let sound = if crit {
                 "minecraft:entity.player.attack.crit"
             } else if scale > 0.9 {
@@ -11826,8 +11826,8 @@ impl Game<'_> {
             // Player.playServerSideSound: at the player.
             if let Some(at) = sweep {
                 let target = (
-                    self.mobs[index].bounds(),
-                    mace::Spared::Mob(self.mobs[index].id),
+                    self.simulation.mobs[index].bounds(),
+                    mace::Spared::Mob(self.simulation.mobs[index].id),
                 );
                 self.sweep_attack(at, from, Some(target), scale);
             } else {
@@ -11835,7 +11835,7 @@ impl Game<'_> {
             }
             // The hurt or death sound the mob raised (getHurtSound / getDeathSound,
             // its voice pitch from its own random).
-            let queued = std::mem::take(&mut self.mobs[index].outbox);
+            let queued = std::mem::take(&mut self.simulation.mobs[index].outbox);
             let mut infested = false;
             for event in queued {
                 match event {
@@ -11846,12 +11846,12 @@ impl Game<'_> {
                     horizon_client::mobs::MobEvent::Infested { .. } => infested = true,
                     other => {
                         // Left for the end of the tick.
-                        self.mobs[index].outbox.push(other);
+                        self.simulation.mobs[index].outbox.push(other);
                     }
                 }
             }
             if infested {
-                let id = self.mobs[index].id;
+                let id = self.simulation.mobs[index].id;
                 self.mob_infested(id);
             }
             self.weapon_hit(index);
@@ -12563,7 +12563,7 @@ impl Game<'_> {
     /// Let go of every entity of the level (saved first): the next world
     /// opened must not inherit them, nor save them as its own.
     fn clear_entities(&mut self) {
-        self.mobs.clear();
+        self.simulation.mobs.clear();
         self.dropped.clear();
         self.orbs.clear();
         self.creatures.projectiles.clear();
@@ -13307,7 +13307,7 @@ impl Game<'_> {
             }
             if let Some(kind) = mob {
                 if let Some(id) = self.spawn_mob_at(kind, (target[0], target[1], target[2]), true) {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         horizon_client::entity_nbt::apply_item_components(m, stack);
                     }
                     self.mob_placed(id)?;
@@ -14493,7 +14493,7 @@ impl Game<'_> {
         // Creative players skip the monster check (`!this.isCreative()`).
         if problem.is_none()
             && !self.creative
-            && self.mobs.iter().any(|m| {
+            && self.simulation.mobs.iter().any(|m| {
                 // `Monster.class` entities that `isPreventingPlayerRest`: a
                 // zombified piglin only while it is angry.
                 horizon_client::mobs::ai::is_monster(m.species())
@@ -18856,8 +18856,7 @@ impl<'a> Game<'a> {
             spawn_spiral: Default::default(),
             player_spawn: None,
             spawn_wait: Vec::new(),
-            mobs: Default::default(),
-            mob_index: Default::default(),
+            simulation: Default::default(),
             creatures: Default::default(),
             sculk: Default::default(),
             raiding: Default::default(),
@@ -18866,7 +18865,6 @@ impl<'a> Game<'a> {
             last_hurt_by_player: HashMap::new(),
             lead_killers: HashMap::new(),
             love_cause: HashMap::new(),
-            died: Default::default(),
             be_anims: {
                 let mut anims = horizon_client::block_entity_anim::BlockEntityAnims::default();
                 anims.classify(registry);
@@ -19019,7 +19017,6 @@ impl<'a> Game<'a> {
             ominous_spawners: Vec::new(),
             creaking: Default::default(),
             spawners: Default::default(),
-            spawn_scratch: Default::default(),
             trident_model: prepared.trident_model,
             arrow_model: prepared.arrow_model,
             bee_stinger_model: prepared.bee_stinger_model,

@@ -19,7 +19,7 @@ impl Game<'_> {
         let by_wither = m.ai.last_hurt_by_player <= 0
             && m.age as i32 - m.ai.last_hurt_by_time <= 100
             && matches!(m.ai.last_hurt_by, Some(Who::Mob(id))
-                if self.mobs.iter().any(|o| o.id == id && o.alive() && o.species() == Species::Wither));
+                if self.simulation.mobs.iter().any(|o| o.id == id && o.alive() && o.species() == Species::Wither));
         if !by_wither {
             return;
         }
@@ -114,7 +114,7 @@ impl Game<'_> {
             90.0
         };
         let id = self.create_triggered("minecraft:wither", at, yaw);
-        if let Some(m) = id.and_then(|id| self.mobs.iter_mut().find(|m| m.id == id)) {
+        if let Some(m) = id.and_then(|id| self.simulation.mobs.iter_mut().find(|m| m.id == id)) {
             m.persistent = true;
             horizon_client::mobs::wither::make_invulnerable(m);
         }
@@ -134,7 +134,13 @@ impl Game<'_> {
     ) -> horizon_client::Result<()> {
         // Projectile.getOwner: none once the owner is gone.
         let live_owner = match p.owner {
-            Some(Who::Mob(id)) if self.mobs.iter().any(|m| m.id == id && !m.removed) => {
+            Some(Who::Mob(id))
+                if self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .any(|m| m.id == id && !m.removed) =>
+            {
                 Some(Who::Mob(id))
             }
             Some(Who::Mob(_)) => None,
@@ -198,9 +204,9 @@ impl Game<'_> {
                     from: skull.from,
                 };
                 let owner_species = owner
-                    .and_then(|o| self.mobs.iter().find(|m| m.id == o))
+                    .and_then(|o| self.simulation.mobs.iter().find(|m| m.id == o))
                     .map(|m| m.species());
-                let killed = match self.mobs.iter_mut().find(|m| m.id == id) {
+                let killed = match self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     // `WitherBoss.hurtServer`: nothing from a wither friend.
                     Some(m)
                         if owner_species.is_some_and(|o| {
@@ -248,7 +254,12 @@ impl Game<'_> {
     fn heal_skull_owner(&mut self, p: &Projectile, owner: Option<Who>) {
         match owner {
             Some(Who::Mob(id)) => {
-                if let Some(w) = self.mobs.iter_mut().find(|m| m.id == id && m.alive()) {
+                if let Some(w) = self
+                    .simulation
+                    .mobs
+                    .iter_mut()
+                    .find(|m| m.id == id && m.alive())
+                {
                     w.heal(5.0);
                 }
             }

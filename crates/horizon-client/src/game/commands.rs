@@ -492,6 +492,7 @@ impl Game<'_> {
                 .map(|p| [p.position.x, p.position.y, p.position.z]),
             Target::Guest(conn) => self.command_guest(conn).map(|g| g.position),
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -591,6 +592,7 @@ impl Game<'_> {
         match t {
             Target::Player | Target::Guest(_) => "minecraft:player".into(),
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -693,6 +695,7 @@ impl Game<'_> {
                 Text::translate("entity.minecraft.falling_block_type", &[block])
             }
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -961,7 +964,7 @@ impl Game<'_> {
         match t {
             // A player is in no level of its own.
             Target::Player | Target::Guest(_) => true,
-            Target::Mob(id) => self.mobs.iter().any(|m| m.id == id),
+            Target::Mob(id) => self.simulation.mobs.iter().any(|m| m.id == id),
             Target::Item(id) => self.dropped.iter().any(|i| i.id == id),
             Target::Orb(id) => self.orbs.iter().any(|o| o.id == id),
             Target::Projectile(id) => self.creatures.projectiles.iter().any(|p| p.id == id),
@@ -1556,7 +1559,7 @@ impl Game<'_> {
                 }
             }
             Target::Mob(id) => {
-                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     m.position = v;
                     m.previous = v;
                     // Entity.teleportSetPosition: setYRot, setYHeadRot, setXRot
@@ -2118,7 +2121,7 @@ impl Game<'_> {
                 self.ui.death_cause = Some("death.attack.genericKill".into());
             }
             Target::Mob(id) => {
-                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     // LivingEntity.kill: a generic_kill hit of Float.MAX_VALUE,
                     // which its death message tells.
                     if m.alive() {
@@ -3169,7 +3172,7 @@ impl Game<'_> {
         self.sync_rules();
         if i == 0 {
             // Peaceful removes hostile mobs.
-            self.mobs.retain(|m| !m.hostile());
+            self.simulation.mobs.retain(|m| !m.hostile());
         }
         // MinecraftServer.setDifficulty: every player, guests included, is
         // sent the new difficulty.

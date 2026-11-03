@@ -229,7 +229,15 @@ impl Game<'_> {
         };
         // A source entity that is gone reads as none (VibrationInfo.getEntity).
         let alive = |w: Option<Who>| match w {
-            Some(Who::Mob(id)) if !self.mobs.iter().any(|m| m.id == id && !m.removed) => None,
+            Some(Who::Mob(id))
+                if !self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .any(|m| m.id == id && !m.removed) =>
+            {
+                None
+            }
             other => other,
         };
         format!(
@@ -342,7 +350,7 @@ impl Game<'_> {
         self.block_ticks = Ticks::new(0);
         self.tick_chunks.clear();
         self.sync_tick_chunks();
-        self.mobs.clear();
+        self.simulation.mobs.clear();
         if s.trace_events {
             self.creatures.projectiles.clear();
         }
@@ -487,13 +495,13 @@ impl Game<'_> {
             }
             names.insert(id, format!("m{}", sources.len()));
             sources.push(id);
-            self.mobs.push(m);
+            self.simulation.mobs.push(m);
         }
         self.next_entity = self.next_entity.max(200_000);
         self.world.day_time = 6000;
         self.world.random = LegacyRandom::new(s.level_seed);
         self.audio.capture = Some(Vec::new());
-        let mut known: HashSet<u32> = self.mobs.iter().map(|m| m.id).collect();
+        let mut known: HashSet<u32> = self.simulation.mobs.iter().map(|m| m.id).collect();
         let mut seeded: HashSet<u32> = HashSet::new();
         let mut known_items = self.dropped.len();
         let mut known_orbs = self.orbs.len();
@@ -544,6 +552,7 @@ impl Game<'_> {
                 lines.push(now);
             }
             let mut fresh: Vec<&Mob> = self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|m| !known.contains(&m.id))
@@ -569,7 +578,7 @@ impl Game<'_> {
                 names.insert(id, format!("n{}", names.len()));
                 let seed = 0x5eed + names.len() as i64;
                 if seeded.insert(id)
-                    && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     seed_fresh(m, seed);
                 }
@@ -592,7 +601,7 @@ impl Game<'_> {
             }
             known_orbs = self.orbs.len();
             if s.trace_events {
-                for m in &self.mobs {
+                for m in &self.simulation.mobs {
                     if let Some(st) = &m.extra.warden {
                         let selected = st.vibration.selector.current().map(|(i, _)| {
                             serde_json::json!({"event": i.event, "pos": i.pos, "distance": i.distance})
@@ -739,7 +748,7 @@ impl Game<'_> {
                         .as_ref()
                         .map(|p| [p.position.x, p.position.y, p.position.z])
                         .unwrap_or_default();
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         m.damage(amount, horizon_client::mobs::Damage::player(at));
                     }
                     self.last_hurt_by_player.insert(id, self.lan_acting);
@@ -760,6 +769,7 @@ impl Game<'_> {
         // in this tick's entity phase: seed them now, as they are seeded
         // after the tick.
         let mut born: Vec<u32> = self
+            .simulation
             .mobs
             .iter()
             .map(|m| m.id)
@@ -768,7 +778,7 @@ impl Game<'_> {
         born.sort_unstable();
         for (i, id) in born.into_iter().enumerate() {
             if seeded.insert(id)
-                && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
             {
                 seed_fresh(m, 0x5eed + (named + i + 1) as i64);
             }

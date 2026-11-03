@@ -80,7 +80,7 @@ impl Game<'_> {
             first_join(&self.tridents),
             first_join(&self.rockets),
             first_join(&self.dropped),
-            first_join(&self.mobs),
+            first_join(&self.simulation.mobs),
             first_join(&self.creatures.projectiles),
         ];
         // A batch ticks whole, so an entity of the three kinds goes after the

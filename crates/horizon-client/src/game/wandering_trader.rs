@@ -160,7 +160,7 @@ impl Game<'_> {
         for _ in 0..2 {
             self.spawn_trader_llama(id, 4);
         }
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             m.extra.ints[5] = trader::DESPAWN_DELAY;
             m.extra.point = Some([
                 f64::from(reference[0]),
@@ -174,13 +174,19 @@ impl Game<'_> {
     }
     /// `tryToSpawnLlamaFor`: a trader llama near the trader, on its lead.
     fn spawn_trader_llama(&mut self, trader: u32, radius: i32) {
-        let Some(at) = self.mobs.iter().find(|m| m.id == trader).map(|m| {
-            [
-                m.position.x.floor() as i32,
-                m.position.y.floor() as i32,
-                m.position.z.floor() as i32,
-            ]
-        }) else {
+        let Some(at) = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == trader)
+            .map(|m| {
+                [
+                    m.position.x.floor() as i32,
+                    m.position.y.floor() as i32,
+                    m.position.z.floor() as i32,
+                ]
+            })
+        else {
             return;
         };
         let Some(pos) = self.find_trader_spawn_near(at, radius) else {
@@ -192,7 +198,7 @@ impl Game<'_> {
             f64::from(pos[2]) + 0.5,
         ];
         if let Some(id) = self.spawn_mob("minecraft:trader_llama", spot, false)
-            && let Some(l) = self.mobs.iter_mut().find(|m| m.id == id)
+            && let Some(l) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
         {
             // EntitySpawnReason.EVENT: grown up.
             l.extra.age = 0;

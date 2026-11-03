@@ -542,7 +542,8 @@ impl Game<'_> {
             .map(Minecart::bounds)
             .chain(self.boats.iter().map(super::boats::Boat::bounds))
             .chain(
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .filter(|m| {
                         !m.removed
@@ -676,6 +677,7 @@ impl Game<'_> {
         self.riding == Some(id)
             || self.ridden_by_guest(id)
             || self
+                .simulation
                 .mobs
                 .iter()
                 .any(|m| !m.removed && m.extra.mount == Some(id))
@@ -1362,7 +1364,12 @@ impl Game<'_> {
                     self.riding = None;
                 }
                 let y = c.position.y;
-                for m in self.mobs.iter_mut().filter(|m| m.extra.mount == Some(c.id)) {
+                for m in self
+                    .simulation
+                    .mobs
+                    .iter_mut()
+                    .filter(|m| m.extra.mount == Some(c.id))
+                {
                     let at = Vec3::new(m.position.x, m.position.y.max(y), m.position.z);
                     riders::stop_riding(m, Some(at));
                     m.previous = at;
@@ -1480,6 +1487,7 @@ impl Game<'_> {
         let teams = self.mob_teams();
         // (mob index, feet, box)
         let pushers: Vec<(usize, Vec3, Aabb)> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
@@ -1501,7 +1509,7 @@ impl Game<'_> {
                 let k = k as usize;
                 let c = &mut self.carts[k];
                 // hasPassenger(mob): a mob in this cart never pushes it.
-                if self.mobs[j].extra.mount == Some(c.id) || !bb.intersects(c.bounds()) {
+                if self.simulation.mobs[j].extra.mount == Some(c.id) || !bb.intersects(c.bounds()) {
                     continue;
                 }
                 let Some((xa, za)) = cart_push_from(feet, c.position) else {
@@ -1509,7 +1517,7 @@ impl Game<'_> {
                 };
                 c.velocity.x -= xa;
                 c.velocity.z -= za;
-                let m = &mut self.mobs[j];
+                let m = &mut self.simulation.mobs[j];
                 if m.pushable() && m.rider.is_none() && m.extra.rider.is_none() {
                     m.velocity.x += xa / 4.0;
                     m.velocity.z += za / 4.0;
@@ -1599,11 +1607,15 @@ impl Game<'_> {
         let hitbox = self.carts[i].bounds().inflate(Vec3::new(reach, 0.0, reach));
         let mut occupied = self.riding == Some(id)
             || self.ridden_by_guest(id)
-            || self.mobs.iter().any(|m| m.extra.mount == Some(id));
+            || self
+                .simulation
+                .mobs
+                .iter()
+                .any(|m| m.extra.mount == Some(id));
         let teams = self.mob_teams();
-        let candidates: Vec<u32> = (0..self.mobs.len())
+        let candidates: Vec<u32> = (0..self.simulation.mobs.len())
             .filter(|&j| {
-                let m = &self.mobs[j];
+                let m = &self.simulation.mobs[j];
                 if m.removed || !m.pushable() || m.extra.mount == Some(id) {
                     return false;
                 }
@@ -1612,24 +1624,24 @@ impl Game<'_> {
                 }
                 pushable_by(None, teams.of(Who::Mob(m.id)), true)
             })
-            .map(|j| self.mobs[j].id)
+            .map(|j| self.simulation.mobs[j].id)
             .collect();
         drop(teams);
         for mob in candidates {
             // By id: a mod's mount hook may have removed mobs since the list
             // was made, which moves the others' indices.
-            let Some(j) = self.mobs.iter().position(|m| m.id == mob) else {
+            let Some(j) = self.simulation.mobs.iter().position(|m| m.id == mob) else {
                 continue;
             };
-            let species = self.mobs[j].species();
-            let player = &*self.mobs[j].kind.id == "minecraft:player";
-            let cooldown = self.mobs[j].extra.boarding_cooldown;
-            let passenger = self.mobs[j].extra.mount.is_some();
+            let species = self.simulation.mobs[j].species();
+            let player = &*self.simulation.mobs[j].kind.id == "minecraft:player";
+            let cooldown = self.simulation.mobs[j].extra.boarding_cooldown;
+            let passenger = self.simulation.mobs[j].extra.mount.is_some();
             if pickup_instead_of_push(species, passenger, occupied) && !player {
                 // Entity.startRiding: a mod may cancel it (EntityMountEvent).
                 if can_ride_cart(species, cooldown)
                     && self.native_mob_may_ride(mob, id, true)
-                    && let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob)
+                    && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob)
                 {
                     m.extra.mount = Some(id);
                     m.extra.passenger = true;
@@ -1640,14 +1652,14 @@ impl Game<'_> {
                 }
                 continue;
             }
-            let other = self.mobs[j].position;
+            let other = self.simulation.mobs[j].position;
             let Some(v) = super::boat_passengers::push_impulse(pos, other) else {
                 continue;
             };
             if !occupied {
                 self.carts[i].velocity = self.carts[i].velocity.subtract(v);
             }
-            let m = &mut self.mobs[j];
+            let m = &mut self.simulation.mobs[j];
             if m.pushable() {
                 m.velocity = m.velocity.add_vector(v);
                 m.needs_sync = true;
@@ -1661,6 +1673,7 @@ impl Game<'_> {
             let id = self.carts[i].id;
             let (pos, prev) = (self.carts[i].position, self.carts[i].previous);
             let seats: Vec<(usize, f64)> = self
+                .simulation
                 .mobs
                 .iter()
                 .enumerate()
@@ -1669,7 +1682,7 @@ impl Game<'_> {
                 .map(|(j, m)| (j, riders::vehicle_attachment(m, 0.98)))
                 .collect();
             for (j, offset) in seats {
-                let m = &mut self.mobs[j];
+                let m = &mut self.simulation.mobs[j];
                 m.position = cart_seat(pos, offset);
                 m.previous = cart_seat(prev, offset);
                 m.velocity = Vec3::ZERO;
@@ -1683,16 +1696,16 @@ impl Game<'_> {
     /// `ejectPassengers` for the mobs in cart `i`.
     pub(super) fn eject_cart_mobs(&mut self, i: usize) {
         let (id, y) = (self.carts[i].id, self.carts[i].position.y);
-        let js: Vec<usize> = (0..self.mobs.len())
-            .filter(|&j| self.mobs[j].extra.mount == Some(id))
+        let js: Vec<usize> = (0..self.simulation.mobs.len())
+            .filter(|&j| self.simulation.mobs[j].extra.mount == Some(id))
             .collect();
         for j in js {
             let at = {
-                let m = &self.mobs[j];
+                let m = &self.simulation.mobs[j];
                 Vec3::new(m.position.x, m.position.y.max(y), m.position.z)
             };
-            riders::stop_riding(&mut self.mobs[j], Some(at));
-            self.mobs[j].previous = at;
+            riders::stop_riding(&mut self.simulation.mobs[j], Some(at));
+            self.simulation.mobs[j].previous = at;
         }
     }
     /// Every cart but the ridden one (which ticks with its rider).
@@ -2045,7 +2058,11 @@ impl Game<'_> {
             CartKind::Rideable => {
                 let id = self.carts[i].id;
                 // isVehicle: a mob already sits in it.
-                let has_mob = self.mobs.iter().any(|m| m.extra.mount == Some(id));
+                let has_mob = self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .any(|m| m.extra.mount == Some(id));
                 if sneaking || self.riding.is_some() || self.ridden_by_guest(id) || has_mob {
                     return false;
                 }

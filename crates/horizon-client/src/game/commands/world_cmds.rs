@@ -255,6 +255,7 @@ impl Game<'_> {
     /// Retain the mob hit's causing-player connection after the hit is accepted.
     fn command_damage_mob(&mut self, id: u32, amount: f32, damage: Damage) -> bool {
         let hurt = self
+            .simulation
             .mobs
             .iter_mut()
             .find(|m| m.id == id)
@@ -348,7 +349,7 @@ impl Game<'_> {
             match t {
                 Target::Player => self.swing_arm(),
                 Target::Mob(id) => {
-                    if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                    if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                         m.ai.swinging = true;
                         m.ai.swing_time = -1;
                     }
@@ -957,7 +958,7 @@ impl Game<'_> {
                 )
             }
             Target::Mob(mob_id) => {
-                let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) else {
+                let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob_id) else {
                     return Ok(0);
                 };
                 // The attributes the mob's gameplay reads live in `finalize`;
@@ -1079,7 +1080,7 @@ impl Game<'_> {
         if let Target::Mob(id) = t
             && matches!(attribute, "minecraft:armor" | "minecraft:armor_toughness")
         {
-            let mob = self.mobs.iter_mut().find(|m| m.id == id)?;
+            let mob = self.simulation.mobs.iter_mut().find(|m| m.id == id)?;
             if mob.extra.armor_attributes.is_none() {
                 mob.extra.armor_attributes =
                     self.motion.attributes.create(&mob.kind.id).map(Box::new);
@@ -1350,7 +1351,12 @@ impl Game<'_> {
         let Target::Mob(mob_id) = vehicle else {
             return Err(generic());
         };
-        if !self.mobs.iter().any(|m| m.id == mob_id && m.alive()) {
+        if !self
+            .simulation
+            .mobs
+            .iter()
+            .any(|m| m.id == mob_id && m.alive())
+        {
             return Err(generic());
         }
         if let Some(rider) = rider {
@@ -1367,7 +1373,7 @@ impl Game<'_> {
         if !self.native_may_board(mob_id) {
             return Err(generic());
         }
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob_id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob_id) {
             m.extra.flag = false;
             m.extra.counter = 0;
             self.yaw = m.yaw;
@@ -1386,7 +1392,14 @@ impl Game<'_> {
     pub(super) fn ride_vehicle(&self, t: Target) -> Option<Target> {
         let id = match t {
             Target::Player => self.riding?,
-            Target::Mob(id) => self.mobs.iter().find(|m| m.id == id)?.extra.mount?,
+            Target::Mob(id) => {
+                self.simulation
+                    .mobs
+                    .iter()
+                    .find(|m| m.id == id)?
+                    .extra
+                    .mount?
+            }
             _ => return None,
         };
         Some(if self.boats.iter().any(|b| b.id == id) {
@@ -1401,28 +1414,31 @@ impl Game<'_> {
     /// (Entity.removePassenger), then to where the vehicle lets it out
     /// (LivingEntity.dismountVehicle).
     pub(in crate::game) fn dismount_mob(&mut self, rider: u32) {
-        let Some(i) = self.mobs.iter().position(|m| m.id == rider) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == rider) else {
             return;
         };
-        let Some(v) = self.mobs[i].extra.mount else {
+        let Some(v) = self.simulation.mobs[i].extra.mount else {
             return;
         };
         if !self.native_mob_may_ride(rider, v, false) {
             return;
         }
-        self.mobs[i].extra.mount = None;
-        let (width, yaw) = (f64::from(self.mobs[i].width()), self.mobs[i].yaw);
+        self.simulation.mobs[i].extra.mount = None;
+        let (width, yaw) = (
+            f64::from(self.simulation.mobs[i].width()),
+            self.simulation.mobs[i].yaw,
+        );
         let at = if let Some(b) = self.boats.iter().position(|b| b.id == v) {
             self.boat_dismount_target(b, width, yaw)
-        } else if let Some(m) = self.mobs.iter_mut().find(|m| m.id == v) {
+        } else if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == v) {
             m.extra.rider = None;
             // Entity.getDismountLocationForPassenger: on top of the vehicle.
             let p = m.position;
             horizon_core::geometry::Vec3::new(p.x, p.y + f64::from(m.height()), p.z)
         } else {
-            self.mobs[i].position
+            self.simulation.mobs[i].position
         };
-        let m = &mut self.mobs[i];
+        let m = &mut self.simulation.mobs[i];
         m.extra.passenger = false;
         m.extra.boarding_cooldown = super::super::boat_passengers::BOARDING_COOLDOWN;
         m.position = at;

@@ -11,8 +11,8 @@ impl Game<'_> {
         let Some(camera) = self.player.as_ref().map(|p| p.position) else {
             return;
         };
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if m.species() != Species::Breeze
                 || !m.alive()
                 || m.position.distance_squared(camera) > 32.0 * 32.0
@@ -26,14 +26,14 @@ impl Game<'_> {
                 _ => (1, false),
             };
             if jump_trail {
-                self.mobs[i].extra.scratch[1] += 1;
-                if self.mobs[i].extra.scratch[1] > 5 {
+                self.simulation.mobs[i].extra.scratch[1] += 1;
+                if self.simulation.mobs[i].extra.scratch[1] > 5 {
                     continue;
                 }
             } else {
-                self.mobs[i].extra.scratch[1] = 0;
+                self.simulation.mobs[i].extra.scratch[1] = 0;
             }
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             let (x, y, z) = (
                 m.position.x.floor() as i32,
                 m.position.y.floor() as i32,

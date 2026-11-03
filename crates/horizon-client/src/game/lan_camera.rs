@@ -48,7 +48,7 @@ impl Game<'_> {
         }
         let t = self.level_entity(id)?;
         if let Target::Mob(m) = t
-            && !self.mobs.iter().any(|x| x.id == m && x.alive())
+            && !self.simulation.mobs.iter().any(|x| x.id == m && x.alive())
         {
             return None;
         }

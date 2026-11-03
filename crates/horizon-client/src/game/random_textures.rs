@@ -18,16 +18,22 @@ impl Game<'_> {
         if textures.is_empty() {
             return;
         }
-        for i in 0..self.mobs.len() {
-            let m = &mut self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &mut self.simulation.mobs[i];
             let id = m.id;
             if !m.random_textures.due(&textures, id) {
                 continue;
             }
-            let m = &self.mobs[i];
+            let m = &self.simulation.mobs[i];
             let seed = seed(m, self.persist.uuids.get(&id).copied());
             let seen = (!m.random_textures.has_seen()).then(|| self.seen_at(m.position));
-            choose(&mut self.mobs[i], &textures, res.mob_data(), seen, seed);
+            choose(
+                &mut self.simulation.mobs[i],
+                &textures,
+                res.mob_data(),
+                seen,
+                seed,
+            );
         }
     }
 

@@ -388,6 +388,7 @@ impl Game<'_> {
         match t {
             Target::Player => self.player_entity(),
             Target::Mob(id) => self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -450,7 +451,8 @@ impl Game<'_> {
             eq[2 + i] = a.as_ref().map(item_view);
         }
         let vehicle = self.riding.and_then(|id| {
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .find(|m| m.id == id)
                 .map(|m| Box::new(self.mob_entity(m)))
@@ -507,6 +509,7 @@ impl Game<'_> {
             position: [b.position.x, b.position.y, b.position.z],
             on_ground: b.on_ground,
             passengers: self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|m| m.extra.mount == Some(b.id))
@@ -556,6 +559,7 @@ impl Game<'_> {
                 .into_iter()
                 .collect(),
             passengers: self
+                .simulation
                 .mobs
                 .iter()
                 .filter(|r| r.extra.mount == Some(m.id))
@@ -1046,7 +1050,7 @@ impl Game<'_> {
         let dead = p.health.dead_or_dying();
         let lava = self
             .riding
-            .and_then(|id| self.mobs.iter().find(|m| m.id == id))
+            .and_then(|id| self.simulation.mobs.iter().find(|m| m.id == id))
             .is_some_and(|m| m.fluids.in_lava);
         match (falling, self.adv.marks.fall) {
             (true, None) => {
@@ -1240,6 +1244,7 @@ impl Game<'_> {
         let eye = self.eye_position()?;
         let dir = super::view_vector(self.yaw, self.pitch);
         let (m, _) = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())
@@ -1356,7 +1361,7 @@ impl Game<'_> {
             self.trigger_item_entity("minecraft:thrown_item_picked_up_by_entity", stack, &me);
             me
         } else if let Some(id) = self.mob_by_uuid(thrower) {
-            let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+            let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
                 return;
             };
             self.mob_entity(m)

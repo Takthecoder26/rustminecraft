@@ -274,7 +274,7 @@ impl Game<'_> {
             );
             let pulled = |v: Vec3| Vec3::new(v.x + d.x * 0.1, v.y + d.y * 0.1, v.z + d.z * 0.1);
             let mut hooked_item = false;
-            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 m.velocity = pulled(m.velocity);
             } else if let Some(item) = self.dropped.iter_mut().find(|i| i.id == id) {
                 pull_item(item, Vec3::new(d.x * 0.1, d.y * 0.1, d.z * 0.1));
@@ -293,6 +293,7 @@ impl Game<'_> {
             }
             // CriteriaTriggers.FISHING_ROD_HOOKED with no items.
             let hooked = self
+                .simulation
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
@@ -687,7 +688,8 @@ impl Game<'_> {
                     h.position,
                     entity_end,
                     entity_hit_margin(h.tick_count),
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .filter(|m| m.alive())
                         .map(|m| (m.id, m.bounds()))
@@ -743,6 +745,7 @@ impl Game<'_> {
             State::Hooked(id) => {
                 // updateHookedEntity: ride the hooked mob, player or item at 0.8 of its height.
                 let hooked = self
+                    .simulation
                     .mobs
                     .iter()
                     .find(|m| m.id == id && m.alive())
@@ -1355,7 +1358,8 @@ impl Game<'_> {
                         .as_ref()
                         .map(|p| (p.position, f64::from(p.dimensions.height)))
                 } else {
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .find(|m| m.id == id && m.alive())
                         .map(|m| (m.position, f64::from(m.height())))
@@ -1442,7 +1446,7 @@ impl Game<'_> {
         self.remote_hooks
             .iter()
             .filter_map(|h| {
-                let owner = self.mobs.iter().find(|m| m.id == h.owner)?;
+                let owner = self.simulation.mobs.iter().find(|m| m.id == h.owner)?;
                 let feet = lerp(owner.previous, owner.position);
                 let body = horizon_client::camera::lerp(
                     alpha as f32,

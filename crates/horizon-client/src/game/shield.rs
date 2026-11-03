@@ -191,7 +191,7 @@ impl Game<'_> {
             return;
         };
         let fully = outcome.fully_blocked;
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let (mx, mz) = (m.position.x, m.position.z);
@@ -212,6 +212,7 @@ impl Game<'_> {
             let mut events = Vec::new();
             let roaring = m.extra.anim_ticks != 0;
             let stunned = self
+                .simulation
                 .mobs
                 .iter_mut()
                 .find(|m| m.id == id)

@@ -148,7 +148,7 @@ impl Game<'_> {
         if horizon_client::mod_api::mods().is_empty() {
             return;
         }
-        let Some(shooter) = self.mobs.iter().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter().find(|m| m.id == mob) else {
             return;
         };
         let kind = shooter.kind.id.clone();
@@ -195,7 +195,7 @@ impl Game<'_> {
     /// replaced ammunition is what the crossbow holds; none leaves it uncharged
     /// and returns false (`tryLoadProjectiles`).
     pub(super) fn mob_crossbow_ammo(&mut self, mob: u32, weapon: &ItemStack) -> bool {
-        let Some(shooter) = self.mobs.iter().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter().find(|m| m.id == mob) else {
             return false;
         };
         let kind = shooter.kind.id.clone();
@@ -203,7 +203,7 @@ impl Game<'_> {
         self.native_living_get_projectile(None, "", Some(mob), &kind, weapon, &mut projectile);
         // A crossbow takes arrows and firework rockets only.
         let projectile = projectile.filter(|ammo| is_arrow(ammo) || &*ammo.item == FIREWORK_ROCKET);
-        let Some(shooter) = self.mobs.iter_mut().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) else {
             return false;
         };
         let Some(mut crossbow) = shooter.extra.main_hand_stack().cloned() else {

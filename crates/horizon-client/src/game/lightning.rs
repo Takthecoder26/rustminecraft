@@ -74,7 +74,7 @@ impl Game<'_> {
         if rain <= 0.2 || thunder <= 0.9 || !weather || self.world_debug {
             return;
         }
-        let mut scratch = std::mem::take(&mut self.spawn_scratch);
+        let mut scratch = std::mem::take(&mut self.simulation.spawn_scratch);
         self.spawning_chunks(&self.level_players(), &mut scratch);
         let levels = self.tickets.levels();
         scratch
@@ -115,7 +115,7 @@ impl Game<'_> {
                 let at = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
                 // ServerLevel.tickChunk: a trap horse waits for a player.
                 if let Some(id) = self.spawn_mob("minecraft:skeleton_horse", at, false)
-                    && let Some(h) = self.mobs.iter_mut().find(|m| m.id == id)
+                    && let Some(h) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     h.extra.trap = true;
                     h.extra.age = 0;
@@ -128,7 +128,7 @@ impl Game<'_> {
             ];
             self.spawn_bolt(at, trap);
         }
-        self.spawn_scratch = scratch;
+        self.simulation.spawn_scratch = scratch;
     }
     /// `ServerLevel.findLightningRod`: `PoiManager.findClosest` over the
     /// lightning rod points of interest within 128 blocks of `center` whose
@@ -200,6 +200,7 @@ impl Game<'_> {
         }
         let sees_sky = |g: &Self, p: [i32; 3]| g.world.light(p[0], p[1], p[2]) >> 4 == 15;
         let mut candidates: Vec<[i32; 3]> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())
@@ -464,6 +465,7 @@ impl Game<'_> {
             ..Default::default()
         };
         let viewers: Vec<EntityView> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive() && !b.hit.contains(&m.id))
@@ -562,10 +564,10 @@ impl Game<'_> {
                 continue;
             }
             left -= 1;
-            struck.push(self.mob_entity(&self.mobs[i]));
+            struck.push(self.mob_entity(&self.simulation.mobs[i]));
             // LivingConversionEvent.Pre: a canceled conversion leaves the
             // mob to the lightning's fire and damage, as `super.thunderHit`.
-            let outcome = match self.mobs[i].species() {
+            let outcome = match self.simulation.mobs[i].species() {
                 Species::Pig if !peaceful => Some("minecraft:zombified_piglin"),
                 Species::Villager if !peaceful => Some("minecraft:witch"),
                 _ => None,
@@ -573,12 +575,12 @@ impl Game<'_> {
             let mut keep = false;
             if let Some(outcome) = outcome {
                 let (id, kind) = (
-                    self.mobs[i].id,
-                    super::native_hooks::mob_kind(&self.mobs[i]),
+                    self.simulation.mobs[i].id,
+                    super::native_hooks::mob_kind(&self.simulation.mobs[i]),
                 );
                 self.native_living_conversion_pre(id, &kind, outcome, &mut keep);
             }
-            let m = &mut self.mobs[i];
+            let m = &mut self.simulation.mobs[i];
             b.hit.push(m.id);
             let setup = thunder_mob_spawn_setup;
             let at = [m.position.x, m.position.y, m.position.z];

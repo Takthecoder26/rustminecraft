@@ -208,6 +208,7 @@ impl Game<'_> {
             if limit >= 1 {
                 let near = bounds.inflate(Vec3::new(2.0, 2.0, 2.0));
                 let nearby = self
+                    .simulation
                     .mobs
                     .iter()
                     .filter(|m| {
@@ -226,7 +227,7 @@ impl Game<'_> {
                     [feet.x, feet.y + 0.5, feet.z],
                     false,
                     true,
-                ) && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                ) && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
                 {
                     horizon_client::mobs::cube::set_size(m, 2);
                 }
@@ -298,8 +299,8 @@ impl Game<'_> {
     }
     /// A living mob's own random (`Entity.random`), else the world's.
     fn bearer_random(&mut self, bearer: Option<u32>) -> &mut LegacyRandom {
-        match bearer.and_then(|id| self.mobs.iter().position(|m| m.id == id)) {
-            Some(i) => &mut self.mobs[i].random,
+        match bearer.and_then(|id| self.simulation.mobs.iter().position(|m| m.id == id)) {
+            Some(i) => &mut self.simulation.mobs[i].random,
             None => &mut self.world.random,
         }
     }
@@ -325,7 +326,7 @@ impl Game<'_> {
                 f64::from(-x as f32 * sin + z as f32 * cos),
             );
             if let Some(id) = self.spawn_mob_for("minecraft:silverfish", at, false, true)
-                && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
             {
                 m.velocity = velocity;
             }
@@ -738,7 +739,12 @@ impl Game<'_> {
                 }
             }
             Who::Mob(id) => {
-                let Some(i) = self.mobs.iter().position(|m| m.id == id && m.alive()) else {
+                let Some(i) = self
+                    .simulation
+                    .mobs
+                    .iter()
+                    .position(|m| m.id == id && m.alive())
+                else {
                     return;
                 };
                 let inverted = self
@@ -747,11 +753,11 @@ impl Game<'_> {
                     .enchantments
                     .entity_tags
                     .get("minecraft:inverted_healing_and_harm")
-                    .is_some_and(|t| t.contains(&self.mobs[i].kind.id));
+                    .is_some_and(|t| t.contains(&self.simulation.mobs[i].kind.id));
                 for (effect, duration, amp) in effects {
                     let tags = &self.res.stations().enchantments.entity_tags;
                     // A mod's `onEffectAdded` may have changed the mobs.
-                    let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+                    let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
                         return;
                     };
                     match effect {
@@ -1097,7 +1103,7 @@ impl Game<'_> {
             }
         }
         if let Some(v) = vehicle {
-            if let Some(m) = self.mobs.iter().find(|m| m.id == v) {
+            if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == v) {
                 boxes.push(m.bounds());
             }
             if let Some(b) = self.boats.iter().find(|b| b.id == v) {
@@ -1152,7 +1158,7 @@ impl Game<'_> {
                 let state =
                     self.world
                         .block(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-                let mob = self.mobs.iter().find(|m| {
+                let mob = self.simulation.mobs.iter().find(|m| {
                     m.alive()
                         && (t.left_owner || Some(m.id) != vehicle)
                         && (m.position.x - p.x).abs() < m.kind.width / 2.0 + 0.125
@@ -1269,7 +1275,7 @@ impl Game<'_> {
         // Only mobs that at least one of the cloud's effects can affect are
         // taken (`allEffects.stream().anyMatch(entity::canBeAffected)`), so
         // the others neither become victims nor use up its radius.
-        for m in self.mobs.iter().filter(|m| {
+        for m in self.simulation.mobs.iter().filter(|m| {
             m.alive()
                 && m.bounds().intersects(area)
                 && effects
@@ -1377,18 +1383,18 @@ impl Game<'_> {
                 }
             }),
             Victim::Mob(mob) => {
-                let Some(i) = self.mobs.iter().position(|m| m.id == mob) else {
+                let Some(i) = self.simulation.mobs.iter().position(|m| m.id == mob) else {
                     return;
                 };
                 // Undead invert healing and harming.
                 let tags = &world_stations!(self).enchantments.entity_tags;
                 let inverted = tags
                     .get("minecraft:inverted_healing_and_harm")
-                    .is_some_and(|t| t.contains(&self.mobs[i].kind.id));
+                    .is_some_and(|t| t.contains(&self.simulation.mobs[i].kind.id));
                 for (id, duration, amp) in effects {
                     let tags = &world_stations!(self).enchantments.entity_tags;
                     // A mod's `onEffectAdded` may have changed the mobs.
-                    let Some(m) = self.mobs.iter_mut().find(|m| m.id == mob) else {
+                    let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) else {
                         return;
                     };
                     match *id {
@@ -1654,6 +1660,7 @@ impl Game<'_> {
                 [at.x + 0.125 + 4.0, at.y + 0.25 + 2.0, at.z + 0.125 + 4.0],
             );
             for m in self
+                .simulation
                 .mobs
                 .iter_mut()
                 .filter(|m| m.species() == horizon_client::mobs::Species::Axolotl && !m.removed)
@@ -1711,7 +1718,7 @@ impl Game<'_> {
         // Mobs take the instant effects (undead invert healing and harming).
         let undead = &self.stations().enchantments.entity_tags;
         let mut hits = Vec::new();
-        for (i, m) in self.mobs.iter().enumerate() {
+        for (i, m) in self.simulation.mobs.iter().enumerate() {
             if m.alive()
                 && let Some(d2) = splash_distance_sqr(at, age, m.bounds())
             {
@@ -1733,12 +1740,12 @@ impl Game<'_> {
                         if d > 20
                             && let Some(name) = mob_effect_id(id)
                         {
-                            self.mobs[i].add_effect(name, d, *amp);
+                            self.simulation.mobs[i].add_effect(name, d, *amp);
                         }
                         continue;
                     }
                 };
-                let m = &mut self.mobs[i];
+                let m = &mut self.simulation.mobs[i];
                 if harm {
                     let harm = m.potion_harm((intensity * f64::from(6 << amp) + 0.5) as i32 as f32);
                     m.hurt(harm, Some([at.x, at.y, at.z]), &mut self.world.random);

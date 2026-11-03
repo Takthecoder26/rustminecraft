@@ -513,7 +513,7 @@ impl Game<'_> {
                 let g = host.hub.guests.iter_mut().find(|g| g.conn == conn)?;
                 limit(&mut g.motion.as_deref_mut()?.piston)
             }
-            Target::Entity(EntityHandle::Mob(i)) => limit(&mut self.mobs[i].piston),
+            Target::Entity(EntityHandle::Mob(i)) => limit(&mut self.simulation.mobs[i].piston),
             _ => limit(accumulators.entry(target).or_default()),
         }
     }

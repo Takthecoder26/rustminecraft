@@ -745,7 +745,7 @@ impl Game<'_> {
             .player
             .as_ref()
             .map(|p| (r.entity_id, [p.position.x, p.position.y, p.position.z]));
-        entity_position(id, player, &self.mobs, &r.entities)
+        entity_position(id, player, &self.simulation.mobs, &r.entities)
     }
     /// The hurt sound the hurt player's own client plays from
     /// `ClientboundDamageEventPacket` (`LivingEntity.handleDamageEvent`):
@@ -924,7 +924,7 @@ impl Game<'_> {
         self.craft_size = 2;
         self.player = None;
         self.spawn = None;
-        self.mobs.clear();
+        self.simulation.mobs.clear();
         self.clear_remote_objects();
         self.clear_remote_projectiles();
         self.creatures.projectiles.clear();
@@ -1183,7 +1183,7 @@ impl Game<'_> {
         // Out of the server's bed: InBedChatScreen goes with the level.
         self.sleeping = None;
         self.sleep_timer = 0;
-        self.mobs.clear();
+        self.simulation.mobs.clear();
         self.clear_remote_objects();
         self.clear_remote_projectiles();
         self.dropped.clear();
@@ -2162,7 +2162,7 @@ impl Game<'_> {
             self.world.game_time = time;
             self.world.day_time = day;
             self.world.weather = weather;
-            self.mobs.clear();
+            self.simulation.mobs.clear();
             self.clear_remote_objects();
             self.clear_remote_projectiles();
             self.dropped.clear();
@@ -2349,13 +2349,16 @@ impl Game<'_> {
                 )
             })
         } else {
-            self.mob_index.get(&self.mobs, id as u32).map(|m| {
-                (
-                    [m.position.x, m.position.y, m.position.z],
-                    m.kind.width,
-                    m.kind.height,
-                )
-            })
+            self.simulation
+                .mob_index
+                .get(&self.simulation.mobs, id as u32)
+                .map(|m| {
+                    (
+                        [m.position.x, m.position.y, m.position.z],
+                        m.kind.width,
+                        m.kind.height,
+                    )
+                })
         };
         let Some((feet, width, height)) = body else {
             return;
@@ -2544,8 +2547,8 @@ impl Game<'_> {
             (mob.yaw, mob.previous_yaw) = (yaw, yaw);
             (mob.head_pitch, mob.previous_head_pitch) = (pitch, pitch);
             mob.persistent = true;
-            self.mobs.retain(|m| m.id != id as u32);
-            self.mobs.push(mob);
+            self.simulation.mobs.retain(|m| m.id != id as u32);
+            self.simulation.mobs.push(mob);
         }
         if let Some(r) = self.remote.as_mut() {
             // A new entity has a new interpolation handler (a mob's or an
@@ -2582,8 +2585,9 @@ impl Game<'_> {
         let dragon = self.dragon.as_ref().is_some_and(|d| d.id as i32 == id);
         let driven = self.driven_mount().is_some_and(|m| m.id as i32 == id);
         let mob = self
+            .simulation
             .mob_index
-            .get_mut(&mut self.mobs, id as u32)
+            .get_mut(&mut self.simulation.mobs, id as u32)
             .filter(|_| !dragon);
         let tracked = self
             .remote
@@ -2801,7 +2805,7 @@ impl Game<'_> {
         // SetPassengers packet preceded the vehicle's removal. Otherwise
         // mobs and other players keep their passenger pose after it is gone.
         self.remote_set_passengers(id, &[]);
-        self.mobs.retain(|m| m.id != id as u32);
+        self.simulation.mobs.retain(|m| m.id != id as u32);
         self.orbs.retain(|o| o.id != id as u32);
         self.dropped.retain(|d| d.id != id as u32);
         // Before the crystals go: the dragon's beam index follows them.
@@ -2997,7 +3001,11 @@ impl Game<'_> {
             value("minecraft:movement_speed"),
             value("minecraft:jump_strength"),
         );
-        let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32) else {
+        let Some(m) = self
+            .simulation
+            .mob_index
+            .get_mut(&mut self.simulation.mobs, id as u32)
+        else {
             return;
         };
         // A horse its rider's client moves goes at its own speed and jumps
@@ -3455,7 +3463,11 @@ impl Game<'_> {
                         None => Some(Holder::Mob(d as u32)),
                     },
                 };
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.source as u32) {
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.source as u32)
+                {
                     m.extra.leash = holder;
                 } else if let Some(b) = self.boats.iter_mut().find(|b| b.id == p.source as u32) {
                     // A leashed boat or raft (AbstractBoat is Leashable).
@@ -3475,7 +3487,11 @@ impl Game<'_> {
                 // Entity.DATA_SHARED_FLAGS_ID, DATA_CUSTOM_NAME and
                 // DATA_CUSTOM_NAME_VISIBLE: server NPCs and holograms rely on
                 // these instead of saved NBT.
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     for (index, _, value) in &p.values {
                         match (index, value) {
                             (0, Value::Byte(flags)) => {
@@ -3508,7 +3524,10 @@ impl Game<'_> {
                     }
                 }
                 self.remote_mob_data(p.id, &p.values);
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
                     && m.species() == horizon_client::mobs::Species::Creeper
                 {
                     for (index, _, value) in &p.values {
@@ -3521,7 +3540,11 @@ impl Game<'_> {
                         }
                     }
                 }
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     for (index, _, value) in &p.values {
                         match (index, value) {
                             // Entity.DATA_TICKS_FROZEN: isFullyFrozen shakes it.
@@ -3540,6 +3563,7 @@ impl Game<'_> {
                 // LivingEntity.DATA_LIVING_ENTITY_FLAGS: for another player
                 // too, remote_mob_data's apply reads index 8 above.
                 let mannequin = self
+                    .simulation
                     .mobs
                     .iter()
                     .any(|m| m.id == p.id as u32 && &*m.kind.id == "minecraft:mannequin");
@@ -3553,7 +3577,11 @@ impl Game<'_> {
                     for (index, _, value) in &p.values {
                         if let (14, Value::OptPos(bed)) = (index, value) {
                             let code = bed.map_or(0, |b| self.bed_facing(b));
-                            if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                            if let Some(m) = self
+                                .simulation
+                                .mob_index
+                                .get_mut(&mut self.simulation.mobs, p.id as u32)
+                            {
                                 m.extra.ints[1] = code;
                                 if let Some(head) = *bed {
                                     // LivingEntity.onSyncedDataUpdated(SLEEPING_POS_ID): setPosToBed.
@@ -3572,14 +3600,20 @@ impl Game<'_> {
                         // Avatar.DATA_PLAYER_MAIN_HAND (HumanoidArm: 0 left, 1
                         // right): the arm a swing of the main hand moves.
                         if let (15, Value::Id(arm)) = (index, value)
-                            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                            && let Some(m) = self
+                                .simulation
+                                .mob_index
+                                .get_mut(&mut self.simulation.mobs, p.id as u32)
                         {
                             m.extra.main_hand_left = *arm == 0;
                         }
                         // Avatar.DATA_PLAYER_MODE_CUSTOMISATION: the skin layers
                         // the player shows (PlayerModelPart bits).
                         if let (16, Value::Byte(bits)) = (index, value)
-                            && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                            && let Some(m) = self
+                                .simulation
+                                .mob_index
+                                .get_mut(&mut self.simulation.mobs, p.id as u32)
                         {
                             m.extra.hidden_model_parts = !(*bits as u8) & 0x7F;
                         }
@@ -3711,7 +3745,10 @@ impl Game<'_> {
                         .remote
                         .as_ref()
                         .is_some_and(|r| r.level_players.contains_key(&p.id)))
-                    && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get_mut(&mut self.simulation.mobs, p.id as u32)
                 {
                     for (index, _, value) in &p.values {
                         if let (0, Value::Byte(flags)) = (index, value) {
@@ -3764,7 +3801,11 @@ impl Game<'_> {
                         )
                     })
                 });
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     if let Some(charged) = charged
                         && &*m.kind.id == "minecraft:player"
                     {
@@ -3943,7 +3984,11 @@ impl Game<'_> {
                             pitch,
                         );
                     }
-                } else if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                } else if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     m.limb_speed = 1.5;
                     m.hurt_time = 10;
                 } else {
@@ -3956,7 +4001,11 @@ impl Game<'_> {
                     if let Some(pl) = self.player.as_mut() {
                         pl.health.animate_hurt_dir(p.yaw);
                     }
-                } else if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                } else if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     m.hurt_time = 10;
                 } else {
                     self.remote_dragon_hurt(p.id);
@@ -4000,20 +4049,29 @@ impl Game<'_> {
                     self.fox_eat_particles(p.id as u32);
                 }
                 if p.event == 1
-                    && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get_mut(&mut self.simulation.mobs, p.id as u32)
                     && m.species() == horizon_client::mobs::Species::Rabbit
                 {
                     horizon_client::mobs::rabbit::hop_event(m);
                 }
                 if p.event == 19
-                    && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get_mut(&mut self.simulation.mobs, p.id as u32)
                 {
                     horizon_client::mobs::aquatic::squid_cycle_event(m);
                 }
                 // LivingEntity.handleEntityEvent 55: another player swapped
                 // its main and off hand (`swapHandItems`).
                 if p.event == 55
-                    && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get_mut(&mut self.simulation.mobs, p.id as u32)
                 {
                     std::mem::swap(&mut m.extra.main_hand, &mut m.extra.off_hand);
                 }
@@ -4025,7 +4083,10 @@ impl Game<'_> {
                 }
                 // EntityEvent.DEATH: start the death animation.
                 if p.event == 3
-                    && let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get_mut(&mut self.simulation.mobs, p.id as u32)
                 {
                     m.health = 0.0;
                 }
@@ -4049,12 +4110,19 @@ impl Game<'_> {
                     );
                 }
                 // The events that start a mob's animation (the warden's).
-                if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     horizon_client::mobs::sync::entity_event(m, p.event as u8);
                 }
                 // LivingEntity.handleEntityEvent 60: the poof as the dead body goes.
                 if p.event == 60
-                    && let Some(m) = self.mob_index.get(&self.mobs, p.id as u32)
+                    && let Some(m) = self
+                        .simulation
+                        .mob_index
+                        .get(&self.simulation.mobs, p.id as u32)
                 {
                     let (at, w, h) = (m.position, f64::from(m.width()), f64::from(m.height()));
                     self.death_poof([at.x, at.y, at.z], w, h);
@@ -4063,7 +4131,7 @@ impl Game<'_> {
                     self.remote_totem(p.id);
                 }
                 // Mob.handleEntityEvent 20: the spawn poof.
-                if p.event == 20 && self.mobs.iter().any(|m| m.id == p.id as u32) {
+                if p.event == 20 && self.simulation.mobs.iter().any(|m| m.id == p.id as u32) {
                     self.poof_particles(p.id as u32);
                 }
                 // Villager 12, 13 and 14, TamableAnimal and AbstractHorse 6 and
@@ -4105,7 +4173,8 @@ impl Game<'_> {
                             .as_ref()
                             .map(|q| [q.position.x, q.position.y, q.position.z])
                     } else {
-                        self.mobs
+                        self.simulation
+                            .mobs
                             .iter()
                             .find(|m| m.id == p.id as u32)
                             .map(|m| [m.position.x, m.position.y, m.position.z])
@@ -4131,7 +4200,11 @@ impl Game<'_> {
                 };
                 if self.remote.as_ref().is_some_and(|r| r.entity_id == p.id) {
                     self.swing_hand(hand, animation);
-                } else if let Some(m) = self.mob_index.get_mut(&mut self.mobs, p.id as u32) {
+                } else if let Some(m) = self
+                    .simulation
+                    .mob_index
+                    .get_mut(&mut self.simulation.mobs, p.id as u32)
+                {
                     m.swing_hand_modified(hand == Hand::Off, animation);
                 }
             }
@@ -5234,6 +5307,7 @@ impl Game<'_> {
         // every entry of a busy server's player list.
         for (id, uuid) in level {
             let Some(i) = self
+                .simulation
                 .mobs
                 .iter()
                 .position(|m| m.id == id && &*m.kind.id == "minecraft:player")
@@ -5241,10 +5315,10 @@ impl Game<'_> {
                 continue;
             };
             let (skin, is_slim) = self.drawn_skin(uuid, skin_of(&skins, uuid));
-            let kind = self.mobs[i].kind.clone();
+            let kind = self.simulation.mobs[i].kind.clone();
             let skin_3d = self.skin_3d_model(&kind, &skin, is_slim);
             let cape = capes.get(&uuid).filter(|c| self.again_skin(c)).cloned();
-            let mob = &mut self.mobs[i];
+            let mob = &mut self.simulation.mobs[i];
             mob.skin = Some(skin);
             mob.slim = is_slim;
             mob.skin_3d = skin_3d;
@@ -5273,6 +5347,7 @@ impl Game<'_> {
         // mannequin's DATA_PROFILE `textures` property resolves like a
         // player's, never required to be signed.
         let mannequins: Vec<(u32, horizon_client::skins::Textures)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| &*m.kind.id == "minecraft:mannequin" && m.profile.is_some())
@@ -5331,6 +5406,7 @@ impl Game<'_> {
         for (id, skin, slim) in resolved {
             let skin = skin.filter(|s| !s.starts_with("skins/") || self.again_skin(s));
             if let Some(mob) = self
+                .simulation
                 .mobs
                 .iter_mut()
                 .find(|m| m.id == id && &*m.kind.id == "minecraft:mannequin")
@@ -5472,7 +5548,11 @@ impl Game<'_> {
     fn remote_motion(&mut self, id: i32, velocity: [f64; 3]) {
         self.remote_dragon_motion(id, velocity);
         let v = Vec3::new(velocity[0], velocity[1], velocity[2]);
-        if let Some(m) = self.mob_index.get_mut(&mut self.mobs, id as u32) {
+        if let Some(m) = self
+            .simulation
+            .mob_index
+            .get_mut(&mut self.simulation.mobs, id as u32)
+        {
             // Squid.aiStep derives its body pitch and roll from network motion.
             m.velocity = v;
         } else if let Some(d) = self.dropped.iter_mut().find(|d| d.id == id as u32) {
@@ -5529,6 +5609,7 @@ impl Game<'_> {
     /// Put the copy under the landing spot.
     fn place_ghast_under(&mut self, id: u32, spot: Vec3) {
         let Some(m) = self
+            .simulation
             .mobs
             .iter_mut()
             .find(|m| m.id == id && m.species() == horizon_client::mobs::Species::HappyGhast)
@@ -5569,7 +5650,7 @@ impl Game<'_> {
             .entity
             .as_ref()
             .and_then(|e| {
-                let m = self.mobs.iter().find(|m| m.id == e.id as u32)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == e.id as u32)?;
                 let y = if e.anchor == EYES {
                     m.eye_y()
                 } else {
@@ -5975,7 +6056,8 @@ impl Game<'_> {
             player.spin_targets.clear();
             if player.auto_spin_attack_ticks > 0 {
                 player.spin_targets.extend(
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .filter(|m| !m.removed)
                         .map(|m| (m.id, m.bounds())),
@@ -6191,7 +6273,7 @@ impl Game<'_> {
         let board = &self.score.board;
         let player_team = board.players_team(&r.profile_name);
         let mut push = Vec3::ZERO;
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             let listed = r
                 .level_players
                 .get(&(m.id as i32))
@@ -6268,6 +6350,7 @@ impl Game<'_> {
             ]
         });
         let looks: Vec<_> = self
+            .simulation
             .mobs
             .iter()
             .enumerate()
@@ -6277,6 +6360,7 @@ impl Game<'_> {
             .filter_map(|(i, m)| {
                 let look = match m.ai.target.filter(|_| m.extra.flag) {
                     Some(Who::Mob(id)) => self
+                        .simulation
                         .mobs
                         .iter()
                         .find(|t| t.id == id)
@@ -6287,7 +6371,7 @@ impl Game<'_> {
             })
             .collect();
         for (i, look) in looks {
-            guardian::look_at(&mut self.mobs[i], look);
+            guardian::look_at(&mut self.simulation.mobs[i], look);
         }
     }
     fn tick_remote_entities(&mut self, running: bool) {
@@ -6304,6 +6388,7 @@ impl Game<'_> {
             let w = self.mob_world_base(&[]);
             let players = self.remote.as_ref().map(|r| &r.level_players);
             let fluids = self
+                .simulation
                 .mobs
                 .iter()
                 .map(|m| {
@@ -6312,6 +6397,7 @@ impl Game<'_> {
                 })
                 .collect();
             let rain = self
+                .simulation
                 .mobs
                 .iter()
                 .map(|m| {
@@ -6323,6 +6409,7 @@ impl Game<'_> {
             // cow), one hair below the feet like `Entity.getBlockStateOn`; nothing
             // without rules.
             let standings = self
+                .simulation
                 .mobs
                 .iter()
                 .map(|m| {
@@ -6338,7 +6425,7 @@ impl Game<'_> {
                 .collect();
             (fluids, rain, standings, w.thundering)
         };
-        for ((m, fluids), standing) in self.mobs.iter_mut().zip(fluids).zip(standings) {
+        for ((m, fluids), standing) in self.simulation.mobs.iter_mut().zip(fluids).zip(standings) {
             if let Some(fluids) = fluids {
                 m.fluids = fluids;
             }
@@ -6352,6 +6439,7 @@ impl Game<'_> {
         // What a wither's side heads can look at, by network entity id: the
         // mobs and the player (position and eye height).
         let wither_targets: Vec<(i32, [f64; 3], f64)> = if self
+            .simulation
             .mobs
             .iter()
             .any(|m| m.species() == horizon_client::mobs::Species::Wither)
@@ -6361,7 +6449,8 @@ impl Game<'_> {
                 .as_ref()
                 .zip(self.eye_position())
                 .map(|(r, eye)| (r.entity_id, eye, eye[1]));
-            self.mobs
+            self.simulation
+                .mobs
                 .iter()
                 .map(|m| {
                     (
@@ -6388,7 +6477,8 @@ impl Game<'_> {
                     (feet, [feet[0], feet[1] + eye / 2.0, feet[2]])
                 });
             let others = self.remote.as_ref().into_iter().flat_map(|r| {
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .filter(move |m| m.alive() && r.level_players.contains_key(&(m.id as i32)))
                     .filter(move |m| {
@@ -6416,7 +6506,8 @@ impl Game<'_> {
             .remote
             .as_ref()
             .map(|r| {
-                self.mobs
+                self.simulation
+                    .mobs
                     .iter()
                     .filter(|m| {
                         r.level_players.contains_key(&(m.id as i32)) && m.extra.ints[1] != 0
@@ -6453,7 +6544,7 @@ impl Game<'_> {
         let tab_players = &r.tab_players;
         let mut using = Vec::new();
         let mut mob_fx = Vec::new();
-        for (m, rain) in self.mobs.iter_mut().zip(rain) {
+        for (m, rain) in self.simulation.mobs.iter_mut().zip(rain) {
             let player = players.contains_key(&(m.id as i32));
             if player {
                 // AvatarRenderer.extractRenderState: isSpectator, from the player list.
@@ -7349,7 +7440,11 @@ impl Game<'_> {
                 .find(|c| c.id as i32 == hit.id)
                 .is_some_and(|c| {
                     let ridden = self.riding == Some(c.id)
-                        || self.mobs.iter().any(|m| m.extra.mount == Some(c.id));
+                        || self
+                            .simulation
+                            .mobs
+                            .iter()
+                            .any(|m| m.extra.mount == Some(c.id));
                     c.kind
                         .interact_passes(sneaking, ridden, self.can_use_game_master_blocks())
                 });
@@ -7390,7 +7485,7 @@ impl Game<'_> {
         if let Some((i, distance)) = self.mob_hit()
             && self.before_block(distance)
         {
-            let id = self.mobs[i].id as i32;
+            let id = self.simulation.mobs[i].id as i32;
             self.send(S::Interact(play::Interact {
                 id,
                 hand: hand_id(hand),
@@ -8712,7 +8807,7 @@ impl Game<'_> {
             // Minecraft.startAttack: an item's attack_range must hold the hit.
             if self.held_range_allows(distance) {
                 self.send(S::Attack(play::Attack {
-                    id: self.mobs[i].id as i32,
+                    id: self.simulation.mobs[i].id as i32,
                 }));
                 self.remote_player_attack(i);
                 self.reset_attack_strength();
@@ -8746,7 +8841,7 @@ impl Game<'_> {
         // Java dispatches this through the target's RemotePlayer type. The
         // level_players map is profile bookkeeping and can lag the entity;
         // mobs must stay out because their hurtClient returns false.
-        if self.mobs[mob].kind.id != "minecraft:player" {
+        if self.simulation.mobs[mob].kind.id != "minecraft:player" {
             return;
         }
         // `getAttackStrengthScale(0.5)`: here the ticker is `hand_strength`'s
@@ -9795,7 +9890,7 @@ impl Game<'_> {
             // Where the other players' entities are (harnesses check movement).
             // What the other players hold and wear, as this client draws them.
             "player_equipment": self
-                .mobs
+                .simulation.mobs
                 .iter()
                 .filter(|m| r.level_players.contains_key(&(m.id as i32)))
                 .map(|m| {
@@ -9819,14 +9914,14 @@ impl Game<'_> {
                 .collect::<Vec<_>>(),
             // The other players this client draws dead (lying down, after EntityEvent DEATH).
             "dead_players": self
-                .mobs
+                .simulation.mobs
                 .iter()
                 .filter(|m| r.level_players.contains_key(&(m.id as i32)) && !m.alive())
                 .map(|m| m.id)
                 .collect::<Vec<_>>(),
             // The other players this client draws lying in a bed (SLEEPING_POS).
             "lying_players": self
-                .mobs
+                .simulation.mobs
                 .iter()
                 .filter(|m| r.level_players.contains_key(&(m.id as i32)) && m.extra.ints[1] != 0)
                 .map(|m| m.id)

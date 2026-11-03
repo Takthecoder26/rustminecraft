@@ -18,7 +18,7 @@ impl Game<'_> {
         }
         let mut events = Vec::new();
         let random = self.particles.level_random();
-        for m in self.mobs.iter_mut().filter(|m| !m.removed) {
+        for m in self.simulation.mobs.iter_mut().filter(|m| !m.removed) {
             ambient::client_ai_step(m, &mut events);
             ambient::client_particles(m, random, &mut events);
         }
@@ -67,7 +67,7 @@ impl Game<'_> {
         // IronGolem.canSpawnSprintParticle replaces the sprinting test: one
         // tick in five while it moves at all, in water or not, drawn from the
         // golem's own random as its client copy's Entity.baseTick does.
-        for m in self.mobs.iter_mut() {
+        for m in self.simulation.mobs.iter_mut() {
             if &*m.kind.id != "minecraft:iron_golem" {
                 continue;
             }
@@ -78,7 +78,7 @@ impl Game<'_> {
                 runners.push((m.position, movement, None, f64::from(m.width())));
             }
         }
-        for m in self.mobs.iter() {
+        for m in self.simulation.mobs.iter() {
             // Another player's fluids aren't known here: none where they stand.
             let feet = [
                 m.position.x.floor() as i32,
@@ -174,7 +174,7 @@ impl Game<'_> {
                 invisible,
             );
         }
-        for m in self.mobs.iter() {
+        for m in self.simulation.mobs.iter() {
             if !m.alive() {
                 continue;
             }

@@ -151,7 +151,7 @@ impl Game<'_> {
                 "mobs_by_type": by_type.into_iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             })
         };
-        let mut current = here(self.dim, &self.world, &self.mobs);
+        let mut current = here(self.dim, &self.world, &self.simulation.mobs);
         current["item_entities"] = json!(self.dropped.len());
         current["experience_orbs"] = json!(self.orbs.len());
         current["projectiles"] = json!(self.creatures.projectiles.len());

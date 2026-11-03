@@ -65,7 +65,7 @@ impl Game<'_> {
         ) else {
             return;
         };
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         if !loot.has_table(&name) {
@@ -99,7 +99,7 @@ impl Game<'_> {
             let Some(slot) = slot.filter(|s| !inserted.contains(s)) else {
                 continue;
             };
-            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 equip_stack(m, slot, stack, chances[slot]);
             }
             inserted.push(slot);
@@ -109,7 +109,7 @@ impl Game<'_> {
     /// four and each piece of armour one time in two, scaled by the local
     /// difficulty, enchanted as if at an enchanting table of cost 5 to 22.
     pub(super) fn enchant_spawn_equipment(&mut self, id: u32) {
-        let Some(m) = self.mobs.iter().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) else {
             return;
         };
         let species = m.species();
@@ -131,15 +131,20 @@ impl Game<'_> {
     /// `Zombie` / `AbstractSkeleton` halloween pumpkin after spawn gear.
     pub(super) fn halloween_spawn_head(&mut self, id: u32) {
         let halloween = horizon_client::mobs::finalize::is_halloween();
-        let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+        let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) else {
             return;
         };
-        let mut random = self.mobs[i].random.clone();
-        horizon_client::mobs::finalize::halloween_head(&mut self.mobs[i], &mut random, halloween);
-        self.mobs[i].random = random;
+        let mut random = self.simulation.mobs[i].random.clone();
+        horizon_client::mobs::finalize::halloween_head(
+            &mut self.simulation.mobs[i],
+            &mut random,
+            halloween,
+        );
+        self.simulation.mobs[i].random = random;
     }
     fn enchant_slot(&mut self, id: u32, slot: usize, chance: f32, special: f32) {
         let Some(item) = self
+            .simulation
             .mobs
             .iter()
             .find(|m| m.id == id)
@@ -162,7 +167,7 @@ impl Game<'_> {
         let e = &world_stations!(self).enchantments;
         let pool = e.tag("minecraft:on_mob_spawn_equipment");
         let picked = e.select(world_items!(self), random, item, cost, pool);
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
             for (enchantment, level) in picked {
                 gear::upgrade(m, slot, &enchantment, level);
             }
@@ -170,7 +175,7 @@ impl Game<'_> {
     }
     /// A `SingleEnchantment` provider on the item in `slot`, when it is `item`.
     fn enchant_single(&mut self, id: u32, slot: usize, enchantment: &str, level: u32, item: &str) {
-        if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+        if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
             && slot_item(m, slot).as_deref() == Some(item)
         {
             gear::upgrade(m, slot, enchantment, level);
@@ -180,7 +185,7 @@ impl Game<'_> {
     /// `Pillager` / `Vindicator.applyRaidBuffs`: Quick Charge on a fresh
     /// crossbow after waves 3 and 5, Sharpness on a fresh axe.
     pub(super) fn apply_raid_buffs(&mut self, id: u32, kind: RaiderType, wave: i32, odds: f32) {
-        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) else {
+        let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) else {
             return;
         };
         let enchant = m.random.next_float() <= odds;

@@ -594,7 +594,7 @@ impl Game<'_> {
             let eye = self.eye_position()?;
             return Some(Vec3::new(eye[0], eye[1], eye[2]));
         }
-        let m = self.mobs.iter().find(|m| m.id == id)?;
+        let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
         Some(Vec3::new(
             m.position.x,
             m.position.y + m.eye_height(),
@@ -728,7 +728,7 @@ impl Game<'_> {
                 if me == Some(target) {
                     continue;
                 }
-                if let Some(m) = self.mobs.iter().find(|m| m.id == target) {
+                if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == target) {
                     // Another player's motion is not known here: its step.
                     r.velocity = Vec3::new(
                         m.position.x - r.previous.x,

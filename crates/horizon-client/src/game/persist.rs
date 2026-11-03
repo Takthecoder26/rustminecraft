@@ -832,14 +832,14 @@ impl Game<'_> {
         }
         let id = m.id;
         self.remember(id, uuid, tag);
-        self.mobs.push(m);
+        self.simulation.mobs.push(m);
         if finalize {
             self.enchant_spawn_equipment(id);
             self.halloween_spawn_head(id);
         }
         for rider in riders {
             if let Some(r) = self.load_mob(rider, Some(id))
-                && let Some(v) = self.mobs.iter_mut().find(|m| m.id == id)
+                && let Some(v) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
             {
                 v.extra.rider = Some(r);
             }
@@ -872,8 +872,10 @@ impl Game<'_> {
     /// The mobs riding entity `id` under `tag`'s `Passengers`, after the
     /// passengers it kept from loading.
     pub(super) fn put_mob_passengers(&mut self, tag: &mut Tag, id: u32) {
-        let riders: Vec<usize> = (0..self.mobs.len())
-            .filter(|&j| self.mobs[j].extra.mount == Some(id) && self.mobs[j].alive())
+        let riders: Vec<usize> = (0..self.simulation.mobs.len())
+            .filter(|&j| {
+                self.simulation.mobs[j].extra.mount == Some(id) && self.simulation.mobs[j].alive()
+            })
             .collect();
         let riders: Vec<Tag> = riders.into_iter().map(|j| self.mob_tree_nbt(j)).collect();
         add_passengers(tag, riders);
@@ -938,10 +940,10 @@ impl Game<'_> {
     /// The root of a stack of riders (`Entity.getRootVehicle`).
     fn mob_root(&self, mut i: usize) -> usize {
         for _ in 0..8 {
-            let Some(v) = self.mobs[i].extra.mount else {
+            let Some(v) = self.simulation.mobs[i].extra.mount else {
                 break;
             };
-            let Some(j) = self.mobs.iter().position(|m| m.id == v) else {
+            let Some(j) = self.simulation.mobs.iter().position(|m| m.id == v) else {
                 break;
             };
             i = j;
@@ -951,15 +953,21 @@ impl Game<'_> {
     /// `Entity.getVehicle` of entity `id`: the mob, boat or minecart a mob
     /// rides (only a mob rides another entity here).
     fn vehicle_of(&self, id: u32) -> Option<u32> {
-        let v = self.mobs.iter().find(|m| m.id == id)?.extra.mount?;
-        let there = self.mobs.iter().any(|m| m.id == v)
+        let v = self
+            .simulation
+            .mobs
+            .iter()
+            .find(|m| m.id == id)?
+            .extra
+            .mount?;
+        let there = self.simulation.mobs.iter().any(|m| m.id == v)
             || self.boats.iter().any(|b| b.id == v)
             || self.carts.iter().any(|c| c.id == v);
         there.then_some(v)
     }
     /// The root vehicle `root` with its passengers (`Entity.save`).
     fn vehicle_tree_nbt(&mut self, root: u32) -> Option<Tag> {
-        if let Some(i) = self.mobs.iter().position(|m| m.id == root) {
+        if let Some(i) = self.simulation.mobs.iter().position(|m| m.id == root) {
             return Some(self.mob_tree_nbt(i));
         }
         if self.boats.iter().any(|b| b.id == root) {
@@ -1008,13 +1016,14 @@ impl Game<'_> {
     pub(super) fn remove_vehicle_tree(&mut self, root: u32) {
         // The mobs `put_mob_passengers` saves under each vehicle of the tree.
         let mounts: Vec<(u32, Option<u32>)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.alive())
             .map(|m| (m.id, m.extra.mount))
             .collect();
         let gone = vehicle_tree(root, &mounts);
-        self.mobs.retain(|m| !gone.contains(&m.id));
+        self.simulation.mobs.retain(|m| !gone.contains(&m.id));
         for &id in &gone {
             self.release_vehicle_container(id);
         }
@@ -1032,7 +1041,7 @@ impl Game<'_> {
             .iter()
             .find(|(_, u)| **u == uuid)
             .map(|(id, _)| id)?;
-        let there = self.mobs.iter().any(|m| m.id == id && m.alive())
+        let there = self.simulation.mobs.iter().any(|m| m.id == id && m.alive())
             || self.boats.iter().any(|b| b.id == id)
             || self.carts.iter().any(|c| c.id == id);
         there.then_some(id)
@@ -1102,39 +1111,41 @@ impl Game<'_> {
     }
     /// A mob's entity tag with the mobs riding it under `Passengers`.
     pub(super) fn mob_tree_nbt(&mut self, i: usize) -> Tag {
-        let id = self.mobs[i].id;
+        let id = self.simulation.mobs[i].id;
         let uuid = self.uuid_for(id);
         // `NeutralMob.addPersistentAngerSaveData`: the anger ends at an
         // absolute game time, so it goes on while the chunk is unloaded, and
         // the target is the entity the mob is angry at.
-        let anger = self.mobs[i].extra.anger;
-        self.mobs[i].extra.anger_end = if anger > 0 {
+        let anger = self.simulation.mobs[i].extra.anger;
+        self.simulation.mobs[i].extra.anger_end = if anger > 0 {
             self.world.game_time + i64::from(anger)
         } else {
             -1
         };
-        self.mobs[i].extra.angry_at = if anger > 0 {
+        self.simulation.mobs[i].extra.angry_at = if anger > 0 {
             // A wolf keeps its anger's target itself, also once the target
             // is gone (`tame::update_persistent_anger`).
-            if self.mobs[i].species() == horizon_client::mobs::Species::Wolf {
-                self.mobs[i].extra.angry_at
+            if self.simulation.mobs[i].species() == horizon_client::mobs::Species::Wolf {
+                self.simulation.mobs[i].extra.angry_at
             } else {
-                self.mobs[i].ai.target
+                self.simulation.mobs[i].ai.target
             }
         } else {
             None
         };
         let mut tag = entity_nbt::mob_to_nbt(
-            &self.mobs[i],
+            &self.simulation.mobs[i],
             uuid,
             self.persist.raw.get(&id),
             Some(self.pack.assets.registry),
         );
-        if horizon_client::mobs::camel::is_camel(self.mobs[i].species())
+        if horizon_client::mobs::camel::is_camel(self.simulation.mobs[i].species())
             && let Tag::Compound(c) = &mut tag
         {
-            let tick =
-                horizon_client::mobs::camel::synced_pose_tick(&self.mobs[i], self.world.game_time);
+            let tick = horizon_client::mobs::camel::synced_pose_tick(
+                &self.simulation.mobs[i],
+                self.world.game_time,
+            );
             c.insert("LastPoseTick".into(), Tag::Long(tick));
         }
         self.write_leash(&mut tag, i);
@@ -1231,7 +1242,7 @@ impl Game<'_> {
         self.persist
             .uuids
             .iter()
-            .find(|(id, u)| **u == uuid && self.mobs.iter().any(|m| m.id == **id))
+            .find(|(id, u)| **u == uuid && self.simulation.mobs.iter().any(|m| m.id == **id))
             .map(|(id, _)| *id)
     }
     /// A mob's UUID, made up for new ones.
@@ -1447,18 +1458,18 @@ impl Game<'_> {
                 keep
             });
             // Riders leave with their root vehicle, a boat's with the boat.
-            let leaving: HashSet<u32> = (0..self.mobs.len())
+            let leaving: HashSet<u32> = (0..self.simulation.mobs.len())
                 .filter(|&i| {
                     let r = self.mob_root(i);
-                    match self.mobs[r].extra.mount {
+                    match self.simulation.mobs[r].extra.mount {
                         Some(v) if removed.contains(&v) => true,
                         Some(v) if self.boats.iter().any(|b| b.id == v) => false,
-                        _ => gone(self.mobs[r].position),
+                        _ => gone(self.simulation.mobs[r].position),
                     }
                 })
-                .map(|i| self.mobs[i].id)
+                .map(|i| self.simulation.mobs[i].id)
                 .collect();
-            self.mobs.retain(|m| {
+            self.simulation.mobs.retain(|m| {
                 let keep = !leaving.contains(&m.id);
                 if !keep {
                     removed.push(m.id);
@@ -1570,7 +1581,7 @@ impl Game<'_> {
         i: usize,
         keys: &HashSet<ChunkKey>,
     ) -> Option<(ChunkKey, Tag)> {
-        let m = &self.mobs[i];
+        let m = &self.simulation.mobs[i];
         let saves = self.mob_root(i) == i
             && m.extra.mount.is_none_or(|v| {
                 self.boats.iter().all(|b| b.id != v) && self.carts.iter().all(|c| c.id != v)
@@ -1578,7 +1589,12 @@ impl Game<'_> {
             && keys.contains(&chunk_of(m.position))
             && m.alive()
             && !m.removed;
-        saves.then(|| (chunk_of(self.mobs[i].position), self.mob_tree_nbt(i)))
+        saves.then(|| {
+            (
+                chunk_of(self.simulation.mobs[i].position),
+                self.mob_tree_nbt(i),
+            )
+        })
     }
     pub(super) fn save_item(
         &mut self,

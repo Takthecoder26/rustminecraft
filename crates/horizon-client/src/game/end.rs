@@ -1351,6 +1351,7 @@ impl Game<'_> {
             .map(|e| (e.id, e.position, 0.25, 0.25))
             .collect();
         let mobs: Vec<(u32, Vec3, f32, f32)> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| self.mob_can_use_portal(m))
@@ -1421,7 +1422,12 @@ impl Game<'_> {
             .dropped
             .iter()
             .map(|e| (e.id, true))
-            .chain(self.mobs.iter().map(|m| (m.id, self.mob_can_use_portal(m))))
+            .chain(
+                self.simulation
+                    .mobs
+                    .iter()
+                    .map(|m| (m.id, self.mob_can_use_portal(m))),
+            )
             .chain(
                 self.creatures
                     .projectiles
@@ -1471,7 +1477,7 @@ impl Game<'_> {
             self.native_leave_skip(id);
             self.detach_entity(id);
             tag
-        } else if let Some(i) = self.mobs.iter().position(|m| m.id == id) {
+        } else if let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) {
             let mut tag = self.mob_tree_nbt(i);
             // Entity.removeAfterChangingDimensions drops the leash.
             if let Tag::Compound(c) = &mut tag {
@@ -1483,14 +1489,15 @@ impl Game<'_> {
             while k < gone.len() {
                 let v = gone[k];
                 gone.extend(
-                    self.mobs
+                    self.simulation
+                        .mobs
                         .iter()
                         .filter(|m| m.extra.mount == Some(v))
                         .map(|m| m.id),
                 );
                 k += 1;
             }
-            self.mobs.retain(|m| !gone.contains(&m.id));
+            self.simulation.mobs.retain(|m| !gone.contains(&m.id));
             for g in gone {
                 self.native_leave_skip(g);
                 self.detach_entity(g);
