@@ -856,6 +856,10 @@ pub struct Entities {
     /// One entity's packets and their bodies, kept between entities.
     packets: Vec<play::Clientbound>,
     bodies: Vec<Vec<u8>>,
+    /// Reused scratch for indirect passenger ranges.
+    range_scratch: Vec<i32>,
+    /// Reused scratch for removed entity ids per viewer.
+    removed: Vec<i32>,
 }
 
 /// The client sees the entity this tick, and already tracked it.
@@ -958,12 +962,13 @@ impl Entities {
                 continue;
             };
             let (index, mut range) = (own.index, own.range);
-            let mut pending = passengers.clone();
-            while let Some(id) = pending.pop() {
+            self.range_scratch.clear();
+            self.range_scratch.extend_from_slice(passengers);
+            while let Some(id) = self.range_scratch.pop() {
                 if let Some(s) = self.states.get(&id).filter(|s| s.seen == now) {
                     range = range.max(s.range);
                 }
-                pending.extend_from_slice(riding.passengers(id));
+                self.range_scratch.extend_from_slice(riding.passengers(id));
             }
             self.probes[index].range = self
                 .range_percent
@@ -1061,7 +1066,7 @@ impl Entities {
                 }
             }
             // Usually the client still sees all it tracks.
-            let mut removed = Vec::new();
+            self.removed.clear();
             if kept != v.tracker.seen.len() {
                 let states = &self.states;
                 let Tracker { seen, events } = &mut *v.tracker;
@@ -1071,7 +1076,7 @@ impl Entities {
                         if let (Some(gone), Some(s)) = (v.gone.as_deref_mut(), other) {
                             gone.push(s.base);
                         }
-                        removed.push(*id);
+                        self.removed.push(*id);
                         events.push(TrackEvent {
                             start: false,
                             entity: *id,
@@ -1081,7 +1086,8 @@ impl Entities {
                     }
                 });
             }
-            if !removed.is_empty() {
+            if !self.removed.is_empty() {
+                let removed = std::mem::take(&mut self.removed);
                 v.out.push(
                     play::Clientbound::RemoveEntities(play::RemoveEntities { ids: removed })
                         .encode(),
