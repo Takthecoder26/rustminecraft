@@ -19,6 +19,13 @@ pub struct Timer {
 
 impl Timer {
     pub fn new(ticks_per_second: f32, current_ms: i64) -> Self {
+        // Guard against a zero or non-finite rate so a bad timer never produces
+        // infinities or NaNs that then poison every tick count.
+        let ms_per_tick = if ticks_per_second.is_finite() && ticks_per_second > 0.0 {
+            1000.0 / ticks_per_second
+        } else {
+            50.0
+        };
         Self {
             delta_ticks: 0.0,
             delta_tick_residual: 0.0,
@@ -26,7 +33,7 @@ impl Timer {
             paused_delta_tick_residual: 0.0,
             last_ms: current_ms,
             last_ui_ms: current_ms,
-            ms_per_tick: 1000.0 / ticks_per_second,
+            ms_per_tick,
             paused: false,
             frozen: false,
         }
@@ -40,7 +47,10 @@ impl Timer {
         current_ms: i64,
         target_mspt: impl FnOnce(f32) -> f32,
     ) -> i32 {
-        self.delta_ticks = (current_ms - self.last_ms) as f32 / target_mspt(self.ms_per_tick);
+        // A clock that jumps backwards must not repay the backlog as negative
+        // ticks: clamp the elapsed time to zero.
+        let elapsed_ms = current_ms.saturating_sub(self.last_ms).max(0);
+        self.delta_ticks = elapsed_ms as f32 / target_mspt(self.ms_per_tick);
         self.last_ms = current_ms;
         self.delta_tick_residual += self.delta_ticks;
         let ticks = self.delta_tick_residual as i32;
@@ -50,7 +60,8 @@ impl Timer {
 
     /// `advanceRealTime`.
     pub fn advance_real_time(&mut self, current_ms: i64) {
-        self.realtime_delta_ticks = (current_ms - self.last_ui_ms) as f32 / self.ms_per_tick;
+        let elapsed_ms = current_ms.saturating_sub(self.last_ui_ms).max(0);
+        self.realtime_delta_ticks = elapsed_ms as f32 / self.ms_per_tick;
         self.last_ui_ms = current_ms;
     }
 
@@ -139,7 +150,7 @@ impl TickRateManager {
         self.tickrate
     }
     pub fn milliseconds_per_tick(&self) -> f32 {
-        self.nanoseconds_per_tick as f32 / NANOSECONDS_PER_MILLISECOND as f32
+        self.nanoseconds_per_tick.max(1) as f32 / NANOSECONDS_PER_MILLISECOND as f32
     }
     pub fn nanoseconds_per_tick(&self) -> i64 {
         self.nanoseconds_per_tick
@@ -342,7 +353,7 @@ impl FixedStep {
         }
     }
     fn now_ms(&self) -> i64 {
-        self.now.as_millis() as i64
+        self.now.as_millis().min(i64::MAX as u128) as i64
     }
     fn now_ns(&self) -> i64 {
         self.now.as_nanos() as i64
