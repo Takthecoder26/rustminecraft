@@ -314,7 +314,7 @@ impl IndirectDispatch {
         let mut words = value.split_whitespace();
         let buffer = words.next()?.parse().ok()?;
         let offset: u64 = words.next()?.parse().ok()?;
-        if words.next().is_some() || !offset.is_multiple_of(4) || offset.checked_add(12).is_none() {
+        if words.next().is_some() || offset % 4 != 0 || offset.checked_add(12).is_none() {
             return None;
         }
         Some(Self { buffer, offset })
