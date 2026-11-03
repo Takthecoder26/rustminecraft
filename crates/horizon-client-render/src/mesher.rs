@@ -1229,17 +1229,18 @@ impl<'a> Tints<'a> {
             span(base_y, base_y + 15),
             span(cz * 16 - r, cz * 16 + 15 + r),
         );
-        let first = Self::quart_biome(
-            self.region,
-            self.plains,
-            [cx, cz],
-            [*xs.start(), *ys.start(), *zs.start()],
-        );
-        let uniform = ys
-            .flat_map(|y| zs.clone().map(move |z| (y, z)))
-            .flat_map(|(y, z)| xs.clone().map(move |x| [x, y, z]))
-            .all(|q| Self::quart_biome(self.region, self.plains, [cx, cz], q) == first)
-            .then_some(first);
+        let xs: Vec<i32> = xs.collect();
+        let ys: Vec<i32> = ys.collect();
+        let zs: Vec<i32> = zs.collect();
+        let first = Self::quart_biome(self.region, self.plains, [cx, cz], [xs[0], ys[0], zs[0]]);
+        let uniform = if ys
+            .iter()
+            .all(|&y| zs.iter().all(|&z| xs.iter().all(|&x| Self::quart_biome(self.region, self.plains, [cx, cz], [x, y, z]) == first)))
+        {
+            Some(first)
+        } else {
+            None
+        };
         self.uniform = Some(uniform);
         uniform
     }
