@@ -158,13 +158,18 @@ impl ChunkMap {
         if self.fresh.is_empty() {
             Vec::new()
         } else if self.fresh.len() == 1 {
-            self.fresh.iter().copied().collect()
+            let mut out = Vec::with_capacity(1);
+            out.extend(self.fresh.iter().copied());
+            out
         } else {
-            self.columns
-                .keys()
-                .filter(|k| self.fresh.contains(k))
-                .copied()
-                .collect()
+            let mut out = Vec::with_capacity(self.fresh.len());
+            out.extend(
+                self.columns
+                    .keys()
+                    .filter(|k| self.fresh.contains(k))
+                    .copied(),
+            );
+            out
         }
     }
     pub fn remove_fresh(&mut self, key: &Key) {

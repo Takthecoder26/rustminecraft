@@ -468,6 +468,7 @@ impl Section {
             {
                 *container = PalettedContainer::new(container.strategy(), v);
             }
+            container.shrink_to_fit();
         }
         // Only the kind of light that varies is kept.
         if matches!(self.light, Light::Full(_)) {
@@ -558,11 +559,15 @@ impl Chunk {
         let mut one = [Arc::new(Section::default())];
         share_uniform(&mut one);
         let [empty] = one;
+        let mut sections = Vec::with_capacity(layout.sections());
+        for _ in 0..layout.sections() {
+            sections.push(empty.clone());
+        }
         Self {
             x,
             z,
             min_y: layout.min_y(),
-            sections: (0..layout.sections()).map(|_| empty.clone()).collect(),
+            sections,
             surface: OnceLock::new(),
             motion_blocking: OnceLock::new(),
             lit: false,

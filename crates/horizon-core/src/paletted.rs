@@ -714,6 +714,15 @@ impl PalettedContainer {
         (0..entries).any(|i| matching[self.raw(i)])
     }
     /// Heap bytes held by the palette and the storage.
+    /// Reclaim any spare capacity in the palette and storage buffers
+    /// left by edits and growth, keeping the represented values unchanged.
+    pub fn shrink_to_fit(&mut self) {
+        if let Palette::List(palette) = &mut self.palette {
+            palette.shrink_to_fit();
+        }
+        self.words.shrink_to_fit();
+    }
+
     pub fn heap_bytes(&self) -> usize {
         self.words.capacity() * 8
             + match &self.palette {
