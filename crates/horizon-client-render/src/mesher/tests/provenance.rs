@@ -100,6 +100,7 @@ fn shader_provenance_comes_from_model_and_fluid_owners() {
                 assets.registry.state(*id).is_some_and(|s| {
                     s.name == name
                         && (key.is_empty() || s.properties.get(key).is_some_and(|v| v == value))
+                        && (fluid || s.properties.get("waterlogged").is_none_or(|v| v == "false"))
                 })
             })
             .unwrap();
