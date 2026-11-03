@@ -126,15 +126,19 @@ fn binary_initialization_reaches_gpu_and_survives_resize_until_reload() {
             .slice(..)
             .get_mapped_range()
             .unwrap()
-            .chunks_exact(4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
             .collect();
         read.unmap();
         actual
     };
     let original: Vec<_> = SEED
-        .chunks_exact(4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
         .chain([0; 4])
         .collect();
     assert_eq!(run(&mut buffers, [2, 2]), original);
