@@ -2,7 +2,9 @@ use super::*;
 
 /// Exercise the production input body, raw vertex/sidecar addressing and bind layout.
 /// The first live quad begins at arena vertex 256, after an unused allocation.
+/// Run explicitly on renderer changes: `cargo test -p horizon-client-render --lib provenance -- --include-ignored --test-threads=1`.
 #[test]
+#[ignore = "requires a Vulkan/Metal/DX12 adapter"]
 fn terrain_provenance_reads_the_bound_arena_records() {
     render_probe(flat_vertex);
 }

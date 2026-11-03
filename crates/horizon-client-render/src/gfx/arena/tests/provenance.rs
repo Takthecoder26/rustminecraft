@@ -1,7 +1,9 @@
 use super::tests::{alloc, device, read};
 use super::*;
 
+/// Run explicitly on renderer changes: `cargo test -p horizon-client-render --lib provenance -- --include-ignored --test-threads=1`.
 #[test]
+#[ignore = "requires a Vulkan/Metal/DX12 adapter"]
 fn optional_quad_provenance_survives_grow_move_trim_and_toggle() {
     let (device, queue) = device().expect("provenance regression needs a GPU adapter");
     let mut arena = Arena::new(&device, 24, GRAIN, true);

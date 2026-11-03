@@ -1,6 +1,8 @@
 use super::*;
 
+/// Run explicitly on renderer changes: `cargo test -p horizon-client-render --lib provenance -- --include-ignored --test-threads=1`.
 #[test]
+#[ignore = "requires a Vulkan/Metal/DX12 adapter"]
 fn emulated_geometry_reads_provenance_of_each_pulled_source_vertex() {
     super::provenance_tests::render_probe(|inputs| {
         let pp = |code: &str| {
