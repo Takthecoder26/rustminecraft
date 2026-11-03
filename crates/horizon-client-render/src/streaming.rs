@@ -263,8 +263,8 @@ enum Job {
     /// their proto chunks.
     Decorate(i32, i32, Box<[Proto; 9]>, Vec<(usize, Chunk)>),
     Finish(Proto),
-    Light(i32, i32, Box<Region>, u64, bool),
-    Mesh(i32, i32, i32, Box<Region>, u64, MeshSettings),
+    Light(i32, i32, Arc<Region>, u64, bool),
+    Mesh(i32, i32, i32, Arc<Region>, u64, MeshSettings),
     /// Proto chunks checked out to be saved (`ChunkGenerator::save_protos`),
     /// off the main thread like vanilla's IOWorker.
     Save(Vec<((i32, i32), Proto)>),
@@ -1311,7 +1311,7 @@ impl Streaming {
     /// A proto neighbour without its view yet is checked out to a worker,
     /// which builds the view off the server thread (`Job::LightView`); the
     /// region is asked for again once it is back.
-    fn light_region(&mut self, world: &World, x: i32, z: i32) -> Option<Box<Region>> {
+    fn light_region(&mut self, world: &World, x: i32, z: i32) -> Option<Arc<Region>> {
         let mut region: Region = Default::default();
         let mut complete = true;
         for dz in 0..3 {
@@ -1334,7 +1334,7 @@ impl Streaming {
                 };
             }
         }
-        complete.then(|| Box::new(region))
+        complete.then(|| Arc::new(region))
     }
     /// A proto chunk back from its light view: the view waits in
     /// `light_views` for the light jobs that asked for it.
@@ -1360,7 +1360,7 @@ impl Streaming {
             z,
         )
     }
-    fn region(world: &World, x: i32, z: i32) -> Option<Box<Region>> {
+    fn region(world: &World, x: i32, z: i32) -> Option<Arc<Region>> {
         let mut region: Region = Default::default();
         for dz in 0..3 {
             for dx in 0..3 {
@@ -1372,7 +1372,7 @@ impl Streaming {
                 );
             }
         }
-        Some(Box::new(region))
+        Some(Arc::new(region))
     }
     pub fn is_lit(&self, x: i32, z: i32) -> bool {
         self.lit.contains(&(x, z))
