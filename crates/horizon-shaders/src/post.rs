@@ -966,6 +966,15 @@ impl Loader<'_> {
         ) {
             return None;
         }
+        if ["tcs", "tes"]
+            .iter()
+            .any(|ext| self.pack.exists(&path(ext)))
+        {
+            self.post.notes.push(format!(
+                "{name}: uses tessellation stages, which are not supported yet; skipped"
+            ));
+            return None;
+        }
         if self.pack.exists(&path("gsh")) {
             let Some(inputs) = self.geometry.clone() else {
                 self.post.notes.push(format!(
