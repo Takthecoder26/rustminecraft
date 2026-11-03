@@ -1,7 +1,7 @@
-//! Object-like macros: the ones packs test in `#if` lines and use inside property values
-//! (spec 1.5, 1.5.1). The GLSL preprocessor's function-like macros are not needed here.
+//! Object-like and function-like macros for GLSL preprocessing, `#if` expressions and property
+//! values (spec 1.5, 1.5.1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// The Iris feature flags (`iris.features.*`) Horizon has. `BLOCK_EMISSION_ATTRIBUTE`: terrain's
 /// `at_midBlock.w` is the light its block gives. `SEPARATE_HARDWARE_SAMPLERS` (ShaderDoc,
@@ -190,7 +190,8 @@ impl Macros {
 
     /// Whether `text` calls a function-like macro whose arguments go on past its end.
     pub(crate) fn unfinished_call(&self, text: &str) -> bool {
-        let tokens = lex(text);
+        let expanded = self.expand(text);
+        let tokens = lex(&expanded);
         tokens.iter().enumerate().any(|(i, t)| {
             self.0.get(*t).is_some_and(|m| m.params.is_some())
                 && tokens[i + 1..]
@@ -205,50 +206,64 @@ impl Macros {
     /// expansion, so `A` defined as `A + 1` stops. Function-like macros take their arguments
     /// (expanded first, raw beside `##`, which pastes) when a `(` follows their name.
     pub fn expand(&self, text: &str) -> String {
-        self.expand_hiding(text, &mut Vec::new())
+        self.expand_tokens(expansion_tokens(text))
+            .into_iter()
+            .map(|t| t.text)
+            .collect()
     }
 
-    fn expand_hiding<'a>(&'a self, text: &str, hidden: &mut Vec<&'a str>) -> String {
-        let mut out = String::with_capacity(text.len());
-        let tokens = lex(text);
-        let mut i = 0;
-        while i < tokens.len() {
-            let word = tokens[i];
-            i += 1;
-            let Some((name, m)) = self.0.get_key_value(word) else {
-                out.push_str(word);
+    /// Rescan replacements in the same stream as the remaining input. Suppression belongs to
+    /// each token, rather than the whole recursive expansion: an alias's following arguments
+    /// can contain a fresh invocation of that alias (GLSL 4.40, 3.3; C++ macro rescanning).
+    fn expand_tokens<'a>(&'a self, input: Vec<ExpansionToken<'a>>) -> Vec<ExpansionToken<'a>> {
+        let mut pending: VecDeque<_> = input.into();
+        let mut out = Vec::new();
+        while let Some(word) = pending.pop_front() {
+            let Some((name, m)) = self.0.get_key_value(&word.text) else {
+                out.push(word);
                 continue;
             };
-            if hidden.contains(&name.as_str()) {
-                out.push_str(word);
+            if word.hidden.contains(&name.as_str()) {
+                out.push(word);
                 continue;
             }
-            let body = match &m.params {
-                None => m.body.clone(),
+            let (mut replacement, mut hidden) = match &m.params {
+                None => (expansion_tokens(&m.body), word.hidden),
                 Some(params) => {
-                    let Some((args, next)) = arguments(&tokens, i) else {
-                        out.push_str(word);
+                    let Some(call) = expansion_arguments(&pending) else {
+                        out.push(word);
                         continue;
                     };
-                    i = next;
-                    self.substitute(params, &args, &m.body, hidden)
+                    pending.drain(..call.consumed);
+                    // A function invocation spans its name and closing parenthesis. Only
+                    // suppression shared by both ends carries into the replacement.
+                    let hidden = word
+                        .hidden
+                        .into_iter()
+                        .filter(|n| call.hidden.contains(n))
+                        .collect();
+                    (self.substitute_tokens(params, &call.args, &m.body), hidden)
                 }
             };
-            hidden.push(name);
-            out.push_str(&self.expand_hiding(&body, hidden));
-            hidden.pop();
+            hidden.push(name.as_str());
+            for token in &mut replacement {
+                for &name in &hidden {
+                    if !token.hidden.contains(&name) {
+                        token.hidden.push(name);
+                    }
+                }
+            }
+            pending.extendleft(replacement.into_iter().rev());
         }
         out
     }
 
-    /// A function-like macro's body with its parameters replaced.
-    fn substitute<'a>(
+    fn substitute_tokens<'a>(
         &'a self,
         params: &[String],
-        args: &[String],
+        args: &[Vec<ExpansionToken<'a>>],
         body: &str,
-        hidden: &mut Vec<&'a str>,
-    ) -> String {
+    ) -> Vec<ExpansionToken<'a>> {
         let tokens = lex(body);
         let pasted = |at: usize, step: isize| {
             let mut j = at as isize + step;
@@ -257,27 +272,134 @@ impl Macros {
             }
             (0..tokens.len() as isize).contains(&j) && tokens[j as usize] == "##"
         };
-        let mut out = String::new();
+        let mut out = Vec::new();
         for (at, token) in tokens.iter().enumerate() {
-            match params.iter().position(|p| p == token) {
-                Some(k) => {
-                    let arg = args.get(k).map_or("", |a| a.trim());
-                    if pasted(at, -1) || pasted(at, 1) {
-                        out.push_str(arg);
+            if let Some(k) = params.iter().position(|p| p == token) {
+                let arg = args.get(k).map_or(&[][..], Vec::as_slice);
+                let start = arg
+                    .iter()
+                    .position(|t| !t.text.trim().is_empty())
+                    .unwrap_or(arg.len());
+                let end = arg
+                    .iter()
+                    .rposition(|t| !t.text.trim().is_empty())
+                    .map_or(start, |i| i + 1);
+                let arg = arg[start..end].to_vec();
+                if pasted(at, -1) || pasted(at, 1) {
+                    // An empty pasted argument is a placemarker, not an absent operand.
+                    out.extend(if arg.is_empty() {
+                        expansion_tokens("")
                     } else {
-                        out.push_str(&self.expand_hiding(arg, hidden));
-                    }
+                        arg
+                    });
+                } else {
+                    out.extend(self.expand_tokens(arg));
                 }
-                None => out.push_str(token),
+            } else {
+                out.push(ExpansionToken {
+                    text: token.to_string(),
+                    hidden: Vec::new(),
+                });
             }
         }
-        // `a ## b` → `ab`.
-        let mut joined = String::with_capacity(out.len());
-        for (k, part) in out.split("##").enumerate() {
-            joined.push_str(if k == 0 { part.trim_end() } else { part.trim() });
-        }
-        if out.contains("##") { joined } else { out }
+        paste_expansion_tokens(out)
     }
+}
+
+/// Tokens keep the macro names that cannot expand them during this rescan. Keeping that
+/// information after argument expansion prevents recursive names from being re-enabled.
+#[derive(Clone)]
+struct ExpansionToken<'a> {
+    text: String,
+    hidden: Vec<&'a str>,
+}
+
+fn expansion_tokens<'a>(text: &str) -> Vec<ExpansionToken<'a>> {
+    if text.is_empty() {
+        return vec![ExpansionToken {
+            text: String::new(),
+            hidden: Vec::new(),
+        }];
+    }
+    lex(text)
+        .into_iter()
+        .map(|t| ExpansionToken {
+            text: t.to_owned(),
+            hidden: Vec::new(),
+        })
+        .collect()
+}
+
+struct ExpansionArguments<'a> {
+    args: Vec<Vec<ExpansionToken<'a>>>,
+    consumed: usize,
+    hidden: Vec<&'a str>,
+}
+
+fn expansion_arguments<'a>(
+    tokens: &VecDeque<ExpansionToken<'a>>,
+) -> Option<ExpansionArguments<'a>> {
+    let open = tokens.iter().position(|t| !t.text.trim().is_empty())?;
+    if tokens[open].text != "(" {
+        return None;
+    }
+    let (mut depth, mut args, mut arg) = (0, Vec::new(), Vec::new());
+    for (i, token) in tokens.iter().enumerate().skip(open + 1) {
+        match token.text.as_str() {
+            "(" => depth += 1,
+            ")" if depth == 0 => {
+                args.push(arg);
+                return Some(ExpansionArguments {
+                    args,
+                    consumed: i + 1,
+                    hidden: token.hidden.clone(),
+                });
+            }
+            ")" => depth -= 1,
+            "," if depth == 0 => {
+                args.push(std::mem::take(&mut arg));
+                continue;
+            }
+            _ => {}
+        }
+        arg.push(token.clone());
+    }
+    None
+}
+
+fn paste_expansion_tokens(mut tokens: Vec<ExpansionToken<'_>>) -> Vec<ExpansionToken<'_>> {
+    while let Some(paste) = tokens.iter().position(|t| t.text == "##") {
+        let operand = |t: &ExpansionToken<'_>| t.text.is_empty() || !t.text.trim().is_empty();
+        let Some(left) = tokens[..paste].iter().rposition(operand) else {
+            break;
+        };
+        let Some(right) = tokens[paste + 1..]
+            .iter()
+            .position(operand)
+            .map(|n| paste + 1 + n)
+        else {
+            break;
+        };
+        let a = &tokens[left];
+        let b = &tokens[right];
+        let hidden = if a.text.is_empty() {
+            b.hidden.clone()
+        } else if b.text.is_empty() {
+            a.hidden.clone()
+        } else {
+            a.hidden
+                .iter()
+                .copied()
+                .filter(|n| b.hidden.contains(n))
+                .collect()
+        };
+        let joined = ExpansionToken {
+            text: format!("{}{}", a.text, b.text),
+            hidden,
+        };
+        tokens.splice(left..=right, [joined]);
+    }
+    tokens
 }
 
 /// The arguments of a call whose `(` is the next non-blank token from `i`, split at top-level
