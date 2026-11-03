@@ -272,8 +272,8 @@ struct LightScratch {
     states: Vec<u16>,
     sky: Vec<u8>,
     block: Vec<u8>,
-    queue: Vec<u32>,
-    sky_queue: Vec<u32>,
+    queue: VecDeque<u32>,
+    sky_queue: VecDeque<u32>,
     present: Vec<bool>,
     lowest: Vec<i32>,
     ids: Box<[u32; 4096]>,
@@ -285,8 +285,8 @@ impl LightScratch {
             states: Vec::new(),
             sky: Vec::new(),
             block: Vec::new(),
-            queue: Vec::new(),
-            sky_queue: Vec::new(),
+            queue: VecDeque::new(),
+            sky_queue: VecDeque::new(),
             present: vec![false; W * W],
             lowest: vec![0; W * W],
             ids: Box::new([0u32; 4096]),
@@ -387,7 +387,7 @@ fn light_chunk_with_scratch(
                             let emission = info >> 16;
                             if emission > 0 {
                                 block[p] = emission as u8;
-                                queue.push(p as u32);
+                                queue.push_back(p as u32);
                             }
                         }
                     }
@@ -458,7 +458,7 @@ fn light_chunk_with_scratch(
                     let mut p = from * (W * W) + col;
                     for _ in from..=to {
                         if sky[p] == 15 {
-                            sky_queue.push(p as u32);
+                            sky_queue.push_back(p as u32);
                         }
                         p += W * W;
                     }
@@ -470,11 +470,9 @@ fn light_chunk_with_scratch(
     let block_masks = &tables.block_masks;
     let types = tables.types;
 
-    let spread = |light: &mut [u8], queue: &mut Vec<u32>| {
-        let mut head = 0;
-        while head < queue.len() {
-            let p = queue[head] as usize;
-            head += 1;
+    let spread = |light: &mut [u8], queue: &mut VecDeque<u32>| {
+        while let Some(p) = queue.pop_front() {
+            let p = p as usize;
             let level = light[p];
             if level <= 1 {
                 continue;
@@ -498,7 +496,7 @@ fn light_chunk_with_scratch(
                         if level > light[q] + damp {
                             if block_masks[from_row + (to >> 4) as usize] & (1 << $d) == 0 {
                                 light[q] = level - damp;
-                                queue.push(q as u32);
+                                queue.push_back(q as u32);
                             }
                         }
                     }
@@ -1030,11 +1028,11 @@ fn relight_region(
     changed: &mut LightChanges,
 ) {
     crate::spans::time("lt_block", || {
-        relight_layer(world, tables, false, positions.to_vec(), force, changed)
+        relight_layer(world, tables, false, positions, force, changed)
     });
     if sky_light {
         let (min_y, max_y) = (world.layout.min_y(), world.layout.max_y());
-        let mut seeds = positions.to_vec();
+        let mut seeds = Vec::from(positions);
         let mut columns: FxHashMap<(i32, i32), i32> = FxHashMap::default();
         crate::spans::time("lt_columns", || {
             for &(x, _, z) in positions {
@@ -1058,7 +1056,7 @@ fn relight_region(
             }
         });
         crate::spans::time("lt_sky", || {
-            relight_layer(world, tables, true, seeds, force, changed)
+            relight_layer(world, tables, true, &seeds, force, changed)
         });
     }
 }
@@ -1066,14 +1064,14 @@ fn relight_layer(
     world: &mut Region,
     tables: &LightTables,
     sky: bool,
-    seeds: Vec<Pos>,
+    seeds: &[Pos],
     force: bool,
     changed: &mut LightChanges,
 ) {
-    let mut decrease: VecDeque<(Pos, u8)> = VecDeque::new();
-    let mut cleared: Vec<Pos> = Vec::new();
-    let mut increase: VecDeque<Pos> = VecDeque::new();
-    for p in seeds {
+    let mut decrease: VecDeque<(Pos, u8)> = VecDeque::with_capacity(seeds.len());
+    let mut cleared: Vec<Pos> = Vec::with_capacity(seeds.len());
+    let mut increase: VecDeque<Pos> = VecDeque::with_capacity(seeds.len());
+    for &p in seeds {
         let Some(old) = level(world, sky, p) else {
             continue;
         };
