@@ -43,6 +43,10 @@ enum Update {
     Snapshots(Value),
     Invites(Value),
     Server(Value, Option<Page>),
+    SnapshotCreated {
+        realm: Value,
+        error: Option<RealmsError>,
+    },
     Tier {
         server: Value,
         tier: Value,
@@ -107,6 +111,18 @@ impl RealmsRuntime {
     }
     pub(super) fn start(&mut self, action: RealmsAction, title: &mut Title) {
         if matches!(action, RealmsAction::CancelRequest) {
+            // Creation is not atomic: keep its result so an already-created child
+            // remains accessible, but stop before the next service request.
+            if let Some(pending) = self.pending.as_ref()
+                && matches!(pending.action, RealmsAction::CreateSnapshotRealm { .. })
+            {
+                pending.control.cancel.store(true, Ordering::Release);
+                if let Some(state) = title.realms_mut() {
+                    state.set_loading(true);
+                    state.status = Some(lang::get("gui.cancel"));
+                }
+                return;
+            }
             let key = match self.pending.as_ref().map(|pending| &pending.action) {
                 Some(RealmsAction::Upload { .. }) => "mco.upload.cancelled",
                 Some(RealmsAction::Download { .. }) => "mco.download.cancelled",
@@ -279,6 +295,26 @@ impl RealmsRuntime {
                     state.return_page(page);
                 }
                 state.set_server(value);
+            }
+            Ok(Update::SnapshotCreated { realm, error }) => {
+                let id = realm.get("id").and_then(Value::as_i64);
+                state
+                    .servers
+                    .retain(|s| s.get("id").and_then(Value::as_i64) != id);
+                state.servers.push(realm.clone());
+                state.snapshot_realms.retain(|s| {
+                    !matches!(&completed_action, RealmsAction::CreateSnapshotRealm { parent, .. }
+                        if s.get("id").and_then(Value::as_i64) == Some(*parent))
+                });
+                state.return_page(Page::Configure);
+                state.set_server(realm);
+                if let Some(error) = error {
+                    state.set_error(format!(
+                        "{}\n{}",
+                        lang::get("mco.errorMessage.initialize.failed"),
+                        error_text(&error)
+                    ));
+                }
             }
             Ok(Update::Tier {
                 server,
@@ -479,7 +515,23 @@ fn execute(
 ) -> RealmsResult<Update> {
     use RealmsAction::*;
     active(control)?;
-    if matches!(action, SnapshotRealms | CreateSnapshotRealm(_)) && !realms_service::is_snapshot() {
+    if matches!(action, SnapshotRealms | CreateSnapshotRealm { .. })
+        && !realms_service::is_snapshot()
+    {
+        return Err(RealmsError::InvalidInput);
+    }
+    if let CreateSnapshotRealm {
+        parent,
+        name,
+        description,
+    } = &action
+        && (*parent <= 0
+            || name.trim().is_empty()
+            || name.chars().count() > 32
+            || description.chars().count() > 256
+            || name.chars().any(char::is_control)
+            || description.chars().any(char::is_control))
+    {
         return Err(RealmsError::InvalidInput);
     }
     // These links are CommonLinks constants verified in realms-service/dto-request-links.javap.txt.
@@ -524,20 +576,11 @@ fn execute(
         SnapshotRealms => Ok(Update::Snapshots(to_value(
             client.snapshot_eligible_realms(&auth)?,
         )?)),
-        CreateSnapshotRealm(parent) => {
-            // Recheck service eligibility after the confirmation, before creating anything.
-            if !client
-                .snapshot_eligible_realms(&auth)?
-                .servers
-                .iter()
-                .any(|s| s.id == parent)
-            {
-                return Err(RealmsError::InvalidInput);
-            }
-            active(control)?;
-            let realm = client.create_snapshot_realm(&auth, parent)?;
-            Ok(Update::Server(to_value(realm)?, Some(Page::Configure)))
-        }
+        CreateSnapshotRealm {
+            parent,
+            name,
+            description,
+        } => create_snapshot(&client, &auth, parent, &name, &description, control),
         DeleteRealm(id) => {
             let realm = client.get_own_realm(&auth, id)?;
             if !realm.expired || !owned_realm(&realm, &auth) {
@@ -972,6 +1015,49 @@ fn invite_links(value: Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or_default();
     json!({"inviteCodes": codes, "token": token})
+}
+fn create_snapshot(
+    client: &RealmsClient,
+    auth: &RealmsAuth,
+    parent: i64,
+    name: &str,
+    description: &str,
+    control: &TransferControl,
+) -> RealmsResult<Update> {
+    // Recheck service eligibility after confirmation, before creating anything.
+    active(control)?;
+    if !client
+        .snapshot_eligible_realms(auth)?
+        .servers
+        .iter()
+        .any(|s| s.id == parent)
+    {
+        return Err(RealmsError::InvalidInput);
+    }
+    active(control)?;
+    let realm = client.create_snapshot_realm(auth, parent)?;
+    let id = realm.id;
+    let mut realm = to_value(realm)?;
+    realm["name"] = json!(name.trim());
+    realm["motd"] = json!(description.trim());
+    // Vanilla sends only the parent id to createSnapshotRealm, then initializes
+    // the child using the previously collected names. Neither step is atomic.
+    let result = (|| {
+        active(control)?;
+        if id <= 0 || id == parent {
+            return Err(RealmsError::InvalidResponse);
+        }
+        client.initialize(auth, id, name.trim(), description.trim())?;
+        active(control)?;
+        realm = to_value(client.get_own_realm(auth, id)?)?;
+        Ok(())
+    })();
+    // Never replay creation when initialization or its readback fails. Keep the
+    // child (also on cancellation) so the player can recover it from their list.
+    Ok(Update::SnapshotCreated {
+        realm,
+        error: result.err(),
+    })
 }
 fn retryable(action: &RealmsAction) -> bool {
     matches!(

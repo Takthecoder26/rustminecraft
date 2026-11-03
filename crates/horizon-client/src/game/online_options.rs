@@ -567,6 +567,18 @@ impl OnlineState {
         }
     }
 
+    fn toast_profiles(&self) -> Vec<serde_json::Value> {
+        self.toast
+            .iter()
+            .chain(self.notifications.iter().take(4))
+            .filter_map(|toast| {
+                toast.uuid.map(|id| {
+                serde_json::json!({"id": format!("{id:032x}"), "name": toast.profile_name})
+            })
+            })
+            .collect()
+    }
+
     pub(super) fn toast_slots(&self) -> u32 {
         self.toast.as_ref().map_or(0, |toast| {
             toast
@@ -692,6 +704,11 @@ impl Game<'_> {
         self.settings.save(&Self::options_path());
     }
     pub(super) fn draw_online_toasts(&mut self, batch: &mut HudBatch, hidden: bool) {
+        let profiles = self.online.toast_profiles();
+        if !profiles.is_empty() {
+            self.resolve_inline_profiles(&profiles);
+            self.flush_skin_slots();
+        }
         let used = self.toast_slots_used() | self.tutorial_toast_slots();
         if let Some(show) = self.online.draw_toasts(
             &self.gui.atlas,

@@ -14,7 +14,11 @@ use std::path::PathBuf;
 pub enum RealmsAction {
     Refresh,
     SnapshotRealms,
-    CreateSnapshotRealm(i64),
+    CreateSnapshotRealm {
+        parent: i64,
+        name: String,
+        description: String,
+    },
     DeleteRealm(i64),
     RenewSubscription(i64),
     CancelRequest,
@@ -130,6 +134,7 @@ pub enum RealmsAction {
 pub enum Page {
     List,
     Snapshots,
+    CreateSnapshot,
     Invites,
     Configure,
     Settings,
@@ -165,6 +170,7 @@ struct Confirmation {
     key: &'static str,
     detail: String,
     previous: Page,
+    fields: Vec<Field>,
 }
 #[derive(Clone, Debug)]
 pub struct State {
@@ -197,6 +203,7 @@ pub struct State {
     confirmation: Option<Confirmation>,
     slot_options: Value,
     terms_return: Page,
+    snapshot_parent: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -342,6 +349,7 @@ impl State {
             confirmation: None,
             slot_options: json!({}),
             terms_return: Page::List,
+            snapshot_parent: None,
         }
     }
     pub fn set_tier_configuration(&mut self, value: Value) {
@@ -482,6 +490,10 @@ impl State {
         self.error = None;
         self.status = None;
         match self.page {
+            Page::CreateSnapshot => {
+                self.add_field("mco.configure.world.name", String::new(), 32);
+                self.add_field("mco.configure.world.description", String::new(), 256);
+            }
             Page::Settings | Page::Initialize => {
                 self.add_field("mco.configure.world.name", text(&self.server, "name"), 32);
                 self.add_field(
@@ -537,6 +549,7 @@ impl State {
             key,
             detail,
             previous: self.page.clone(),
+            fields: self.fields.clone(),
         });
         self.enter(Page::Confirm);
     }
@@ -547,11 +560,19 @@ impl State {
         }
         let page = match self.page {
             Page::List => return true,
-            Page::Confirm => self
-                .confirmation
-                .take()
-                .map(|c| c.previous)
-                .unwrap_or(Page::List),
+            Page::Confirm => {
+                if let Some(c) = self.confirmation.take() {
+                    self.enter(c.previous);
+                    self.fields = c.fields;
+                    self.focused = (!self.fields.is_empty()).then_some(0);
+                    return false;
+                }
+                Page::List
+            }
+            Page::CreateSnapshot => {
+                self.snapshot_parent = None;
+                Page::Snapshots
+            }
             Page::Terms => self.terms_return.clone(),
             Page::Configure
             | Page::Snapshots
@@ -572,7 +593,7 @@ impl State {
     pub fn title(&self) -> String {
         tr(match self.page {
             Page::Notifications => "mco.news",
-            Page::Initialize => "mco.create.world",
+            Page::Initialize | Page::CreateSnapshot => "mco.create.world",
             Page::Distances => "mco.configure.world.settings.title",
             Page::Region => "mco.configure.world.region_preference.title",
             Page::ResourcePack => "mco.warning",
@@ -782,15 +803,24 @@ impl State {
                 add!(
                     "mco.selectServer.create",
                     crate::realms_service::is_snapshot() && parent.is_some(),
-                    Event::Confirm(
-                        RealmsAction::CreateSnapshotRealm(
-                            parent.map(|s| number(s, "id")).unwrap_or_default()
-                        ),
-                        "mco.snapshot.createSnapshotPopup.title",
-                        tr("mco.snapshot.createSnapshotPopup.text")
-                    )
+                    Event::Page(Page::CreateSnapshot)
                 );
             }
+            Page::CreateSnapshot => add!(
+                "gui.continue",
+                crate::realms_service::is_snapshot()
+                    && self.snapshot_parent.is_some_and(|id| id > 0)
+                    && !self.field(0).is_empty(),
+                Event::Confirm(
+                    RealmsAction::CreateSnapshotRealm {
+                        parent: self.snapshot_parent.unwrap_or_default(),
+                        name: self.field(0),
+                        description: self.field(1),
+                    },
+                    "mco.snapshot.createSnapshotPopup.title",
+                    tr("mco.snapshot.createSnapshotPopup.text")
+                )
+            ),
             Page::ResourcePack => {
                 add!(
                     "gui.yes",
@@ -1490,6 +1520,12 @@ impl State {
             let action = match control.event {
                 Event::Back => return (Action::None, self.back()),
                 Event::Page(page) => {
+                    if page == Page::CreateSnapshot {
+                        self.snapshot_parent = self
+                            .selected
+                            .and_then(|i| self.snapshot_realms.get(i))
+                            .map(|s| number(s, "id"));
+                    }
                     if self.page == Page::Slots {
                         self.slot = self.selected.map(|i| i as i32 + 1).unwrap_or(self.slot);
                     }
