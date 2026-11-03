@@ -417,7 +417,7 @@ fn shader_layer_mesh_sequence_for(block: &str, requests: &[&str]) -> Vec<Section
                 render: &render,
                 tables: &tables,
                 biomes: &biomes,
-                visibility,
+                visibility: visibility.clone(),
                 zoom: BiomeZoom::new(0),
                 blend_radius: 0,
                 smooth_lighting: false,
