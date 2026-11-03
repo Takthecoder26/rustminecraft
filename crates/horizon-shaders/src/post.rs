@@ -808,8 +808,20 @@ fn load_shadow(
     ];
     let reads = (post.programs.iter())
         .chain(gbuffers.into_iter().flatten())
-        .flat_map(|p| p.program.iter().flat_map(|q| &q.interface.samplers))
-        .any(|s| SHADOW_SAMPLERS.contains(&s.name.as_str()));
+        .flat_map(|p| {
+            p.program
+                .iter()
+                .map(|q| &q.interface)
+                .chain(p.compute.iter().map(|(_, q)| &q.interface))
+        })
+        .any(|i| {
+            i.samplers
+                .iter()
+                .any(|s| SHADOW_SAMPLERS.contains(&s.name.as_str()))
+                || i.images
+                    .iter()
+                    .any(|i| ["shadowcolorimg0", "shadowcolorimg1"].contains(&i.name.as_str()))
+        });
     let forced = match loader.properties.get("shadow.enabled").map(str::trim) {
         Some("true") => Some(true),
         Some("false") => Some(false),
@@ -1176,6 +1188,7 @@ impl Loader<'_> {
                 notes.push(format!("{name}: skipped"));
                 continue;
             }
+            self.post.config.read(&pp);
             match translate_compute(&pp) {
                 Ok(program) => out.push((name, program)),
                 Err(errors) => {

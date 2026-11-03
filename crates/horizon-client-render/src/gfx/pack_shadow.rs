@@ -36,6 +36,8 @@ pub(super) struct ShadowTargets {
     /// Both sides of each shadowcolor buffer used.
     pub color: [Option<[wgpu::TextureView; 2]>; 2],
     /// The clear colour of each buffer cleared every frame.
+    pub scratch: [Option<wgpu::TextureView>; 2],
+    pub storage: u16,
     pub clears: [Option<[f32; 4]>; 2],
     /// Bit n set: B is shadowcolor n's "main".
     pub main: u16,
@@ -81,6 +83,8 @@ impl ShadowTargets {
         shadow: &horizon_shaders::Shadow,
         formats: [wgpu::TextureFormat; 2],
         colors: u16,
+        storage: u16,
+        copied: u16,
         depth1: bool,
     ) -> Self {
         let size = shadow
@@ -88,18 +92,27 @@ impl ShadowTargets {
             .clamp(1, device.limits().max_texture_dimension_2d);
         let copy = wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
         let depth = wgpu::TextureFormat::Depth32Float;
+        let storage_usage = |n: usize| {
+            if storage & 1 << n == 0 {
+                return wgpu::TextureUsages::empty();
+            }
+            let atomic = device.features().contains(wgpu::Features::TEXTURE_ATOMIC)
+                && matches!(
+                    formats[n],
+                    wgpu::TextureFormat::R32Sint | wgpu::TextureFormat::R32Uint
+                );
+            wgpu::TextureUsages::STORAGE_BINDING
+                | if atomic {
+                    wgpu::TextureUsages::STORAGE_ATOMIC
+                } else {
+                    wgpu::TextureUsages::empty()
+                }
+        };
         let color = std::array::from_fn(|n| {
             (colors & 1 << n != 0).then(|| {
                 [0, 1].map(|side| {
                     let label = format!("Shader pack shadowcolor{n} {}", ["A", "B"][side]);
-                    target(
-                        device,
-                        &label,
-                        size,
-                        formats[n],
-                        wgpu::TextureUsages::empty(),
-                    )
-                    .1
+                    target(device, &label, size, formats[n], copy | storage_usage(n)).1
                 })
             })
         });
@@ -108,6 +121,19 @@ impl ShadowTargets {
             depth: target(device, "Shader pack shadowtex0", size, depth, copy),
             depth1: depth1.then(|| target(device, "Shader pack shadowtex1", size, depth, copy)),
             color,
+            storage,
+            scratch: std::array::from_fn(|n| {
+                (copied & 1 << n != 0).then(|| {
+                    target(
+                        device,
+                        &format!("Shader pack shadowcolor{n} copy"),
+                        size,
+                        formats[n],
+                        copy | storage_usage(n),
+                    )
+                    .1
+                })
+            }),
             clears: std::array::from_fn(|n| {
                 let b = &shadow.colors[n];
                 b.clear.then(|| b.clear_color.unwrap_or([1.0; 4]))
@@ -193,6 +219,19 @@ impl ShadowTargets {
             }),
             ..Default::default()
         });
+    }
+
+    /// A pass samples the pre-write contents when it also binds the main side as an image.
+    pub fn copy(&self, encoder: &mut wgpu::CommandEncoder, mask: u16) {
+        for n in (0..2).filter(|n| mask & 1 << n != 0) {
+            if let (Some(main), Some(copy)) = (self.color(n, false), &self.scratch[n]) {
+                encoder.copy_texture_to_texture(
+                    main.texture().as_image_copy(),
+                    copy.texture().as_image_copy(),
+                    main.texture().size(),
+                );
+            }
+        }
     }
 
     /// `shadowtex1`: the shadow map as it is now (before translucent geometry).
