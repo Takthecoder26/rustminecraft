@@ -1715,14 +1715,24 @@ impl Game<'_> {
     ) {
         out.clear();
         for m in self.mobs.iter().filter(|m| !m.removed && m.id > after) {
-            // The lead's holder: the player the mob sees, another mob or a
+            // The lead's holder: the player holding the lead, another mob or a
             // fence knot (game/lan_entities.rs).
             let player_entity = mob_players
                 .get(&m.id)
                 .and_then(|conn| hub.guest(*conn))
                 .map(|g| g.entity_id);
+            let leash_player_uuid = self.mob_leash_player(m);
+            let leash_player = leash_player_uuid.and_then(|u| {
+                hub.guests
+                    .iter()
+                    .find(|g| {
+                        horizon_client::lan::playerdata::uuid_ints(g.uuid) == u
+                            || (u == [0, 0, 0, 1] && hub.singleplayer_owner == Some(g.uuid))
+                    })
+                    .map(|g| g.entity_id)
+            });
             let leash = m.extra.leash.and_then(|h| match h {
-                Holder::Player => player_entity,
+                Holder::Player => leash_player.or(player_entity),
                 Holder::Mob(id) | Holder::Boat(id) => Some(id as i32),
                 Holder::Knot(p) => self.knot_ids.get(&p).map(|&id| id as i32),
             });
