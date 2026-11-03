@@ -137,6 +137,8 @@ struct Graph {
     /// search, so a line that stays in reached sections keeps doing so, and
     /// one that didn't need only be checked again from where it failed.
     rays: Vec<u8>,
+    /// Reusable buffer for the seeds of an outside-world search.
+    seeds: Vec<(i64, i32, i32, u8)>,
 }
 
 impl Graph {
@@ -265,7 +267,7 @@ impl Graph {
             (self.sections - 1, 0)
         };
         let block = (camera.x.floor() as i64, camera.z.floor() as i64);
-        let mut seeds = Vec::with_capacity(((2 * self.radius + 1) as usize).pow(2));
+        self.seeds.clear();
         for dx in -self.radius..=self.radius {
             for dz in -self.radius..=self.radius {
                 let mut directions = REACHED | 1 << travel;
@@ -285,11 +287,11 @@ impl Graph {
                     block.0 - centre(self.from.0 + dx),
                     block.1 - centre(self.from.2 + dz),
                 );
-                seeds.push((ox * ox + oz * oz, dx, dz, directions));
+                self.seeds.push((ox * ox + oz * oz, dx, dz, directions));
             }
         }
-        seeds.sort_by_key(|seed| seed.0);
-        for (_, dx, dz, directions) in seeds {
+        self.seeds.sort_by_key(|seed| seed.0);
+        for &(_, dx, dz, directions) in &self.seeds {
             let i = self
                 .index((self.from.0 + dx, y, self.from.2 + dz))
                 .expect("seed inside the searched box");

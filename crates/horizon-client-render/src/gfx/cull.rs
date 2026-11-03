@@ -363,27 +363,29 @@ impl Cull {
             if r.state.load(Ordering::Acquire) != MAPPED {
                 continue;
             }
-            let mapped = r.buffer.slice(..r.slots.len() as u64 * 4);
+            let count = r.slots.len();
+            let mapped = r.buffer.slice(..count as u64 * 4);
             if let Ok(data) = mapped.get_mapped_range() {
                 // The mapping isn't guaranteed to be 4-byte aligned (a Vega 11
-                // on Windows panicked in cast_slice), so copy the words out.
-                let results: Vec<u32> = bytemuck::pod_collect_to_vec(&data);
+                // on Windows panicked in cast_slice), so read the words in
+                // place instead of allocating a Vec.
                 let (mut hidden, mut indices) = (0, 0u64);
-                for (&result, &n) in results.iter().zip(&r.indices) {
+                for i in 0..count {
+                    let result = u32::from_le_bytes(
+                        data[i * 4..i * 4 + 4].try_into().unwrap(),
+                    );
                     if result != r.stamp {
                         hidden += 1;
-                        indices += u64::from(n);
+                        indices += u64::from(r.indices[i]);
                     }
-                }
-                let share = indices as f32 / r.total.max(1) as f32;
-                self.hidden = ([hidden, results.len()], share);
-                for (&slot, &result) in r.slots.iter().zip(&results) {
-                    let slot = slot as usize;
+                    let slot = r.slots[i] as usize;
                     if slot >= self.seen.len() {
                         self.seen.resize(slot + 1, false);
                     }
                     self.seen[slot] = result == r.stamp;
                 }
+                let share = indices as f32 / r.total.max(1) as f32;
+                self.hidden = ([hidden, count], share);
             }
             r.buffer.unmap();
             r.state.store(FREE, Ordering::Release);
