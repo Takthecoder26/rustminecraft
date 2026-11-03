@@ -84,5 +84,8 @@ ssh ludovic@playhorizon 'bash ~/horizon-install/checks-runners.sh status'
   keeps it): a run rebuilds only what changed. `CARGO_BUILD_JOBS=4`. `job-started.sh` empties a build folder over
   40 GB (`MAX_TARGET_GB`) before the job.
 - No sccache: each build folder already holds the dependencies, and the host's shared cache is the remote runs'.
+- GitHub-hosted runners now keep a build cache through sccache (backed by the Actions cache) on top of
+  Swatinem/rust-cache; see the `mozilla-actions/sccache-action` steps in .github/workflows/ci.yml. Their Rust
+  toolchain is installed by the workflow, as before, and there is no change to the self-hosted path.
 - Python is the host's 3.13 (`ci-shared/bin/python3`); the apt packages the jobs need are installed by the script, so
   the jobs skip their `apt-get`, `setup-python` and Rust cache steps there (`runner.environment == 'github-hosted'`).

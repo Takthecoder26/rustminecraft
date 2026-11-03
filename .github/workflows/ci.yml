@@ -75,6 +75,10 @@ jobs:
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       # Dependencies and the workspace's own build, saved from main's runs (pull requests read main's cache).
+      # Compilation cache for GitHub-hosted runners: sccache, backed by the Actions cache, keeps object files
+      # across runs. Self-hosted runners keep their own build folders and sccache (docs/ci-runners.md).
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
       - uses: Swatinem/rust-cache@v2
         if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:
@@ -127,6 +131,9 @@ jobs:
               libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev libudev-dev
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      # Compilation cache for GitHub-hosted runners: self-hosted runners keep their own build folders and sccache.
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
       - uses: Swatinem/rust-cache@v2
         if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:
