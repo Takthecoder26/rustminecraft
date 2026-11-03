@@ -283,6 +283,7 @@ fn entity_routes(specialized: bool, ordering: &str, deferred: bool) {
         &spans,
         [0.; 4],
         &mut rest,
+        None,
     );
     assert!(
         rest.is_empty(),
