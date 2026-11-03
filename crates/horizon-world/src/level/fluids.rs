@@ -821,7 +821,7 @@ pub(crate) fn merged_face_occludes(
             .face_shape(max_face.opposite())
             .unwrap_or_else(|_| empty.clone())
     } else {
-        empty.clone()
+        empty
     };
     let union = match first_slice.join(&second_slice, ShapeOp::OR) {
         Ok(shape) => shape,

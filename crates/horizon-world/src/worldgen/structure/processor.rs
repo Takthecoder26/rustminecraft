@@ -463,7 +463,7 @@ impl Pick {
         Ok(Self {
             block: value["block"]
                 .as_str()
-                .map(|b| super::super::tags::identifier(b).map(|i| i.to_string()))
+                .map(|b| super::super::tags::identifier(b))
                 .ok_or(DecodeError::Field("pick block"))??,
             picks: value["picks"]
                 .as_array()
@@ -558,7 +558,7 @@ impl CountCap {
                 .iter()
                 .map(|b| {
                     let b = b.as_str().ok_or(DecodeError::Field("blocks"))?;
-                    Ok(super::super::tags::identifier(b)?.to_string())
+                    Ok(super::super::tags::identifier(b)?)
                 })
                 .collect::<Result<_, DecodeError>>()?,
             min: count("min")?,
@@ -832,8 +832,8 @@ impl Processor {
                     .map(|(from, to)| {
                         let to = to.as_str().ok_or(DecodeError::Field("blocks"))?;
                         Ok((
-                            super::super::tags::identifier(from)?.to_string(),
-                            super::super::tags::identifier(to)?.to_string(),
+                            super::super::tags::identifier(from)?,
+                            super::super::tags::identifier(to)?,
                         ))
                     })
                     .collect::<Result<_, DecodeError>>()?,
