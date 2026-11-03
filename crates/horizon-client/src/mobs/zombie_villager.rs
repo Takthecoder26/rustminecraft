@@ -203,7 +203,7 @@ mod tests {
             data: &data,
             player: None,
             nearest_player: None,
-            others: &[],
+            others: (&[]).into(),
             dragon: None,
             leash_boats: &[],
             others_grid: None,

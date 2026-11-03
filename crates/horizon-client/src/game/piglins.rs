@@ -149,7 +149,7 @@ impl Game<'_> {
             return;
         }
         let from = [m.position.x, m.position.y + 1.3, m.position.z];
-        let r = &mut self.world.random;
+        let r = &mut self.simulation.world.random;
         let to = [
             from[0] + f64::from(r.next_float() * 8.0 - 4.0),
             from[1],
@@ -203,28 +203,29 @@ impl Game<'_> {
             let w = self.mob_world_base(&[]);
             let eye = Vec3::new(pos.x, m.eye_y(), pos.z);
             let nearest = self
+                .simulation
                 .dropped
                 .iter()
                 .enumerate()
                 .map(|(j, e)| (j, e.position.distance_squared(pos)))
                 .filter(|(_, d)| *d < 32.0 * 32.0)
-                .filter(|&(j, _)| self.piglin_wants(m, &self.dropped[j].stack))
+                .filter(|&(j, _)| self.piglin_wants(m, &self.simulation.dropped[j].stack))
                 .filter(|&(j, _)| {
                     // ItemEntity's eye height is 0.2125.
-                    let e = &self.dropped[j];
+                    let e = &self.simulation.dropped[j];
                     let at = Vec3::new(e.position.x, e.position.y + 0.2125, e.position.z);
                     w.line_of_sight(eye, at)
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1));
-            let loved =
-                nearest.is_some_and(|(j, _)| self.piglin_loved(&self.dropped[j].stack.item));
+            let loved = nearest
+                .is_some_and(|(j, _)| self.piglin_loved(&self.simulation.dropped[j].stack.item));
             self.admire_seen_item(i, nearest.map(|(_, d)| d), loved);
             let best = nearest.filter(|(_, d)| *d <= 81.0);
             let Some((j, _)) = best else {
                 self.simulation.mobs[i].extra.point = None;
                 continue;
             };
-            let e = &self.dropped[j];
+            let e = &self.simulation.dropped[j];
             let close = (e.position.x - pos.x).abs() <= 1.3
                 && (e.position.z - pos.z).abs() <= 1.3
                 && (e.position.y - pos.y).abs() <= 1.0;
@@ -245,7 +246,7 @@ impl Game<'_> {
             let stack = if &*item == "minecraft:gold_nugget" {
                 self.remove_dropped(j).stack
             } else {
-                let e = &mut self.dropped[j];
+                let e = &mut self.simulation.dropped[j];
                 e.stack.count -= 1;
                 let one = ItemStack {
                     count: 1,
@@ -339,7 +340,7 @@ impl Game<'_> {
             "minecraft:gameplay/piglin_bartering",
             false,
             None,
-            &mut self.world.random,
+            &mut self.simulation.world.random,
         );
         self.piglin_throw_items(i, items);
     }
@@ -373,7 +374,7 @@ impl Game<'_> {
             .map(|p| [p[0], p[1] + 1.0, p[2]]);
         for stack in items {
             let to = target.unwrap_or_else(|| {
-                let r = &mut self.world.random;
+                let r = &mut self.simulation.world.random;
                 [
                     from[0] + f64::from(r.next_float() * 8.0 - 4.0),
                     from[1],
@@ -426,7 +427,7 @@ impl Game<'_> {
             !self
                 .res
                 .facts()
-                .get(self.world.block(
+                .get(self.simulation.world.block(
                     p[0].floor() as i32,
                     p[1].floor() as i32,
                     p[2].floor() as i32,

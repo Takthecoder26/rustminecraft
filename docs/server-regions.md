@@ -1,160 +1,148 @@
 # Server simulation ownership and region execution
 
-This is an incomplete foundation for #8645. It does **not** implement parallel
-mob ticks or resolve the reported roughly 150 ms mob phase with 100 players.
-The gameplay phase stays serial. Snapshot projection has an opt-in bounded
-worker path; its synthetic benchmark regresses, so serial is the default.
+The server runs region-owned mob transactions on a bounded persistent pool,
+then commits them in the original entity order. Independence is checked from
+actual observations and shared RNG checkpoints. A region boundary never hides
+a target, collision candidate, owner, projectile, or player.
 
-## Owners and the tick barrier
+## Ownership and lifecycle
 
-`game/simulation.rs::LevelSimulation` owns the level's ordered mobs, network-id
-index, death bookkeeping, natural-spawn scratch, region directory and worker
-configuration. `Game` and `levels::Parked` each hold the same owner; a dimension
-swap moves the entire structure. Death bookkeeping also follows an entity's
-cross-dimension transfer. Immutable game tables remain in `Resources`, and
-`MobWorld` lends those tables and a read-only world to the serial entity phase.
-World/chunk mutation, other entity types and server-wide coordination still live
-in `Game`; extracting those owners is outstanding.
+`game/simulation.rs::LevelSimulation` owns the mutable world/chunks, ordered
+entity families (mobs, projectiles, vehicles, items, experience and decorations),
+block tick queues, chunk tickets, spawn scratch, death bookkeeping, region
+indexes and outgoing level/entity events. `Game` and `levels::Parked` hold this
+same owner. Dimension swaps move it as one value. Existing typed raid, sculk,
+portal, streaming and save services retain their existing coordinated phases
+and dimension-specific swaps. Read-only registries, collision tables, recipes,
+biomes and mob types are borrowed from `Resources`/`PackResources`.
 
-`server_regions::Regions` groups eight-connected **resident** chunks. Its ID is
-the minimum chunk coordinate in the component and is valid until a topology
-rebuild. A loaded bridge merges components; an unloaded bridge splits them.
-The chunk-map membership revision invalidates the topology, including a reset
-or replacement of the map. Ordinary block writes do not rebuild topology.
-Connectivity defines ownership only. It does not prove simulation independence.
+`ServerCoordination` owns the dimension manager, server-wide entity IDs, the
+entity admission cutoff and one lazy persistent pool shared by all levels.
+The mutable level owner is `Send`; the immutable `TickResources` contract is
+`Send + Sync`. Native callbacks are excluded from worker inputs.
 
-At the start of the mob entity phase, after native pre-tick callbacks:
+`server_regions::Regions` groups eight-connected resident chunks. Its identity
+is the minimum chunk coordinate in the component, valid until topology changes.
+A loaded bridge merges regions; unloading it splits them. The chunk-map
+membership revision also detects resets and replacement. Block changes alone
+do not rebuild topology. Resident connectivity defines ownership, not proof
+that two simulations commute.
 
-1. Refresh topology and index each mob and player into its resident owner.
-2. Preserve input slots in every region's local index. Dormant entities in
-   unloaded chunks keep separate slots; they do not load or retain chunks.
-3. Prepare immutable `Seen` snapshots, using the original global slot order.
-4. Join every worker before exposing snapshots to the entity tick loop.
-5. Execute that loop in its original global order. Movement, pushes and brain
-   writes update the shared snapshot immediately, as before. Migration is
-   reindexed at the next barrier; the directory is not queried during movement.
+Every entity retains its global insertion slot. Region-local entity and player
+indexes preserve the filtered order of those slots. At the tick barrier an
+entity belongs to exactly one resident component, or to the dormant list when
+its chunk is unloaded. Movement may cross owners during the tick; ownership is
+frozen until the next barrier, when migration, removals and new entities are
+indexed together. Migration never loads or retains a chunk. Existing admission,
+entity-ticking ticket, despawn, portal, persistence and save rules remain in
+charge. Concatenating region lists would change interleaved entity ordering;
+the coordinator always walks the original global list.
 
-No entity is ticked by iterating regions. Concatenating region lists would
-reorder interleaved joins. Unloaded entities retain the existing serial despawn
-rules. New spawns, deaths and portal transfers become index changes at the next
-barrier, without altering their current save/network lifecycle. Streaming and
-unloading run outside the immutable projection; workers cannot retain a world
-reference after joining. No world or chunk contents are cloned for this work.
+## Transaction and publication barrier
 
-## Dependency audit and current execution
+1. Complete the existing spawn/raid and native pre-tick phases. Refresh topology
+   and local indexes, and build the ordered `Seen` snapshot and spatial grid.
+2. Reserve level-owned EntitySection insertion order in global entity order.
+   Build immutable player indexes and per-mob difficulty/despawn contexts.
+3. Give each job exclusive ownership of its mutable mob inputs. Workers borrow
+   world/chunk/resources; they do not clone the world or its chunks. A sparse
+   overlay contains only that region's updated `Seen` entries and grid cells.
+4. Tick each region in its original local order, including AI, navigation,
+   effects, movement, collision, damage and despawn decisions. Same-region
+   pushes and single-target brain writes reach later local inputs immediately.
+5. Join all jobs. Walk global entity slots and validate each prediction's
+   observations, same-region prefix and level RNG checkpoint. Commit an
+   unchanged transaction by moving its resulting mob/events into place.
+   Otherwise run that mob serially against the current authoritative inputs
+   and invalidate the rest of that owner's predicted prefix.
+6. Apply immediate pushes and brain events at the existing point in that walk.
+   Complete deaths, loot, event effects, projectiles and replication in their
+   original coordinated phases. Clients only see completed authoritative state.
 
-This table records current code constraints, not a claim of complete vanilla
-independence analysis. No fixed halo, maximum speed assumption, or new deferred
-cross-region event queue is used as a correctness argument.
+No new cross-region delayed-event queue is used. A replay has no externally
+visible speculative events. The full mutable-mob tests compare every field,
+event sequence and final RNG against the retained serial execution, including
+breeding, overlapping owners and nectar-bearing bees that consume level RNG.
 
-| Dependency | Evidence / risk | Current coordination |
-| --- | --- | --- |
-| Level RNG | `mobs::ai::tick`, brain duration draws, bee ticks, school ticks and block contact consume the same `LegacyRandom`. Draw counts depend on state. | One serial scratch RNG, restored to the level in original order. No per-region seed or cloned RNG streams. |
-| Mob observations | `others_near`, `seen(id)` and direct full-snapshot scans include remote targets, owners, caravans and raid members. | One globally ordered snapshot, updated after every mob. Local region indexes do not filter these queries. |
-| Immediate mob events | `apply_brain_events` changes partners, gaze, retreats, riders, school membership and breeding cooldowns before later mobs tick. `PendingPushes` changes later movement. | Apply in the existing loop, immediately and in order. |
-| Native mods | Pre/post tick callbacks, canceled ticks and content effect callbacks may have arbitrary dependencies. | Existing server-thread callbacks; no worker invocation. Goal objects now require `Send + Sync` for immutable snapshot borrowing. Custom native goals must satisfy those bounds. |
-| Projectiles and vehicles | Homing target IDs, passenger chains, hit selection and entity join order can span owners; #8639 separately changes projectile join ordering. | Existing ordered phases and rider synchronization. No new projectile/vehicle schedule. |
-| Explosions and damage | An explosion can damage entities and change blocks beyond any selected chunk boundary. Damage can trigger immediate deaths and drops. | Existing serial event, damage, explosion and loot paths. |
-| Block changes and navigation | `path_writes` is drained once; collision changes are derived from the shared world; an earlier tick may change a later mob's observed state. | Existing invalidation and navigation path. Projection workers do not navigate or write blocks. |
-| Natural/custom spawning | Global and per-player caps, spawn order, IDs, pack finalization and shared RNG affect later spawns. | Existing pre-entity spawning and raids; the scratch cache now follows its level owner. |
-| Despawning and drops | Entity-ticking tickets, nearest players, loot RNG, corpse removal and death effects are ordered. | Existing despawn/death/drop handling; no new delayed effects. |
-| Replication | Clients must not receive partially prepared state. | Projection barrier joins before any gameplay or publication. Existing LAN event/replication phases remain authoritative. |
+`SeenView` prevents untracked raw-slice observations. ID lookups record slots;
+full scans record a complete-snapshot read; spatial queries record exact grid
+columns, including empty columns. An earlier foreign entity entering an empty
+queried column invalidates a prediction. Bounds growth, retained empty cells
+and a change between indexed and full-scan queries also invalidate it. No
+fixed margin or maximum entity speed is assumed. Sparse grid overlays preserve
+the original candidate order and full-scan fallback rules.
 
-`Access::{Read,Write,Global}` and `batches` provide a conservative capability
-planner: conflicting jobs cannot pass each other, and global dependencies force
-singleton batches. It is tested but is **not yet a full-mob scheduling API**.
-Proving bounded footprints, or implementing validated transactions for unbounded
-queries and level RNG, remains necessary before scheduling whole regions.
+The player directory uses exact distance searches over all players. Local
+players seed the search, but pruning uses distance bounds over the complete
+tree. Original host/guest tie order, dead/creative/spectator filtering, bound
+targets, sleeping owners and lead holders are preserved; nonfinite inputs use
+the original ordered scan.
 
-## Worker path and validation
+## Cross-region dependency audit
 
-`HORIZON_REGION_SNAPSHOT_WORKERS=2` through `8` opts into scoped snapshot workers;
-invalid values fall back to one, and counts clamp to 1–8. Each worker owns its
-results and borrows immutable entities. There are no world clones or locks in
-this projection. All threads join, including on panic. These are scoped worker
-threads created per projection, not a persistent server worker pool. A persistent
-pool and the full spawning/AI/navigation/movement/damage/drop/replication pipeline
-on independently mutable region owners remain outstanding.
+| Dependency | Coordination |
+| --- | --- |
+| Level RNG | Each job starts at the same checkpoint. A result that consumed it commits only at that exact authoritative stream state, including cached Gaussian state; otherwise serial replay consumes the original draws. A result with no level draws never overwrites the authoritative stream. No per-region seed is substituted. |
+| Mob observations and collisions | The complete snapshot remains visible. Actual slot, spatial and full-scan reads are validated against earlier foreign writes; local overlays preserve immediate local observations. |
+| Pushes and brain memories | Pending pushes retain event order. Known single-recipient writes are applied to later owned inputs; foreign recipients invalidate their owner's prefix. Riding and school-follow changes conservatively invalidate all prefixes and run the remaining conflicting work serially. |
+| EntitySection insertion | A per-level allocator reserves order before jobs run. Rejected work cannot consume a process-global insertion counter or change candidate ordering. |
+| Raider hurt ordering | Raider species and active raid participants stay serial because their hurt sequence remains globally coordinated. A worker stops before that entity; the coordinator runs it normally. |
+| Native mods and tracing | Loaded native mods, entity tick listeners and RNG tracing retain serial execution. Arbitrary callbacks are never speculated. Content-block contacts keep their existing server-thread scope. |
+| Projectiles and vehicles | The existing ordered hit, homing, passenger and steering phases operate on completed mob state. Their dependencies can span any region and are not declared independent. Projectile admission/join rules are preserved. |
+| Explosions, block writes and navigation | Existing explosion, damage, block and event handlers remain coordinated. Navigation sees the same borrowed world and collision-change list during the mob phase. No explosion radius is used as an independence margin. |
+| Spawning and caps | Natural/custom spawning, raids, pack finalization, global/per-player caps, IDs and their shared RNG stay in their existing serial order before entity transactions. Spawn scratch follows its level owner. |
+| Death, despawn and drops | Existing ticket/despawn checks, corpse removal, death effects and loot processing surround the validated mob tick at the original points. Non-ticking despawns invalidate affected observations. |
+| Replication and chunk lifecycle | All workers join before publication, streaming or unload can mutate the borrowed world. Existing event buffers and entity tracking publish committed results, including authoritative replay results. |
 
-The unit tests exercise connectivity, bridge merge/split, diagonal/negative and
-extreme chunk coordinates, ordered migration, removal, unload, dormant entities,
-serial/parallel projection equivalence, bounded overlap, join publication,
-panic joins, and read/write/global conflict ordering.
+Sound ID interning uses persistent-thread local caches instead of process-wide
+mutexes in living-entity ticking. There is no global mob-loop lock. Worker
+results contain owned mob state and events; there are no unsafe world pointers.
 
-## Quick benchmark (2026-11-03)
+## Execution controls
 
-Reproduce without game resources:
+Automatic mode uses region transactions for at least 128 mobs in at least two
+resident regions. Small or connected workloads retain the direct serial path.
+The threshold only controls scheduling overhead; it never limits interactions.
+
+- `HORIZON_SIMULATION_MODE=legacy`: retained direct serial mob loop.
+- `HORIZON_SIMULATION_MODE=serial`: region transactions on the server thread.
+- `HORIZON_SIMULATION_MODE=parallel`: force region transactions, including small
+  test scenarios.
+- `HORIZON_SIMULATION_WORKERS=1..8`: bounded pool size; defaults to the project's
+  worker-count policy, capped at eight. Pool construction failure falls back
+  to serial execution.
+- `HORIZON_REGION_METRICS=1`: region, predicted, committed and replayed counts.
+
+The older snapshot projection knob (`HORIZON_REGION_SNAPSHOT_WORKERS`) stays at
+one by default: snapshot copying alone did not benefit from scoped threads.
+The persistent simulation pool performs real mob ticks.
+
+## Validation and benchmark
+
+The focused tests cover topology/bridge merge and split, stable ordering,
+negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
+sparse-grid equivalence, negative-space reads, distant ID/full-scan reads,
+foreign bounds growth, shared RNG/Gaussian consumption, complete mutable-mob
+transactions and exact indexed player selection. Broader parity, server/LAN
+checks and the live comparison are recorded here after the current run finishes.
+
+`tools/bench_region_ticks.py` starts 100 real `horizon-bots` clients, teleports
+them to a 512-block grid in a fixed-seed flat world, and summons 70 persistent
+AI-enabled zombies per player in interleaved global order (7,000 total). Natural
+spawning and random block ticks are off; players have resistance, and mobs are
+invulnerable to keep the population stable. Each mode uses a fresh world and
+scratch user directories. The script rejects changed player/mob counts and
+collects whole-tick median/p95/p99 from the server performance report, individual
+mob-phase timings, process-tree CPU and RSS, and prediction/replay counts.
 
 ```sh
-rustc --edition=2024 -O tools/bench_server_regions.rs -o /tmp/region-bench
-/tmp/region-bench baseline
-/tmp/region-bench serial
-/tmp/region-bench parallel
+cargo build --profile fast -p horizon-client -p horizon-client-lib -p horizon-bots \
+  --bin horizon-client --bin horizon-ctl --bin horizon-bots
+python3 tools/bench_region_ticks.py --bin target/fast
 ```
 
-Same inputs: 100 disconnected 17×17 loaded areas, 70 synthetic entities per
-player (7,000 total), 384-byte output per entity. 50 warmup iterations followed
-by 300 measured samples, with output equality checked every iteration. Region
-modes include rebuilding local indexes; topology is built once before timing.
-CPU and RSS below come from `wait4` for each separate process (including setup).
-This measures directory/projection overhead, **not server or mob tick time**.
-
-| Mode | Median ms | p95 ms | p99 ms | CPU (100% = one core) | Max RSS KiB |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Original serial copy | 0.103 | 0.126 | 0.212 | 96.1% | 9,512 |
-| Region index + serial copy | 0.156 | 0.166 | 0.201 | 99.5% | 9,300 |
-| Region index + 8 scoped workers | 0.476 | 0.627 | 0.894 | 207.4% | 19,408 |
-
-Initial topology construction took 7.8–8.4 ms. The projection benchmark gives no
-reason to enable workers by default. An identical live 100-player baseline and
-changed server benchmark, with whole-tick median/p95/p99, CPU and memory, is still
-required. These numbers must not be reported as a speedup of the mob pipeline.
-
-### Actual mob snapshot check
-
-`tools/bench_mob_snapshot.rs` also measures the real `Mob::seen` function for
-7,000 constructed zombies, cows and villagers in the same 100-region layout,
-with 100 synthetic player coordinates. It compares every final snapshot field
-against the original serial projection outside the timing. This is still only
-immutable preparation: it runs no AI, movement, damage or network clients.
-
-Build `horizon-client-lib`, then link the standalone driver against that build's
-rlib and dependency directory (the source header gives the command). Run each
-mode with the prepared resource root as its second argument. The quick run used
-20 warmups and 100 samples, with the same inputs and resources in all modes:
-
-| Actual `Mob::seen` mode | Median ms | p95 ms | p99 ms | CPU | Max RSS KiB |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Original serial method | 0.670 | 1.553 | 1.946 | 95.0% | 52,432 |
-| Region index + serial method | 0.642 | 0.711 | 0.857 | 99.5% | 52,888 |
-| Region index + 8 scoped workers | 0.834 | 1.582 | 1.929 | 204.2% | 61,924 |
-
-Every snapshot comparison passed. This single sweep has substantial timing
-variation; the small serial difference is not evidence of a speedup. It again
-gives no reason to enable workers by default, and is not the outstanding live
-100-player tick benchmark.
-
-## Validation results
-
-After clearing the disk space that interrupted the first build:
-
-- `tools/pr_ready.py --quick`: passed, including 2,442 Rust tests, 627 Python
-  tests (one skipped), rustfmt, clippy, public tree and doc-test checks. The
-  runner lists 166 affected parity harnesses for CI; this is not a full parity pass.
-- `test_mob_ai_parity.py --only zombie_player cow_alone villager_village`:
-  all three scenarios and 703 mob ticks matched vanilla.
-- `test_natural_spawn_parity.py`: 15,500 cases matched vanilla, including
-  98,686 spawn attempts and 10,730 spawns.
-- `test_dedicated_server_parity.py`: all 601 transcript lines matched, including
-  client connection, spawn, chunks, chat and `/list` checks.
-- `test_server_entities_parity.py`: all 34 entities matched.
-- `test_server_player_damage_parity.py`: both client and server compared
-  373,455 output lines successfully.
-- `lan_e2e.py --check mobs`: host/guest zombie and skeleton combat passed using
-  freshly built binaries from this commit and disposable data directories.
-- `port_ledger.py check --base origin/main` ran and reported the existing ledger
-  gaps in the mechanically touched functions; no parity port was claimed.
-
-The initial unrestricted mob-AI run was interrupted after disk errors; only the
-three scenarios above are claimed as passing. Full parallel gameplay validation
-and a live before/after 100-player benchmark remain outstanding.
+The retained serial and parallel modes use identical commands, seed, view and
+simulation distance, warmup and measurement windows in the same binary.
+`--before-bin` accepts a separately built pre-change engine directory if needed.
+This is a quick workload comparison, not a claim about every mob mix: shared
+RNG, native mods, active raids and unbounded observations can require replay.

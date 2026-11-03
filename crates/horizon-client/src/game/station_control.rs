@@ -95,11 +95,15 @@ impl Game<'_> {
                     return Err(format!("cannot place {name}").into());
                 }
                 if let Some(entity) = horizon_client::containers::BlockEntity::for_block(&name) {
-                    self.world
+                    self.simulation
+                        .world
                         .block_entities
                         .insert((pos[0], pos[1], pos[2]), entity);
                 }
-                self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
+                self.simulation
+                    .world
+                    .modified
+                    .insert((pos[0] >> 4, pos[2] >> 4));
                 ok()
             }
             "use" => {

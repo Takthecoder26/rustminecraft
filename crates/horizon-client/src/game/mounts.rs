@@ -97,7 +97,8 @@ impl Game<'_> {
             };
             self.audio.play(sound, Some(at), 0.5, 1.0);
             self.consume_held();
-            self.world
+            self.simulation
+                .world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
             return true;
@@ -261,11 +262,14 @@ impl Game<'_> {
             None
         };
         if let Some(sound) = sound {
-            let pitch =
-                (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
+            let pitch = (self.simulation.world.random.next_float()
+                - self.simulation.world.random.next_float())
+                * 0.2
+                + 1.0;
             self.audio.play(sound, Some(at), 0.5, pitch);
             self.consume_held();
-            self.world
+            self.simulation
+                .world
                 .modified
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
             return true;
@@ -349,7 +353,10 @@ impl Game<'_> {
             Species::Horse if m.is_baby() => "minecraft:entity.baby_horse.eat",
             _ => "minecraft:entity.horse.eat",
         };
-        let pitch = (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
+        let pitch = (self.simulation.world.random.next_float()
+            - self.simulation.world.random.next_float())
+            * 0.2
+            + 1.0;
         self.audio.play(sound, Some(at), 1.0, pitch);
         // Animal.setInLove: entity event 18.
         if loved {
@@ -403,7 +410,13 @@ impl Game<'_> {
             return false;
         };
         let (bx, by, bz) = (x.floor() as i32, y.floor() as i32, z.floor() as i32);
-        if &*self.res.facts().get(self.world.block(bx, by, bz)).name == "minecraft:bubble_column" {
+        if &*self
+            .res
+            .facts()
+            .get(self.simulation.world.block(bx, by, bz))
+            .name
+            == "minecraft:bubble_column"
+        {
             return false;
         }
         self.fluid_height_of(bx, by, bz, Some(Fluid::Water))
@@ -722,7 +735,7 @@ impl Game<'_> {
         let _ = MotionWorld {
             entities: &[],
             player,
-            scene: &mut self.world,
+            scene: &mut self.simulation.world,
             assets: &self.pack.assets,
             collision_binding: self.collision,
             resources: self.motion,
@@ -823,12 +836,16 @@ impl DismountWorld for GameDismountWorld<'_, '_> {
         let g = self.0;
         g.res
             .facts()
-            .get(g.world.block(p[0], p[1], p[2]))
+            .get(g.simulation.world.block(p[0], p[1], p[2]))
             .full_collision
     }
     fn lava(&self, p: [i32; 3]) -> bool {
         let g = self.0;
-        g.res.facts().get(g.world.block(p[0], p[1], p[2])).fluid == Fluid::Lava
+        g.res
+            .facts()
+            .get(g.simulation.world.block(p[0], p[1], p[2]))
+            .fluid
+            == Fluid::Lava
     }
     fn floor_height(&self, p: [i32; 3]) -> f64 {
         let shape = self.0.block_collision_shape(p);

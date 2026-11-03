@@ -339,7 +339,7 @@ impl Game<'_> {
         self.pack.assets.registry.resolve(&s).ok()
     }
     fn block_at(&self, p: Pos) -> BlockStateId {
-        self.world.block(p.0, p.1, p.2)
+        self.simulation.world.block(p.0, p.1, p.2)
     }
     fn dispenser_block_name(&self, p: Pos) -> std::sync::Arc<str> {
         self.res.facts().get(self.block_at(p)).name.clone()
@@ -480,7 +480,7 @@ impl Game<'_> {
         let p = Self::dispense_position(pos, facing, 0.7, [0.0; 3]);
         let mut at = [p.x, p.y, p.z];
         at[1] -= if s[1] != 0 { 0.125 } else { 0.156_25 };
-        let r = &mut self.world.random;
+        let r = &mut self.simulation.world.random;
         let pow = r.next_double() * 0.1 + 0.2;
         let spread = 0.017_227_5 * f64::from(accuracy);
         let v = [
@@ -519,7 +519,11 @@ impl Game<'_> {
     ) -> Option<ItemStack> {
         if !(self.serving.is_some() || self.options.dedicated.is_some())
             || dimension != self.dim.id()
-            || !self.world.chunks.contains_key(&(pos[0] >> 4, pos[2] >> 4))
+            || !self
+                .simulation
+                .world
+                .chunks
+                .contains_key(&(pos[0] >> 4, pos[2] >> 4))
         {
             return Some(stack);
         }
@@ -554,7 +558,7 @@ impl Game<'_> {
             return Some(remainder);
         }
         let mut rest = remainder;
-        if let Some(entity) = self.world.block_entities.get_mut(&pos) {
+        if let Some(entity) = self.simulation.world.block_entities.get_mut(&pos) {
             let max = self
                 .res
                 .items()
@@ -751,7 +755,8 @@ impl Game<'_> {
             .map(|(i, m)| (m.id, Target::Mob(i)))
             .collect();
         found.extend(
-            self.armor_stands
+            self.simulation
+                .armor_stands
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| overlaps(s.bounds(), block))
@@ -791,7 +796,7 @@ impl Game<'_> {
             ),
         );
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
@@ -873,7 +878,8 @@ impl Game<'_> {
                     }
             }
             Target::Stand(i) => slot.stand_index().is_some_and(|s| {
-                allows("minecraft:armor_stand") && self.armor_stands[i].equipment[s].is_none()
+                allows("minecraft:armor_stand")
+                    && self.simulation.armor_stands[i].equipment[s].is_none()
             }),
             Target::Mob(i) => {
                 let m = &self.simulation.mobs[i];
@@ -913,7 +919,7 @@ impl Game<'_> {
                 return true;
             }
             Target::Stand(i) => {
-                let stand = &mut self.armor_stands[i];
+                let stand = &mut self.simulation.armor_stands[i];
                 if let Some(s) = slot.stand_index() {
                     stand.equipment[s] = Some(one);
                 }
@@ -1109,7 +1115,7 @@ impl Game<'_> {
                     "minecraft:fire_charge" | "minecraft:wind_charge" => {
                         // asProjectile aims with the level's random first; the
                         // shot along the facing then replaces that motion.
-                        let r = &mut self.world.random;
+                        let r = &mut self.simulation.world.random;
                         let _ = (
                             r.triangle(dir[0], 0.114_85),
                             r.triangle(dir[1], 0.114_85),
@@ -1149,16 +1155,22 @@ impl Game<'_> {
             f64::from(front.2) + 0.5,
         );
         // EntityType.create rolls a yaw from the level random before the stack config turns it.
-        let _ = self.world.random.next_float();
-        self.next_entity += 1;
-        let mut stand =
-            horizon_client::entities::ArmorStand::new(self.next_entity, foot, y_rot(facing));
+        let _ = self.simulation.world.random.next_float();
+        self.simulation_server.next_entity += 1;
+        let mut stand = horizon_client::entities::ArmorStand::new(
+            self.simulation_server.next_entity,
+            foot,
+            y_rot(facing),
+        );
         // Entity.applyImplicitComponents: a name from an anvil names the stand.
         if let Some(name) = stack.custom_name() {
             stand.custom_name = Some(horizon_client::text::Text::literal(name));
         }
-        self.world.modified.insert((front.0 >> 4, front.2 >> 4));
-        self.armor_stands.push(stand);
+        self.simulation
+            .world
+            .modified
+            .insert((front.0 >> 4, front.2 >> 4));
+        self.simulation.armor_stands.push(stand);
         (shrink(stack), CLICK)
     }
     /// A tame donkey, mule or llama in front without a chest gets it.
@@ -1212,9 +1224,9 @@ impl Game<'_> {
         if !self.boat_models.has(&wood, chest) {
             return (self.dispense_default(pos, facing, stack), CLICK);
         }
-        self.next_entity += 1;
+        self.simulation_server.next_entity += 1;
         let mut boat = super::boats::Boat::new(
-            self.next_entity,
+            self.simulation_server.next_entity,
             wood.as_str().into(),
             Vec3::new(x, y + y_offset, z),
             y_rot(facing),
@@ -1222,10 +1234,13 @@ impl Game<'_> {
         if chest {
             boat = boat.with_chest();
         }
-        self.world.modified.insert((front.0 >> 4, front.2 >> 4));
-        self.boats.push(boat);
+        self.simulation
+            .world
+            .modified
+            .insert((front.0 >> 4, front.2 >> 4));
+        self.simulation.boats.push(boat);
         if self.serving.is_some() || self.options.dedicated.is_some() {
-            let boat = self.boats.last().unwrap();
+            let boat = self.simulation.boats.last().unwrap();
             self.native_vehicle_create(
                 boat.entity_type().as_str(),
                 [boat.position.x, boat.position.y, boat.position.z],
@@ -1262,16 +1277,19 @@ impl Game<'_> {
                 -0.9
             }
         };
-        self.next_entity += 1;
+        self.simulation_server.next_entity += 1;
         let cart = super::minecarts::Minecart::new(
-            self.next_entity,
+            self.simulation_server.next_entity,
             kind,
             Vec3::new(x, base_y + y_offset, z),
         );
-        self.world.modified.insert((front.0 >> 4, front.2 >> 4));
-        self.carts.push(cart);
+        self.simulation
+            .world
+            .modified
+            .insert((front.0 >> 4, front.2 >> 4));
+        self.simulation.carts.push(cart);
         if self.serving.is_some() || self.options.dedicated.is_some() {
-            let cart = self.carts.last().unwrap();
+            let cart = self.simulation.carts.last().unwrap();
             self.native_vehicle_create(
                 cart.kind.id(),
                 [cart.position.x, cart.position.y, cart.position.z],
@@ -1465,7 +1483,8 @@ impl Game<'_> {
                 || b.grow_water_plant(level, ticks, target_pos, None)
         });
         if grown {
-            self.level_events
+            self.simulation
+                .level_events
                 .push(horizon_world::level::LevelEvent::LevelEvent {
                     id: 1505,
                     pos: target_pos,
@@ -1495,7 +1514,7 @@ impl Game<'_> {
         }
         set_success("tnt", true);
         // new PrimedTnt(level, x + 0.5, y, z + 0.5, null), its sound and ENTITY_PLACE.
-        let rot = self.world.random.next_double() * f64::from(std::f32::consts::TAU);
+        let rot = self.simulation.world.random.next_double() * f64::from(std::f32::consts::TAU);
         self.add_primed_tnt(target, rot, 80, None, None);
         self.audio.play(
             "minecraft:entity.tnt.primed",
@@ -1526,7 +1545,7 @@ impl Game<'_> {
     ) -> Result<Dispensed> {
         let target = offset(pos, facing);
         let free = self.res.facts().is_air(self.block_at(target))
-            && target.1 >= self.world.bottom_y() + 2
+            && target.1 >= self.simulation.world.bottom_y() + 2
             && self.ui.difficulty != 0
             && self.can_build_wither(target);
         if free {
@@ -1551,7 +1570,7 @@ impl Game<'_> {
             if let Some(skull) = skull {
                 self.level_set([target.0, target.1, target.2], skull)?;
                 if let Some(entity) = BlockEntity::for_block("minecraft:wither_skeleton_skull") {
-                    self.world.block_entities.insert(target, entity);
+                    self.simulation.world.block_entities.insert(target, entity);
                 }
                 self.post_block_game_event(
                     "minecraft:block_place",
@@ -1649,7 +1668,7 @@ impl Game<'_> {
         let state = self.apply_item_block_state([target.0, target.1, target.2], state, &stack)?;
         let name = self.res.facts().get(state).name.clone();
         if let Some(entity) = self.new_block_entity(&name) {
-            self.world.block_entities.insert(target, entity);
+            self.simulation.world.block_entities.insert(target, entity);
             self.apply_placed_item([target.0, target.1, target.2], &stack, false);
         }
         self.process_level_events()?;
@@ -1803,7 +1822,9 @@ impl Game<'_> {
                 let random = self.rand_sequences.get(&sequence, self.level.seed);
                 world_items!(self).loot_table_from(table, false, held, random)
             }
-            None => world_items!(self).loot_table(table, false, held, &mut self.world.random),
+            None => {
+                world_items!(self).loot_table(table, false, held, &mut self.simulation.world.random)
+            }
         }
     }
     /// `Entity.spawnAtLocation(level, stack, offset)`: an item at the entity's
@@ -1835,8 +1856,8 @@ impl Game<'_> {
             return None;
         }
         let old = &self.simulation.mobs[index];
-        self.next_entity += 1;
-        let mut mob = Mob::new(self.next_entity, t, old.position, old.yaw);
+        self.simulation_server.next_entity += 1;
+        let mut mob = Mob::new(self.simulation_server.next_entity, t, old.position, old.yaw);
         mob.previous = old.previous;
         mob.head_yaw = old.head_yaw;
         mob.body_yaw = old.body_yaw;
@@ -2199,7 +2220,8 @@ impl Game<'_> {
         };
         set_success("honeycomb", true);
         self.level_set([target.0, target.1, target.2], waxed)?;
-        self.level_events
+        self.simulation
+            .level_events
             .push(horizon_world::level::LevelEvent::LevelEvent {
                 id: 3003,
                 pos: Self::pos_of(target),
@@ -2230,7 +2252,7 @@ impl Game<'_> {
         }
         // The server picks the splash positions with the level random.
         for _ in 0..5 {
-            let r = &mut self.world.random;
+            let r = &mut self.simulation.world.random;
             let p = [
                 f64::from(pos.0) + r.next_double(),
                 f64::from(pos.1 + 1),

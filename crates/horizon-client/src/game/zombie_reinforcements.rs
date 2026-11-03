@@ -33,7 +33,7 @@ impl Game<'_> {
         let Some(index) = self.simulation.mobs.iter().position(|m| m.id == caller) else {
             return;
         };
-        if self.world.health_rules.difficulty != Difficulty::Hard {
+        if self.simulation.world.health_rules.difficulty != Difficulty::Hard {
             return;
         }
         let zombie = &mut self.simulation.mobs[index];
@@ -51,10 +51,10 @@ impl Game<'_> {
             zombie.position.z.floor() as i32,
         ];
         let mut own = std::mem::replace(&mut zombie.random, LegacyRandom::new(0));
-        let mut rules = std::mem::replace(&mut self.world.random, LegacyRandom::new(0));
+        let mut rules = std::mem::replace(&mut self.simulation.world.random, LegacyRandom::new(0));
         let spot = self.reinforcement_spot(&kind, from, &mut own, &mut rules);
         self.simulation.mobs[index].random = own;
-        self.world.random = rules;
+        self.simulation.world.random = rules;
         let Some(spot) = spot else {
             return;
         };

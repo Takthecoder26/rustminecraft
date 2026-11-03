@@ -138,7 +138,7 @@ impl Game<'_> {
         if outcome.sound
             && let Some(sound) = &component.block_sound
         {
-            let pitch = 0.8 + self.world.random.next_float() * 0.4;
+            let pitch = 0.8 + self.simulation.world.random.next_float() * 0.4;
             self.audio.play(sound, at, 1.0, pitch);
         }
         if outcome.blocked <= 0.0 {
@@ -281,7 +281,7 @@ impl Game<'_> {
             }
             self.using = None;
             if let Some(sound) = &component.disabled_sound {
-                let pitch = 0.8 + self.world.random.next_float() * 0.4;
+                let pitch = 0.8 + self.simulation.world.random.next_float() * 0.4;
                 self.audio.play(sound, at, 0.8, pitch);
             }
         }

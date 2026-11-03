@@ -393,7 +393,7 @@ impl Game<'_> {
             && self.model_packs_are_vanilla()
             && self.player.is_some()
             && !self.spectator()
-            && !opaque(self.res.facts().get(self.world.block(at[0], at[1], at[2])));
+            && !opaque(self.res.facts().get(self.simulation.world.block(at[0], at[1], at[2])));
         if !eligible {
             self.entity_culler = None;
             self.async_entity_culler = None;
@@ -424,7 +424,7 @@ impl Game<'_> {
                     }
                 }
                 if let Some(culler) = &mut self.async_entity_culler {
-                    culler.begin_frame(camera, &self.world);
+                    culler.begin_frame(camera, &self.simulation.world);
                 } else {
                     // If the worker cannot start, use the existing same-frame path.
                     self.entity_culler = Some(Culler::new(camera.to_array(), 8_192));
@@ -470,7 +470,7 @@ impl Game<'_> {
 
     fn async_proof_is_current(&self, proof: &OcclusionProof) -> bool {
         for (key, expected) in &proof.chunks {
-            let Some(current) = self.world.chunks.get(key) else {
+            let Some(current) = self.simulation.world.chunks.get(key) else {
                 return false;
             };
             if !std::ptr::eq(Arc::as_ptr(current), expected.as_ptr()) {
@@ -481,32 +481,32 @@ impl Game<'_> {
             self.renderer
                 .as_ref()
                 .is_some_and(|r| r.has_section(section))
-                && !self.world.dirty_sections.contains(&section)
+                && !self.simulation.world.dirty_sections.contains(&section)
                 && !self.streaming.is_meshing(section)
                 && !self.pending_uploads.iter().any(|(key, _)| *key == section)
         })
     }
 
     fn occluder_ready(&self, pos: [i32; 3]) -> bool {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if !opaque(self.res.facts().get(state)) {
             return false;
         }
-        let Some(y) = pos[1].checked_sub(self.world.bottom_y()) else {
+        let Some(y) = pos[1].checked_sub(self.simulation.world.bottom_y()) else {
             return false;
         };
         let section = (pos[0] >> 4, y.div_euclid(16), pos[2] >> 4);
         self.renderer
             .as_ref()
             .is_some_and(|r| r.has_section(section))
-            && !self.world.dirty_sections.contains(&section)
+            && !self.simulation.world.dirty_sections.contains(&section)
             && !self.streaming.is_meshing(section)
             && !self.pending_uploads.iter().any(|(key, _)| *key == section)
     }
 
     pub(super) fn finish_async_entity_culling(&mut self) {
         if let Some(culler) = &mut self.async_entity_culler {
-            culler.finish_frame(&self.world, self.res.facts());
+            culler.finish_frame(&self.simulation.world, self.res.facts());
         }
     }
 }

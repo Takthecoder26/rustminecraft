@@ -62,11 +62,11 @@ impl Game<'_> {
     /// The pot's saved tag at `pos` with its loot unpacked (a new one for a
     /// pot without), or None when no pot is there.
     fn pot_tag(&mut self, pos: [i32; 3]) -> Option<Tag> {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if &*self.res.facts().get(state).name != "minecraft:decorated_pot" {
             return None;
         }
-        let mut tag = spill::saved_entity(&self.world, pos).unwrap_or_else(|| {
+        let mut tag = spill::saved_entity(&self.simulation.world, pos).unwrap_or_else(|| {
             Tag::compound([
                 ("id", Tag::String("minecraft:decorated_pot".into())),
                 ("x", Tag::Int(pos[0])),
@@ -81,7 +81,7 @@ impl Game<'_> {
         unpack_loot(
             &mut tag,
             loot.as_deref(),
-            &mut self.world.random,
+            &mut self.simulation.world.random,
             &mut self.rand_sequences,
             self.level.seed,
         );
@@ -100,7 +100,7 @@ impl Game<'_> {
         });
         let center = pos.map(|v| f64::from(v) + 0.5);
         let Some(stack) = insertable else {
-            spill::put_saved_entity(&mut self.world, pos, tag);
+            spill::put_saved_entity(&mut self.simulation.world, pos, tag);
             // TRY_WITH_EMPTY_HAND: only the main hand goes on to useWithoutItem.
             if self.hand != Hand::Main {
                 return false;
@@ -135,7 +135,7 @@ impl Game<'_> {
         if let (Tag::Compound(map), Some(item)) = (&mut tag, &pot_item) {
             map.insert("item".into(), save::item_to_nbt(item));
         }
-        spill::put_saved_entity(&mut self.world, pos, tag);
+        spill::put_saved_entity(&mut self.simulation.world, pos, tag);
         // The sherds and item go to the guests (BlockEntityData).
         self.mark_block_entity_updated((pos[0], pos[1], pos[2]));
         self.consume_held();

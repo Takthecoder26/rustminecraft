@@ -112,7 +112,7 @@ impl Game<'_> {
             },
             "players": players,
             "max_players": max_players,
-            "chunks": self.world.chunks.len(),
+            "chunks": self.simulation.world.chunks.len(),
             "paused": state.paused,
         })
     }

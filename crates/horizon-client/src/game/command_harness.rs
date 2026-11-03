@@ -99,7 +99,7 @@ impl Game<'_> {
                 .as_ref()
                 .ok_or("command harness: portal without a player")?;
             let entry = horizon_core::position::BlockPos::containing(p.position);
-            let block = g.world.block(entry.x, entry.y, entry.z);
+            let block = g.simulation.world.block(entry.x, entry.y, entry.z);
             if &*g.res.facts().get(block).name != "minecraft:nether_portal" {
                 return Err("command harness: the player is not in a nether portal".into());
             }
@@ -150,7 +150,7 @@ impl Game<'_> {
                     "settle: player {:?} center {:?} chunks {} pending {}",
                     self.player.as_ref().map(|p| p.position),
                     self.streaming.center,
-                    self.world.chunks.len(),
+                    self.simulation.world.chunks.len(),
                     self.streaming.pending()
                 );
             }
@@ -269,9 +269,14 @@ impl Game<'_> {
                     let matches = |f: &super::FallingBlock| {
                         &*facts.get(f.state).name == block && f.no_gravity == no_gravity
                     };
-                    let count = self.falling.iter().filter(|f| matches(f)).count();
+                    let count = self
+                        .simulation
+                        .falling
+                        .iter()
+                        .filter(|f| matches(f))
+                        .count();
                     if op["discard"].as_bool() == Some(true) {
-                        self.falling.retain(|f| !matches(f));
+                        self.simulation.falling.retain(|f| !matches(f));
                     }
                     self.enter_level(None, back)?;
                     let record = json!({

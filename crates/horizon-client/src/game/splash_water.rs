@@ -83,7 +83,7 @@ impl Game<'_> {
     /// out after level event 1009 and its block-change game event.
     fn douse_fire(&mut self, pos: [i32; 3]) {
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         let name = self.res.facts().get(state).name.clone();
         let fire = self.block_in_tag("minecraft:fire", &name);
         if fire {
@@ -180,7 +180,7 @@ impl Game<'_> {
             self.for_each_player(|g| g.extinguish_player_in_splash(reach, at));
             // Armor stands are living entities too.
             let mut put_out = Vec::new();
-            for stand in self.armor_stands.iter_mut() {
+            for stand in self.simulation.armor_stands.iter_mut() {
                 if stand.fire_ticks > 0
                     && stand.health > 0.5
                     && reach.intersects(stand.bounds())

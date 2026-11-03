@@ -109,9 +109,9 @@ impl Game<'_> {
             _ => return Err(NativeBlockReadError::UnavailableDimension),
         };
         let world = if dim == self.dim {
-            Some(&self.world)
+            Some(&self.simulation.world)
         } else {
-            self.levels.parked_world(dim)
+            self.simulation_server.levels.parked_world(dim)
         }
         .ok_or(NativeBlockReadError::UnavailableDimension)?;
         read_block(world, self.pack.assets.registry, pos)

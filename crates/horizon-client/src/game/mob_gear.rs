@@ -81,7 +81,7 @@ impl Game<'_> {
                 let random = self.rand_sequences.get(sequence, seed);
                 loot.roll_entity(&name, random, &params)
             }
-            None => loot.roll_entity(&name, &mut self.world.random, &params),
+            None => loot.roll_entity(&name, &mut self.simulation.world.random, &params),
         };
         let mut inserted: Vec<usize> = Vec::new();
         for stack in stacks.iter().filter(|s| !s.is_empty()) {
@@ -124,7 +124,15 @@ impl Game<'_> {
             self.enchant_slot(id, slot, 0.5, special);
         }
         // Pillager.enchantSpawnedWeapon: one crossbow in 300 pierces.
-        if species == Species::Pillager && self.world.random.next_int_bound(300).unwrap_or(1) == 0 {
+        if species == Species::Pillager
+            && self
+                .simulation
+                .world
+                .random
+                .next_int_bound(300)
+                .unwrap_or(1)
+                == 0
+        {
             self.enchant_single(id, MAIN, "minecraft:piercing", 1, "minecraft:crossbow");
         }
     }
@@ -152,14 +160,14 @@ impl Game<'_> {
         else {
             return;
         };
-        if self.world.random.next_float() >= chance * special {
+        if self.simulation.world.random.next_float() >= chance * special {
             return;
         }
         self.enchant_item(id, slot, &item, special);
     }
     /// `EnchantmentsByCostWithDifficulty.enchant` on the item in a slot.
     pub(super) fn enchant_item(&mut self, id: u32, slot: usize, item: &str, special: f32) {
-        let random = &mut self.world.random;
+        let random = &mut self.simulation.world.random;
         let top = MIN_COST + (special * MAX_COST_SPAN) as i32;
         let cost = random
             .next_int_between_inclusive(MIN_COST, top)

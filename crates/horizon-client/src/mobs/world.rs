@@ -299,12 +299,17 @@ impl MobWorld<'_> {
     /// in snapshot order: through the grid when there is one, else all.
     pub fn others_near(&self, area: Aabb) -> impl Iterator<Item = &Seen> {
         let mut near = Vec::new();
-        let indexed = self
-            .others_grid
-            .is_some_and(|grid| grid.candidates(area, &mut near));
+        let indexed = self.others_grid.is_some_and(|grid| {
+            self.others.record_query(area, grid);
+            grid.candidates(area, &mut near)
+        });
         let all = (!indexed).then(|| self.others.iter());
         near.into_iter()
-            .map(|i| &self.others[i as usize])
+            .map(|i| {
+                self.others
+                    .get_untracked(i as usize)
+                    .expect("snapshot grid slot")
+            })
             .chain(all.into_iter().flatten())
     }
     pub fn seen(&self, id: u32) -> Option<&Seen> {
@@ -466,7 +471,7 @@ pub(crate) fn with_resource_test_world(
         data: &data,
         player: None,
         nearest_player: None,
-        others,
+        others: others.into(),
         dragon: None,
         leash_boats: &[],
         others_grid: None,

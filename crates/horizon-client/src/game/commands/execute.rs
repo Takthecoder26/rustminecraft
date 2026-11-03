@@ -127,27 +127,32 @@ impl Game<'_> {
                 .find(|m| m.id == id)
                 .map_or([0.0; 2], |m| [m.yaw, m.head_pitch]),
             Target::Stand(id) => self
+                .simulation
                 .armor_stands
                 .iter()
                 .find(|a| a.id == id)
                 .map_or([0.0; 2], |a| [a.yaw, 0.0]),
             Target::Boat(id) => self
+                .simulation
                 .boats
                 .iter()
                 .find(|b| b.id == id)
                 .map_or([0.0; 2], |b| [b.yaw, 0.0]),
             Target::Cart(id) => self
+                .simulation
                 .carts
                 .iter()
                 .find(|c| c.id == id)
                 .map_or([0.0; 2], |c| [c.yaw, 0.0]),
             Target::Fangs(id) => self
+                .simulation
                 .fangs
                 .list
                 .iter()
                 .find(|f| f.id == id)
                 .map_or([0.0; 2], |f| [f.yaw, 0.0]),
             Target::Other(id) => self
+                .simulation
                 .others
                 .iter()
                 .find(|o| o.id == id)
@@ -170,7 +175,7 @@ impl Game<'_> {
                 .map_or(0.0, |m| m.eye_y() - m.position.y),
             // ArmorStand.getDefaultDimensions: a marker's are empty, a small
             // stand's are BABY_DIMENSIONS, whose eye height is 0.9875F.
-            Target::Stand(id) => match self.armor_stands.iter().find(|a| a.id == id) {
+            Target::Stand(id) => match self.simulation.armor_stands.iter().find(|a| a.id == id) {
                 Some(a) if a.marker => 0.0,
                 Some(a) if a.small => f64::from(0.9875f32),
                 _ => self.type_eye_height(&self.target_type(t)),
@@ -545,7 +550,7 @@ impl Game<'_> {
                     return Ok(vec![s]);
                 };
                 let (x, z) = (s.pos[0].floor() as i32, s.pos[2].floor() as i32);
-                if !self.world.chunks.contains_key(&(x >> 4, z >> 4)) {
+                if !self.simulation.world.chunks.contains_key(&(x >> 4, z >> 4)) {
                     return Err(err("argument.pos.unloaded", &[]));
                 }
                 let y = self.heightmap_at(kind, x, z);
@@ -714,7 +719,7 @@ impl Game<'_> {
             // item, who summoned a vex.
             Some("origin") => match entity {
                 Target::Projectile(id) => self
-                    .creatures
+                    .simulation
                     .projectiles
                     .iter()
                     .find(|p| p.id == id)
@@ -734,6 +739,7 @@ impl Game<'_> {
                     .into_iter()
                     .collect(),
                 Target::Item(id) => self
+                    .simulation
                     .dropped
                     .iter()
                     .find(|d| d.id == id)
@@ -825,19 +831,23 @@ impl Game<'_> {
         if Some(uuid) == self.level.player_uuid {
             return Some(Target::Player);
         }
-        self.persist.uuids.iter().find_map(|(&id, found)| {
-            if *found != uuid {
-                return None;
-            }
-            self.level_entity(i32::try_from(id).ok()?)
-        })
+        self.simulation
+            .persist
+            .uuids
+            .iter()
+            .find_map(|(&id, found)| {
+                if *found != uuid {
+                    return None;
+                }
+                self.level_entity(i32::try_from(id).ok()?)
+            })
     }
     /// The highest block of a heightmap type at a column (`Level.getHeight`).
     fn heightmap_at(&self, kind: &str, x: i32, z: i32) -> i32 {
-        let top = self.world.top_y();
-        for y in (self.world.bottom_y()..top).rev() {
-            let state = self.world.block(x, y, z);
-            if state == self.world.air {
+        let top = self.simulation.world.top_y();
+        for y in (self.simulation.world.bottom_y()..top).rev() {
+            let state = self.simulation.world.block(x, y, z);
+            if state == self.simulation.world.air {
                 continue;
             }
             let facts = self.res.facts().get(state);
@@ -858,7 +868,7 @@ impl Game<'_> {
                 return y + 1;
             }
         }
-        self.world.bottom_y()
+        self.simulation.world.bottom_y()
     }
     /// A `store` modifier: a new callback in the source's chain.
     fn store_source(&mut self, c: &Context, s: Source) -> R<Source> {
@@ -980,7 +990,8 @@ impl Game<'_> {
             // ExecuteCommand.isChunkLoaded: ENTITY_TICKING, which is past lit.
             let loaded = |p: [i32; 3]| {
                 let key = (p[0] >> 4, p[2] >> 4);
-                self.world.chunks.contains_key(&key) && self.streaming.is_lit(key.0, key.1)
+                self.simulation.world.chunks.contains_key(&key)
+                    && self.streaming.is_lit(key.0, key.1)
             };
             return Ok(flag(dimension == self.dim && p.is_some_and(loaded)));
         }
@@ -994,7 +1005,7 @@ impl Game<'_> {
             let Some(Arg::Block(b)) = c.get("block").cloned() else {
                 return Ok((false, 0));
             };
-            let state = self.world.block(p[0], p[1], p[2]);
+            let state = self.simulation.world.block(p[0], p[1], p[2]);
             return Ok(flag(self.block_matches(&b, state)));
         }
         if c.has("biome") {
@@ -1102,17 +1113,17 @@ impl Game<'_> {
         for z in lo[2]..=hi[2] {
             for y in lo[1]..=hi[1] {
                 for x in lo[0]..=hi[0] {
-                    let src = self.world.block(x, y, z);
-                    if masked && src == self.world.air {
+                    let src = self.simulation.world.block(x, y, z);
+                    if masked && src == self.simulation.world.air {
                         continue;
                     }
                     let (dx, dy, dz) = (x + offset[0], y + offset[1], z + offset[2]);
-                    if src != self.world.block(dx, dy, dz) {
+                    if src != self.simulation.world.block(dx, dy, dz) {
                         return Ok((false, 0));
                     }
                     let (se, de) = (
-                        self.world.block_entities.get(&(x, y, z)),
-                        self.world.block_entities.get(&(dx, dy, dz)),
+                        self.simulation.world.block_entities.get(&(x, y, z)),
+                        self.simulation.world.block_entities.get(&(dx, dy, dz)),
                     );
                     if let Some(se) = se {
                         let name = self.data_block_name([x, y, z]);
@@ -1133,7 +1144,7 @@ impl Game<'_> {
     }
     /// The biome name at a block position.
     fn biome_name_at_block(&self, p: [i32; 3]) -> Option<String> {
-        let chunk = self.world.chunks.get(&(p[0] >> 4, p[2] >> 4))?;
+        let chunk = self.simulation.world.chunks.get(&(p[0] >> 4, p[2] >> 4))?;
         // The world's table (`world_biomes!`): a packed biome's id is past
         // the built-in list, and `Biomes::get` would clamp it to the last
         // vanilla one.

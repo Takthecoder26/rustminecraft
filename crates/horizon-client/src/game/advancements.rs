@@ -139,6 +139,7 @@ impl adv::World for View<'_, '_> {
     }
     fn biome(&self, p: [i32; 3]) -> String {
         self.0
+            .simulation
             .world
             .chunks
             .get(&(p[0] >> 4, p[2] >> 4))
@@ -156,7 +157,7 @@ impl adv::World for View<'_, '_> {
         self.0.structures_at(p)
     }
     fn block(&self, p: [i32; 3]) -> (String, BTreeMap<String, String>) {
-        let state = self.0.world.block(p[0], p[1], p[2]);
+        let state = self.0.simulation.world.block(p[0], p[1], p[2]);
         let name = self.0.res.facts().get(state).name.to_string();
         let props = self
             .0
@@ -178,7 +179,7 @@ impl adv::World for View<'_, '_> {
             .0
             .res
             .facts()
-            .get(self.0.world.block(p[0], p[1], p[2]))
+            .get(self.0.simulation.world.block(p[0], p[1], p[2]))
             .fluid
         {
             horizon_client::blocks::Fluid::Water => Some("minecraft:water".into()),
@@ -192,12 +193,12 @@ impl adv::World for View<'_, '_> {
                 .0
                 .res
                 .facts()
-                .get(self.0.world.block(p[0], y, p[2]))
+                .get(self.0.simulation.world.block(p[0], y, p[2]))
                 .full_collision
         })
     }
     fn light(&self, p: [i32; 3]) -> i32 {
-        let l = self.0.world.light(p[0], p[1], p[2]);
+        let l = self.0.simulation.world.light(p[0], p[1], p[2]);
         i32::from((l >> 4).max(l & 15))
     }
     fn smokey(&self, p: [i32; 3]) -> bool {
@@ -205,7 +206,7 @@ impl adv::World for View<'_, '_> {
             self.0
                 .res
                 .facts()
-                .get(self.0.world.block(p[0], p[1] - d, p[2]))
+                .get(self.0.simulation.world.block(p[0], p[1] - d, p[2]))
                 .name
                 .ends_with("campfire")
         })
@@ -248,7 +249,7 @@ impl Game<'_> {
         spectator: bool,
         hand: Option<&ItemStack>,
     ) -> bool {
-        let Some(lock) = self.world.block_lock(key) else {
+        let Some(lock) = self.simulation.world.block_lock(key) else {
             return false;
         };
         let lock = horizon_client::item_render::tag_json(lock);
@@ -457,7 +458,8 @@ impl Game<'_> {
                 .find(|m| m.id == id)
                 .map(|m| Box::new(self.mob_entity(m)))
                 .or_else(|| {
-                    self.boats
+                    self.simulation
+                        .boats
                         .iter()
                         .find(|b| b.id == id)
                         .map(|b| Box::new(self.boat_entity(b)))
@@ -763,10 +765,10 @@ impl Game<'_> {
             .recipe_book
             .add_recipes(&world_stations!(self).recipe_index, &rewards);
         for table in &a.rewards.loot {
-            let items = self
-                .res
-                .items()
-                .loot_table(table, false, None, &mut self.world.random);
+            let items =
+                self.res
+                    .items()
+                    .loot_table(table, false, None, &mut self.simulation.world.random);
             for s in items {
                 if let Some(rest) = self.give(s)
                     && let Some(eye) = self.eye_position()

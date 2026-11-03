@@ -68,7 +68,7 @@ impl Game<'_> {
         let (Some(ia), Some(ib)) = (self.villager_index(a), self.villager_index(b)) else {
             return;
         };
-        let now = self.world.game_time;
+        let now = self.simulation.world.game_time;
         let items = world_items!(self);
         let meeting = villager::meet(&mut self.simulation.mobs, ia, ib, now, |item| {
             items.get(item).map_or(64, |i| i.max_stack)
@@ -87,7 +87,7 @@ impl Game<'_> {
         let Some(i) = self.villager_index(id) else {
             return;
         };
-        let now = self.world.game_time;
+        let now = self.simulation.world.game_time;
         let Some(near) = villager::golem_summoners(&self.simulation.mobs, i, now, needed) else {
             return;
         };
@@ -103,8 +103,8 @@ impl Game<'_> {
         let Some(kind) = self.res.mob_types().get("minecraft:iron_golem").cloned() else {
             return false;
         };
-        let id = self.next_entity + 1;
-        let mut random = self.world.random.clone();
+        let id = self.simulation_server.next_entity + 1;
+        let mut random = self.simulation.world.random.clone();
         let golem = villager::summon_golem(
             &self.mob_world_base(&[]),
             start,
@@ -115,11 +115,11 @@ impl Game<'_> {
                 m
             },
         );
-        self.world.random = random;
+        self.simulation.world.random = random;
         let Some(golem) = golem else {
             return false;
         };
-        self.next_entity = id;
+        self.simulation_server.next_entity = id;
         let sound = golem.kind.sounds[0];
         if !sound.is_empty() {
             let at = golem.center();
@@ -246,7 +246,7 @@ impl Game<'_> {
     /// nearest dropped item within 32 blocks that `Villager.wantsToPickUp`
     /// accepts and the villager sees, or none.
     pub(super) fn villager_item_sense(&mut self) {
-        if self.dropped.is_empty() {
+        if self.simulation.dropped.is_empty() {
             for m in &mut self.simulation.mobs {
                 if m.species() == Species::Villager && villager_brain::take_item_scan(m) {
                     villager_brain::set_wanted_item(m, None);
@@ -277,7 +277,7 @@ impl Game<'_> {
             let requested = villager::requested_items(m);
             let eye = Vec3::new(m.position.x, m.eye_y(), m.position.z);
             let mut best: Option<(f64, Vec3)> = None;
-            for e in &self.dropped {
+            for e in &self.simulation.dropped {
                 let d = e.position.distance_squared(m.position);
                 if best.is_some_and(|(b, _)| d >= b)
                     || !e.bounds().intersects(area)
@@ -306,7 +306,7 @@ impl Game<'_> {
     /// `Mob.aiStep` item pickup for villagers (`InventoryCarrier`): food,
     /// seeds and what their profession wants, from within a block.
     pub(super) fn villager_pickups(&mut self) {
-        if self.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
+        if self.simulation.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
             return;
         }
         let picks_up = self
@@ -324,8 +324,8 @@ impl Game<'_> {
             let top = f64::from(m.height());
             let requested = villager::requested_items(m);
             let mut j = 0;
-            while j < self.dropped.len() {
-                let e = &self.dropped[j];
+            while j < self.simulation.dropped.len() {
+                let e = &self.simulation.dropped[j];
                 let near = (e.position.x - pos.x).abs() <= half
                     && (e.position.z - pos.z).abs() <= half
                     && e.position.y >= pos.y - 0.25
@@ -339,12 +339,12 @@ impl Game<'_> {
                     continue;
                 }
                 let max = self.item_max_stack(&item);
-                let stack = self.dropped[j].stack.clone();
+                let stack = self.simulation.dropped[j].stack.clone();
                 if !villager::ext_mut(&mut self.simulation.mobs[i]).can_add(&stack, max) {
                     j += 1;
                     continue;
                 }
-                let before = self.dropped[j].clone();
+                let before = self.simulation.dropped[j].clone();
                 let rest = villager::ext_mut(&mut self.simulation.mobs[i]).add_item(stack, max);
                 if rest.as_ref().is_none_or(|r| r.count < before.stack.count) {
                     let id = self.simulation.mobs[i].id;
@@ -358,7 +358,7 @@ impl Game<'_> {
                         self.remove_dropped(j);
                     }
                     Some(rest) => {
-                        self.dropped[j].stack.count = rest.count;
+                        self.simulation.dropped[j].stack.count = rest.count;
                         j += 1;
                     }
                 }
@@ -514,7 +514,7 @@ impl Game<'_> {
         let mut mobs = std::mem::take(&mut self.simulation.mobs);
         let mut events = Vec::new();
         villager::stop_sleeping(&mut mobs[i], &self.mob_world_base(&[]), &mut events);
-        villager_brain::woken(&mut mobs[i], self.world.game_time);
+        villager_brain::woken(&mut mobs[i], self.simulation.world.game_time);
         self.simulation.mobs = mobs;
         if let Err(e) = self.handle_mob_events(events) {
             log::warn!("waking villager {id}: {e}");

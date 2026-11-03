@@ -158,7 +158,7 @@ impl Game<'_> {
         let Some(tnt) = self.pack.assets.registry.default_state("minecraft:tnt") else {
             return;
         };
-        if self.world.block(pos.x, pos.y, pos.z) == self.world.air {
+        if self.simulation.world.block(pos.x, pos.y, pos.z) == self.simulation.world.air {
             let flags = level_flags::UPDATE_CLIENTS | level_flags::UPDATE_SKIP_ON_PLACE;
             self.with_level(|b, level, ticks| b.set_block(level, ticks, pos, tnt, flags));
         }
@@ -175,7 +175,7 @@ impl Game<'_> {
         // PrimedTnt: the fuse is lit.
         let who = self.sculk_actor();
         self.post_block_game_event("minecraft:prime_fuse", [pos.x, pos.y, pos.z], who, None);
-        let r = &mut self.world.random;
+        let r = &mut self.simulation.world.random;
         let rot = r.next_double() * f64::from(std::f32::consts::TAU);
         let fuse = if short {
             // PrimedTnt.getRandomShortFuse
@@ -210,11 +210,11 @@ impl Game<'_> {
             f64::from(pos.z) + 0.5,
         );
         // An id from the entity counter at once, so a command can name it.
-        self.next_entity += 1;
-        self.tnts.push(PrimedTnt {
+        self.simulation_server.next_entity += 1;
+        self.simulation.tnts.push(PrimedTnt {
             join: Default::default(),
             no_gravity: false,
-            id: self.next_entity,
+            id: self.simulation_server.next_entity,
             position,
             previous: position,
             velocity: Vec3::new(-rot.sin() * 0.02, f64::from(0.2f32), -rot.cos() * 0.02),
@@ -232,9 +232,9 @@ impl Game<'_> {
     /// One primed TNT's `tick`: it moves, and explodes when its fuse is out.
     /// `i` is its place in the list; the caller has checked it is ticking.
     pub(super) fn tick_one_tnt(&mut self, i: usize) -> Result<()> {
-        let t = &mut self.tnts[i];
+        let t = &mut self.simulation.tnts[i];
         let tops = t.tick(
-            &self.world,
+            &self.simulation.world,
             self.collision,
             &self.pack.assets,
             self.res.facts(),
@@ -244,7 +244,7 @@ impl Game<'_> {
         for pos in tops {
             self.bubble_column_particles(pos);
         }
-        let t = &mut self.tnts[i];
+        let t = &mut self.simulation.tnts[i];
         if t.fuse <= 0 {
             let center = [
                 t.position.x,
@@ -254,7 +254,7 @@ impl Game<'_> {
             let bounds = t.bounds();
             let (owner, guest, power) = (t.owner, t.guest, t.power);
             let in_water = self.bounds_in_water(bounds);
-            self.tnts.remove(i);
+            self.simulation.tnts.remove(i);
             // ExplosionInteraction.TNT: the tnt_explosion_drop_decay rule.
             let interaction = self.destroy_type("tnt_explosion_drop_decay");
             self.combat.explosion_in_water = in_water;
@@ -288,7 +288,10 @@ impl Game<'_> {
         let Some(hit) = self.pick() else {
             return Ok(false);
         };
-        let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+        let state = self
+            .simulation
+            .world
+            .block(hit.pos[0], hit.pos[1], hit.pos[2]);
         if &*self.res.facts().get(state).name != "minecraft:tnt" {
             return Ok(false);
         }
@@ -298,7 +301,7 @@ impl Game<'_> {
         }
         let guest = self.lan_acting;
         self.spawn_primed_tnt(pos, false, Some(Who::Player), guest);
-        let air = self.world.air;
+        let air = self.simulation.world.air;
         self.with_level(|b, level, ticks| {
             b.set_block(level, ticks, pos, air, level_flags::UPDATE_ALL_IMMEDIATE)
         });
@@ -314,7 +317,7 @@ impl Game<'_> {
     /// `TntRenderer`: the block centred on the entity, swelling over the last
     /// 10 ticks and flashing white every 5 ticks.
     pub(super) fn tnt_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
-        if self.tnts.is_empty() {
+        if self.simulation.tnts.is_empty() {
             return;
         }
         let Some(state) = self.pack.assets.registry.default_state("minecraft:tnt") else {
@@ -352,7 +355,7 @@ impl Game<'_> {
             glam::DVec3::splat(PrimedTnt::SIZE),
             self.view_scale(),
         );
-        for t in &self.tnts {
+        for t in &self.simulation.tnts {
             // EntityRenderer.shouldRender.
             if !self.standing_entity_in_view(
                 camera,
@@ -380,7 +383,7 @@ impl Game<'_> {
                 t.previous.z + (t.position.z - t.previous.z) * alpha,
             ) - camera;
             let o = base.as_vec3();
-            let light = self.world.light(
+            let light = self.simulation.world.light(
                 t.position.x.floor() as i32,
                 (t.position.y + 0.5).floor() as i32,
                 t.position.z.floor() as i32,
@@ -443,11 +446,11 @@ impl Game<'_> {
     /// `positionRider` for the mobs riding primed TNT: the passenger attachment
     /// (the top of its 0.98 box), less the rider's own vehicle attachment.
     pub(super) fn seat_tnt_mobs(&mut self) {
-        for i in 0..self.tnts.len() {
+        for i in 0..self.simulation.tnts.len() {
             let (id, pos, prev) = (
-                self.tnts[i].id,
-                self.tnts[i].position,
-                self.tnts[i].previous,
+                self.simulation.tnts[i].id,
+                self.simulation.tnts[i].position,
+                self.simulation.tnts[i].previous,
             );
             if id == 0 {
                 continue;

@@ -96,7 +96,7 @@ impl Game<'_> {
                 && self
                     .res
                     .facts()
-                    .get(self.world.block(feet[0], feet[1], feet[2]))
+                    .get(self.simulation.world.block(feet[0], feet[1], feet[2]))
                     .fluid_level
                     == 0
             {
@@ -121,7 +121,7 @@ impl Game<'_> {
                 Some(s) => [s[0], below, s[2]],
                 None => [position.x.floor() as i32, below, position.z.floor() as i32],
             };
-            let state = self.world.block(at[0], at[1], at[2]);
+            let state = self.simulation.world.block(at[0], at[1], at[2]);
             if self.res.facts().get(state).render_shape == RenderShape::Invisible {
                 continue;
             }

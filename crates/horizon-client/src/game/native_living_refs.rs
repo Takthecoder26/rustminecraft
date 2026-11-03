@@ -95,6 +95,7 @@ impl Game<'_> {
                 .equipment_stacks()[slot as usize]
                 .clone(),
             Target::Stand(id) => self
+                .simulation
                 .armor_stands
                 .iter()
                 .find(|a| a.id == id)?

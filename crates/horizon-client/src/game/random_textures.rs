@@ -25,7 +25,7 @@ impl Game<'_> {
                 continue;
             }
             let m = &self.simulation.mobs[i];
-            let seed = seed(m, self.persist.uuids.get(&id).copied());
+            let seed = seed(m, self.simulation.persist.uuids.get(&id).copied());
             let seen = (!m.random_textures.has_seen()).then(|| self.seen_at(m.position));
             choose(
                 &mut self.simulation.mobs[i],
@@ -45,7 +45,11 @@ impl Game<'_> {
             at.z.floor() as i32,
         );
         let block = |y| {
-            let state = self.pack.assets.registry.state(self.world.block(x, y, z))?;
+            let state = self
+                .pack
+                .assets
+                .registry
+                .state(self.simulation.world.block(x, y, z))?;
             let properties = state
                 .properties
                 .iter()
@@ -53,13 +57,18 @@ impl Game<'_> {
                 .collect();
             Some((state.name.clone(), properties))
         };
-        let weather = &self.world.weather;
+        let weather = &self.simulation.world.weather;
         Seen {
             biome: self.biome_name_at(at),
             y,
             blocks: [block(y - 1), block(y)].into_iter().flatten().collect(),
-            moon_phase: self.world.day_time.div_euclid(24_000).rem_euclid(8) as i32,
-            day_time: self.world.day_time.rem_euclid(24_000) as i32,
+            moon_phase: self
+                .simulation
+                .world
+                .day_time
+                .div_euclid(24_000)
+                .rem_euclid(8) as i32,
+            day_time: self.simulation.world.day_time.rem_euclid(24_000) as i32,
             weather: if weather.thundering {
                 Weather::Thunder
             } else if weather.raining {

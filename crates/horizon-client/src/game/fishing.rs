@@ -180,7 +180,7 @@ impl Game<'_> {
             return false;
         };
         let at = [p.position.x, p.position.y, p.position.z];
-        let pitch = 0.4 / (self.world.random.next_float() * 0.4 + 0.8);
+        let pitch = 0.4 / (self.simulation.world.random.next_float() * 0.4 + 0.8);
         if self.hook.is_some() {
             let damage = self.retrieve_hook(stack);
             self.damage_held(damage);
@@ -210,7 +210,7 @@ impl Game<'_> {
             );
             let mut v = Vec3::new(f64::from(-y_sin), f64::from(dir_y), f64::from(-y_cos));
             let len = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
-            let r = &mut self.world.random;
+            let r = &mut self.simulation.world.random;
             v = Vec3::new(
                 v.x * (0.6 / len + triangle(r, 0.5, 0.0103365)),
                 v.y * (0.6 / len + triangle(r, 0.5, 0.0103365)),
@@ -218,9 +218,9 @@ impl Game<'_> {
             );
             // A spawned hook's start position is its feet: centre the box on the eye.
             let start = Vec3::new(start.x, start.y - SIZE / 2.0, start.z);
-            self.next_entity += 1;
+            self.simulation_server.next_entity += 1;
             self.hook = Some(Hook {
-                id: self.next_entity,
+                id: self.simulation_server.next_entity,
                 position: start,
                 previous: start,
                 velocity: v,
@@ -276,14 +276,19 @@ impl Game<'_> {
             let mut hooked_item = false;
             if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 m.velocity = pulled(m.velocity);
-            } else if let Some(item) = self.dropped.iter_mut().find(|i| i.id == id) {
+            } else if let Some(item) = self.simulation.dropped.iter_mut().find(|i| i.id == id) {
                 pull_item(item, Vec3::new(d.x * 0.1, d.y * 0.1, d.z * 0.1));
                 hooked_item = true;
-            } else if let Some(t) = self.tnts.iter_mut().find(|t| t.id != 0 && t.id == id) {
+            } else if let Some(t) = self
+                .simulation
+                .tnts
+                .iter_mut()
+                .find(|t| t.id != 0 && t.id == id)
+            {
                 t.velocity = pulled(t.velocity);
-            } else if let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id) {
+            } else if let Some(a) = self.simulation.armor_stands.iter_mut().find(|a| a.id == id) {
                 a.velocity = pulled(a.velocity);
-            } else if let Some(b) = self.boats.iter_mut().find(|b| b.id == id) {
+            } else if let Some(b) = self.simulation.boats.iter_mut().find(|b| b.id == id) {
                 b.velocity = pulled(b.velocity);
             } else if self.creatures.hook_targets.iter().any(|t| t.id == id) {
                 // A player: the hub moves them when the tick ends.
@@ -318,7 +323,7 @@ impl Game<'_> {
                 .as_mut()
                 .and_then(|p| p.attribute("minecraft:luck").ok())
                 .unwrap_or(0.0) as f32;
-            let mut random = self.world.random.clone();
+            let mut random = self.simulation.world.random.clone();
             let items = loot.roll(
                 "minecraft:gameplay/fishing",
                 &mut random,
@@ -326,7 +331,7 @@ impl Game<'_> {
                 biome.as_deref(),
                 Some(hook.open_water),
             );
-            self.world.random = random;
+            self.simulation.world.random = random;
             let mut caught = Vec::new();
             for stack in items {
                 // FishingHook.retrieve: fish_caught for each catch in #minecraft:fishes.
@@ -376,7 +381,7 @@ impl Game<'_> {
                     v,
                     0,
                 );
-                let xp = self.world.random.next_int_bound(6).unwrap_or(0) as u32 + 1;
+                let xp = self.simulation.world.random.next_int_bound(6).unwrap_or(0) as u32 + 1;
                 self.spawn_orbs([owner.x, owner.y + 0.5, owner.z + 0.5], xp);
             }
             // CriteriaTriggers.FISHING_ROD_HOOKED: the hook itself is the entity.
@@ -397,7 +402,7 @@ impl Game<'_> {
     }
     pub(super) fn biome_name_at(&self, p: Vec3) -> Option<String> {
         let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-        let c = self.world.chunks.get(&(x >> 4, z >> 4))?;
+        let c = self.simulation.world.chunks.get(&(x >> 4, z >> 4))?;
         Some(
             world_biomes!(self).list[c.biome(x, y, z) as usize]
                 .name
@@ -405,11 +410,14 @@ impl Game<'_> {
         )
     }
     fn water_height(&self, x: i32, y: i32, z: i32) -> Option<(f32, bool)> {
-        let f = self.res.facts().get(self.world.block(x, y, z));
+        let f = self.res.facts().get(self.simulation.world.block(x, y, z));
         if f.fluid != Fluid::Water {
             return None;
         }
-        let above = self.res.facts().get(self.world.block(x, y + 1, z));
+        let above = self
+            .res
+            .facts()
+            .get(self.simulation.world.block(x, y + 1, z));
         let h = if above.fluid == Fluid::Water {
             1.0
         } else {
@@ -419,8 +427,13 @@ impl Game<'_> {
     }
     /// getOpenWaterTypeForBlock: 0 above water, 1 inside water, 2 invalid.
     fn open_water_type(&self, x: i32, y: i32, z: i32) -> u8 {
-        let f = self.res.facts().get(self.world.block(x, y, z));
-        if self.world.is_air(self.world.block(x, y, z)) || &*f.name == "minecraft:lily_pad" {
+        let f = self.res.facts().get(self.simulation.world.block(x, y, z));
+        if self
+            .simulation
+            .world
+            .is_air(self.simulation.world.block(x, y, z))
+            || &*f.name == "minecraft:lily_pad"
+        {
             return 0;
         }
         if f.fluid == Fluid::Water
@@ -464,16 +477,16 @@ impl Game<'_> {
     fn catching_fish(&mut self, h: &mut Hook, b: [i32; 3]) {
         let mut speed = 1;
         let above = [b[0], b[1] + 1, b[2]];
-        let sky = self.world.light(above[0], above[1], above[2]) >> 4 == 15;
+        let sky = self.simulation.world.light(above[0], above[1], above[2]) >> 4 == 15;
         // Level.isRainingAt: rain (not snow) reaches the position.
-        if self.world.random.next_float() < 0.25
+        if self.simulation.world.random.next_float() < 0.25
             && self.with_level(|b, level, _| {
                 b.is_raining_at(level, BlockPos::new(above[0], above[1], above[2]))
             })
         {
             speed += 1;
         }
-        let r = &mut self.world.random;
+        let r = &mut self.simulation.world.random;
         if r.next_float() < 0.5 && !sky {
             speed -= 1;
         }
@@ -489,7 +502,7 @@ impl Game<'_> {
             if h.time_until_hooked > 0 {
                 // The fish swimming up: a bubble now and then, and a fishing
                 // particle to each side of its path.
-                h.fish_angle += triangle(&mut self.world.random, 0.0, 9.188) as f32;
+                h.fish_angle += triangle(&mut self.simulation.world.random, 0.0, 9.188) as f32;
                 let angle = h.fish_angle * (std::f64::consts::PI / 180.0) as f32;
                 let (sin, cos) = (trig::sin(f64::from(angle)), trig::cos(f64::from(angle)));
                 let distance = h.time_until_hooked as f32 * 0.1;
@@ -499,7 +512,7 @@ impl Game<'_> {
                     h.position.z + f64::from(cos * distance),
                 ];
                 if self.water_block(fish) {
-                    if self.world.random.next_float() < 0.15 {
+                    if self.simulation.world.random.next_float() < 0.15 {
                         let spread = [f64::from(sin), 0.1, f64::from(cos)];
                         let at = [fish[0], fish[1] - f64::from(0.1f32), fish[2]];
                         self.send_particles(ParticleType::Bubble, at, spread, 0.0, 1);
@@ -524,8 +537,10 @@ impl Game<'_> {
                         return;
                     }
                 }
-                let pitch =
-                    1.0 + (self.world.random.next_float() - self.world.random.next_float()) * 0.4;
+                let pitch = 1.0
+                    + (self.simulation.world.random.next_float()
+                        - self.simulation.world.random.next_float())
+                        * 0.4;
                 self.audio.play(
                     "minecraft:entity.fishing_bobber.splash",
                     Some(at),
@@ -539,7 +554,7 @@ impl Game<'_> {
                 for kind in [ParticleType::Bubble, ParticleType::Fishing] {
                     self.send_particles(kind, at, spread, f64::from(0.2f32), count);
                 }
-                h.nibble = 20 + self.world.random.next_int_bound(21).unwrap_or(0);
+                h.nibble = 20 + self.simulation.world.random.next_int_bound(21).unwrap_or(0);
             }
         } else if h.time_until_lured > 0 {
             h.time_until_lured -= speed;
@@ -551,7 +566,7 @@ impl Game<'_> {
             } else if h.time_until_lured < 60 {
                 tease += (60 - h.time_until_lured) as f32 * 0.01;
             }
-            let r = &mut self.world.random;
+            let r = &mut self.simulation.world.random;
             if r.next_float() < tease {
                 // A splash where a fish is teasing the bait.
                 let angle = (r.next_float() * 360.0) * (std::f64::consts::PI / 180.0) as f32;
@@ -562,22 +577,31 @@ impl Game<'_> {
                     h.position.z + f64::from(trig::cos(f64::from(angle)) * distance) * 0.1,
                 ];
                 if self.water_block(fish) {
-                    let count = 2 + self.world.random.next_int_bound(2).unwrap_or(0) as u32;
+                    let count =
+                        2 + self.simulation.world.random.next_int_bound(2).unwrap_or(0) as u32;
                     let spread = [f64::from(0.1f32), 0.0, f64::from(0.1f32)];
                     self.send_particles(ParticleType::Splash, fish, spread, 0.0, count);
                 }
             }
             if h.time_until_lured <= 0 {
-                h.fish_angle = self.world.random.next_float() * 360.0;
-                h.time_until_hooked = 20 + self.world.random.next_int_bound(61).unwrap_or(0);
+                h.fish_angle = self.simulation.world.random.next_float() * 360.0;
+                h.time_until_hooked =
+                    20 + self.simulation.world.random.next_int_bound(61).unwrap_or(0);
             }
         } else {
-            h.time_until_lured = 100 + self.world.random.next_int_bound(501).unwrap_or(0) - h.lure;
+            h.time_until_lured = 100
+                + self
+                    .simulation
+                    .world
+                    .random
+                    .next_int_bound(501)
+                    .unwrap_or(0)
+                - h.lure;
         }
     }
     /// `catchingFish`'s check below a fish: the block under it is water.
     fn water_block(&self, fish: [f64; 3]) -> bool {
-        let state = self.world.block(
+        let state = self.simulation.world.block(
             fish[0].floor() as i32,
             (fish[1] - 1.0).floor() as i32,
             fish[2].floor() as i32,
@@ -663,12 +687,12 @@ impl Game<'_> {
                 let to = h.position.add_vector(h.velocity);
                 let block_hit = {
                     let mut scene = SceneCollisions {
-                        world: &self.world,
+                        world: &self.simulation.world,
                         binding: self.collision,
                         subject: None,
                     };
                     traverse_blocks(h.position, to, 1024, |p: BlockPos| {
-                        let state = self.world.block(p.x, p.y, p.z);
+                        let state = self.simulation.world.block(p.x, p.y, p.z);
                         if self.res.facts().is_air(state) {
                             return None;
                         }
@@ -701,20 +725,23 @@ impl Game<'_> {
                                 .map(|t| (t.id, t.bounds)),
                         )
                         .chain(
-                            self.armor_stands
+                            self.simulation
+                                .armor_stands
                                 .iter()
                                 .filter(|a| a.health > 0.0 && !a.marker)
                                 .map(|a| (a.id, a.bounds())),
                         )
                         .chain(
-                            self.boats
+                            self.simulation
+                                .boats
                                 .iter()
                                 .filter(|b| Some(b.id) != own_vehicle)
                                 .map(|b| (b.id, b.bounds())),
                         )
-                        .chain(self.dropped.iter().map(|i| (i.id, i.bounds())))
+                        .chain(self.simulation.dropped.iter().map(|i| (i.id, i.bounds())))
                         .chain(
-                            self.tnts
+                            self.simulation
+                                .tnts
                                 .iter()
                                 .filter(|t| t.id != 0)
                                 .map(|t| (t.id, t.bounds())),
@@ -764,25 +791,32 @@ impl Game<'_> {
                             })
                     })
                     .or_else(|| {
-                        self.armor_stands.iter().find(|a| a.id == id).map(|a| {
-                            let b = a.bounds();
-                            (a.position, b.max_position().y - b.min_position().y)
-                        })
+                        self.simulation
+                            .armor_stands
+                            .iter()
+                            .find(|a| a.id == id)
+                            .map(|a| {
+                                let b = a.bounds();
+                                (a.position, b.max_position().y - b.min_position().y)
+                            })
                     })
                     .or_else(|| {
-                        self.boats
+                        self.simulation
+                            .boats
                             .iter()
                             .find(|b| b.id == id)
                             .map(|b| (b.position, super::boats::HEIGHT))
                     })
                     .or_else(|| {
-                        self.dropped
+                        self.simulation
+                            .dropped
                             .iter()
                             .find(|i| i.id == id)
                             .map(|i| (i.position, horizon_client::entities::ItemEntity::WIDTH))
                     })
                     .or_else(|| {
-                        self.tnts
+                        self.simulation
+                            .tnts
                             .iter()
                             .find(|t| t.id != 0 && t.id == id)
                             .map(|t| (t.position, super::tnt::PrimedTnt::SIZE))
@@ -800,7 +834,7 @@ impl Game<'_> {
                 if force.abs() < 0.01 {
                     force += force.signum() * 0.1;
                 }
-                let r = f64::from(self.world.random.next_float());
+                let r = f64::from(self.simulation.world.random.next_float());
                 h.velocity = Vec3::new(v.x * 0.9, v.y - force * r * 0.2, v.z * 0.9);
                 if h.nibble <= 0 && h.time_until_hooked <= 0 {
                     h.open_water = true;
@@ -811,7 +845,7 @@ impl Game<'_> {
                 if in_water {
                     h.out_of_water = (h.out_of_water - 1).max(0);
                     if h.nibble > 0 {
-                        let r = &mut self.world.random;
+                        let r = &mut self.simulation.world.random;
                         let dip = -0.1 * f64::from(r.next_float()) * f64::from(r.next_float());
                         h.velocity.y += dip;
                     }
@@ -825,7 +859,7 @@ impl Game<'_> {
             h.velocity.y -= 0.03;
         }
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
@@ -939,9 +973,11 @@ impl Game<'_> {
         let s = 0.25;
         let uv = [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]];
         for p in hooks {
-            let light =
-                self.world
-                    .light(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
+            let light = self.simulation.world.light(
+                p.x.floor() as i32,
+                p.y.floor() as i32,
+                p.z.floor() as i32,
+            );
             let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let corners = [
                 p - right * s - up * s,
@@ -1364,7 +1400,8 @@ impl Game<'_> {
                         .find(|m| m.id == id && m.alive())
                         .map(|m| (m.position, f64::from(m.height())))
                         .or_else(|| {
-                            self.dropped
+                            self.simulation
+                                .dropped
                                 .iter()
                                 .find(|i| i.id == id)
                                 .map(|i| (i.position, horizon_client::entities::ItemEntity::WIDTH))
@@ -1385,7 +1422,7 @@ impl Game<'_> {
                 if force.abs() < 0.01 {
                     force += force.signum() * 0.1;
                 }
-                let r = f64::from(self.world.random.next_float());
+                let r = f64::from(self.simulation.world.random.next_float());
                 velocity = Vec3::new(
                     velocity.x * 0.9,
                     velocity.y - force * r * 0.2,
@@ -1397,7 +1434,7 @@ impl Game<'_> {
             velocity.y -= 0.03;
         }
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };

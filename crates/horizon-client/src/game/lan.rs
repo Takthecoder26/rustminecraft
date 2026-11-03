@@ -1197,7 +1197,7 @@ impl Game<'_> {
                 // The server's own world: its finished chunks and how many it
                 // has generated or loaded so far.
                 "world": {
-                    "chunks": self.world.chunks.len(),
+                    "chunks": self.simulation.world.chunks.len(),
                     "generated": self.streaming.generated_total,
                 },
                 "guests": h.hub.guests.iter().map(|g| json!({
@@ -1327,8 +1327,8 @@ impl Game<'_> {
         hub.flat_world = self.world_flat;
         hub.debug_world = self.world_debug;
         let port = hub.lan.port;
-        self.world.block_log = Some(Vec::new());
-        self.world.light_log = Some(Default::default());
+        self.simulation.world.block_log = Some(Vec::new());
+        self.simulation.world.light_log = Some(Default::default());
         self.lan = Some(LanHost {
             players_told_left: false,
             hub,
@@ -1382,12 +1382,12 @@ impl Game<'_> {
         host.hub.disconnect_all();
         // Give the network threads a moment to flush the disconnect packets.
         std::thread::sleep(std::time::Duration::from_millis(100));
-        self.world.block_log = None;
-        self.world.light_log = None;
+        self.simulation.world.block_log = None;
+        self.simulation.world.light_log = None;
         self.audio.capture = None;
-        self.lan_events.clear();
+        self.simulation.lan_events.clear();
         self.lan_songs.clear();
-        self.lan_critical_hits.clear();
+        self.simulation.lan_critical_hits.clear();
         self.lan_cushion_breaks.clear();
         self.streaming.extra.clear();
         if announce {
@@ -1673,7 +1673,7 @@ impl Game<'_> {
             host.hub.config.default_game_mode = mode;
             // `setWorldGameType` and `DefaultGameModeCommands.setMode`: a
             // world that forces its mode puts the guests online in it.
-            enforce_guest_game_mode(host, &self.world, self.collision);
+            enforce_guest_game_mode(host, &self.simulation.world, self.collision);
         }
     }
 
@@ -1682,7 +1682,7 @@ impl Game<'_> {
         if let Some(host) = self.lan.as_mut() {
             host.settings.force_game_mode = force;
             host.hub.config.force_game_mode = force;
-            enforce_guest_game_mode(host, &self.world, self.collision);
+            enforce_guest_game_mode(host, &self.simulation.world, self.collision);
         }
     }
 
@@ -1761,7 +1761,7 @@ impl Game<'_> {
                     None => player_entity,
                 },
                 Holder::Mob(id) | Holder::Boat(id) => Some(id as i32),
-                Holder::Knot(p) => self.knot_ids.get(&p).map(|&id| id as i32),
+                Holder::Knot(p) => self.simulation.knot_ids.get(&p).map(|&id| id as i32),
             });
             let e = out.add(m.id as i32, entity_uuid(m.id), m.kind.id.as_str());
             e.position = [m.position.x, m.position.y, m.position.z];
@@ -1773,7 +1773,7 @@ impl Game<'_> {
                 m,
                 hub,
                 player_entity,
-                self.world.game_time,
+                self.simulation.world.game_time,
                 &mut e.meta,
                 &mut e.defaults,
             );
@@ -1785,7 +1785,7 @@ impl Game<'_> {
             self.mob_attributes(m, &mut e.attributes);
             e.leash = leash;
         }
-        for d in self.dropped.iter().filter(|d| d.id > after) {
+        for d in self.simulation.dropped.iter().filter(|d| d.id > after) {
             let stack = hub.stack(&Some(d.stack.clone()));
             let e = out.add(d.id as i32, entity_uuid(d.id), "minecraft:item");
             e.position = [d.position.x, d.position.y, d.position.z];
@@ -1804,7 +1804,7 @@ impl Game<'_> {
             }
             e.meta.push((8, serializer::ITEM_STACK, Value::Item(stack)));
         }
-        for o in self.orbs.iter().filter(|o| o.id > after) {
+        for o in self.simulation.orbs.iter().filter(|o| o.id > after) {
             let e = out.add(o.id as i32, entity_uuid(o.id), "minecraft:experience_orb");
             e.position = [o.position.x, o.position.y, o.position.z];
             e.on_ground = o.on_ground;
@@ -2097,9 +2097,9 @@ impl Game<'_> {
         let events = {
             let clock_rate = self.network_clock_rate();
             let mut ctx = TickCtx {
-                world: &mut self.world,
+                world: &mut self.simulation.world,
                 entities: entities.as_slice(),
-                next_entity: &mut self.next_entity,
+                next_entity: &mut self.simulation_server.next_entity,
                 spawn,
                 difficulty: i32::from(self.ui.difficulty),
                 difficulty_locked: self.level.difficulty_locked,
@@ -2166,7 +2166,7 @@ impl Game<'_> {
             return None;
         }
         self.lan_assign_ids();
-        Some(self.next_entity as i32)
+        Some(self.simulation_server.next_entity as i32)
     }
 
     /// ServerLevel.tick's ChunkMap.tick point, after the block ticks and
@@ -2214,7 +2214,7 @@ impl Game<'_> {
             && host.hub.guests.iter().any(|g| host.hub.here(g))
         {
             self.lan_assign_ids();
-            if self.next_entity != next {
+            if self.simulation_server.next_entity != next {
                 let mut states = States::default();
                 self.lan_entities(&host.mob_players, &mut host.hub, &mut states, false, next);
                 self.lan_hook_states(&host.play, &host.hub, &mut states);
@@ -2288,13 +2288,13 @@ impl Game<'_> {
                 self.lan_entities(&host.mob_players, &mut host.hub, &mut states, true, 0);
                 self.lan_hook_states(&host.play, &host.hub, &mut states);
                 self.lan_entity_uuids(&mut states);
-                host.states_next_entity = Some(self.next_entity);
+                host.states_next_entity = Some(self.simulation_server.next_entity);
             } else {
                 host.states_next_entity = None;
                 states.clear();
                 // Nobody can receive past movement. A returning viewer pairs
                 // from the cart's current position/rotation, as AddEntity does.
-                for cart in &mut self.carts {
+                for cart in &mut self.simulation.carts {
                     cart.lerp_steps.clear();
                 }
             }
@@ -2302,10 +2302,10 @@ impl Game<'_> {
             for m in &mut self.simulation.mobs {
                 m.needs_sync = false;
             }
-            for p in &mut self.creatures.projectiles {
+            for p in &mut self.simulation.projectiles {
                 p.needs_sync = false;
             }
-            for d in &mut self.dropped {
+            for d in &mut self.simulation.dropped {
                 d.needs_sync = false;
             }
             // The step command reaches clients before the events its tick
@@ -2319,17 +2319,18 @@ impl Game<'_> {
             // (`ChunkHolder.broadcastChanges` in `tick_level` below): the
             // guest re-runs a piston's `triggerEvent` while its level still
             // has the blocks as they were before the move.
-            for (pos, b0, b1, state) in std::mem::take(&mut self.lan_block_events) {
+            for (pos, b0, b1, state) in std::mem::take(&mut self.simulation.lan_block_events) {
                 host.hub.block_event(pos, b0, b1, state);
             }
             let entities = states.as_slice();
             // An entity that left the level since the last tick (a snowball
             // that hit) is dropped by the tracker below: its event goes out
             // first, as `Level.broadcastEntityEvent` precedes the discard.
-            let (gone, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.lan_entity_events)
-                .into_iter()
-                .partition(|(id, ..)| !entities.iter().any(|e| e.id == *id));
-            self.lan_entity_events = later;
+            let (gone, later): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.simulation.lan_entity_events)
+                    .into_iter()
+                    .partition(|(id, ..)| !entities.iter().any(|e| e.id == *id));
+            self.simulation.lan_entity_events = later;
             for (id, event, at) in gone {
                 host.hub.entity_event(id, event, at);
             }
@@ -2338,9 +2339,9 @@ impl Game<'_> {
             let events = {
                 let clock_rate = self.network_clock_rate();
                 let mut ctx = TickCtx {
-                    world: &mut self.world,
+                    world: &mut self.simulation.world,
                     entities,
-                    next_entity: &mut self.next_entity,
+                    next_entity: &mut self.simulation_server.next_entity,
                     spawn,
                     difficulty: i32::from(self.ui.difficulty),
                     difficulty_locked: self.level.difficulty_locked,
@@ -2556,9 +2557,9 @@ impl Game<'_> {
         };
         let clock_rate = self.network_clock_rate();
         let mut ctx = TickCtx {
-            world: &mut self.world,
+            world: &mut self.simulation.world,
             entities,
-            next_entity: &mut self.next_entity,
+            next_entity: &mut self.simulation_server.next_entity,
             spawn,
             difficulty: i32::from(self.ui.difficulty),
             difficulty_locked: self.level.difficulty_locked,
@@ -2617,7 +2618,8 @@ impl Game<'_> {
                     } else {
                         self.lan_acting
                     };
-                    self.lan_events
+                    self.simulation
+                        .lan_events
                         .push((*id, [pos.x, pos.y, pos.z], *data, except));
                 }
                 // `ServerLevel.runBlockEvents` broadcasts a handled block
@@ -2626,7 +2628,8 @@ impl Game<'_> {
                 // what animates the move there. `state` is the block the
                 // event named, read before it ran (the packet's `block`).
                 horizon_world::level::LevelEvent::BlockEntityEvent { pos, state, a, b } => {
-                    self.lan_block_events
+                    self.simulation
+                        .lan_block_events
                         .push(([pos.x, pos.y, pos.z], *a, *b, state.0));
                 }
                 _ => {}
@@ -2637,14 +2640,14 @@ impl Game<'_> {
     /// `Level.blockEvent` for the guests (`ClientboundBlockEventPacket`).
     pub(super) fn lan_block_event(&mut self, pos: [i32; 3], b0: i32, b1: i32) {
         if self.audio.capture.is_some() {
-            let state = self.world.block(pos[0], pos[1], pos[2]).0;
-            self.lan_block_events.push((pos, b0, b1, state));
+            let state = self.simulation.world.block(pos[0], pos[1], pos[2]).0;
+            self.simulation.lan_block_events.push((pos, b0, b1, state));
         }
     }
     /// `Level.broadcastEntityEvent` for the guests.
     pub(super) fn lan_entity_event(&mut self, id: i32, event: i8, at: [f64; 3]) {
         if self.audio.capture.is_some() {
-            self.lan_entity_events.push((id, event, at));
+            self.simulation.lan_entity_events.push((id, event, at));
         }
         // Event 21: a window that simulates the world itself is its own
         // client, and hears the guardian's hum too.
@@ -2737,12 +2740,14 @@ impl Game<'_> {
         self.particles
             .tracking_emitter(ParticleOptions::simple(particle), feet, width, height);
         if self.audio.capture.is_some() {
-            self.lan_critical_hits.push((attacker, id, magic));
+            self.simulation
+                .lan_critical_hits
+                .push((attacker, id, magic));
         }
     }
     /// Send the tick's level events, sounds and mob animations.
     fn lan_flush_effects(&mut self, host: &mut LanHost) {
-        let critical_hits = std::mem::take(&mut self.lan_critical_hits);
+        let critical_hits = std::mem::take(&mut self.simulation.lan_critical_hits);
         let kinetic_hits = std::mem::take(&mut self.lan_kinetic_hits);
         for (state, at) in std::mem::take(&mut self.lan_cushion_breaks) {
             if let Some(id) = host
@@ -2771,7 +2776,7 @@ impl Game<'_> {
                 );
             }
         }
-        for (kind, pos, data, acting) in std::mem::take(&mut self.lan_events) {
+        for (kind, pos, data, acting) in std::mem::take(&mut self.simulation.lan_events) {
             if kind == 2001 {
                 host.broken
                     .push([f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])]);
@@ -2788,10 +2793,10 @@ impl Game<'_> {
                 None => host.hub.level_event(1011, pos, 0, None),
             }
         }
-        for (pos, b0, b1, state) in std::mem::take(&mut self.lan_block_events) {
+        for (pos, b0, b1, state) in std::mem::take(&mut self.simulation.lan_block_events) {
             host.hub.block_event(pos, b0, b1, state);
         }
-        for (id, event, at) in std::mem::take(&mut self.lan_entity_events) {
+        for (id, event, at) in std::mem::take(&mut self.simulation.lan_entity_events) {
             host.hub.entity_event(id, event, at);
         }
         for (kind, pos, data) in std::mem::take(&mut self.lan_global_events) {
@@ -2856,7 +2861,7 @@ impl Game<'_> {
             }
             seen.insert(m.id, (m.hurt_time, dead, swing));
         }
-        if let Some(d) = self.dragon.as_ref().filter(|d| d.id != 0) {
+        if let Some(d) = self.simulation.dragon.as_ref().filter(|d| d.id != 0) {
             let id = d.id;
             let dead = !d.alive();
             let old = host
@@ -2952,7 +2957,7 @@ impl Game<'_> {
     }
 
     pub(super) fn bed_facing(&self, head: [i32; 3]) -> i32 {
-        let state = self.world.block(head[0], head[1], head[2]);
+        let state = self.simulation.world.block(head[0], head[1], head[2]);
         let facing = self
             .pack
             .assets

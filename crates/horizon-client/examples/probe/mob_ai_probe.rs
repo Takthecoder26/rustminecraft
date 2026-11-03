@@ -1175,7 +1175,7 @@ pub fn main() -> horizon_client::Result<()> {
                     data: &data,
                     player: player.clone(),
                     nearest_player: player.as_ref().filter(|p| !p.spectator).map(|p| p.position),
-                    others: $snapshot,
+                    others: ($snapshot).into(),
                     dragon: None,
                     leash_boats: &[],
                     others_grid: $grid,

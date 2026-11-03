@@ -406,7 +406,7 @@ impl Game<'_> {
         );
         let range = if volume > 1.0 { 16.0 * volume } else { 16.0 };
         // PlaySoundCommand: one seed for every player.
-        let seed = self.world.random.next_long();
+        let seed = self.simulation.world.random.next_long();
         let here = self.dim.id();
         let mut tracker = Tracker::default();
         for t in targets {
@@ -1305,10 +1305,10 @@ impl Game<'_> {
         // carts have no mob passengers yet.
         match vehicle {
             Target::Boat(id) => {
-                let Some(i) = self.boats.iter().position(|b| b.id == id) else {
+                let Some(i) = self.simulation.boats.iter().position(|b| b.id == id) else {
                     return Err(generic());
                 };
-                if self.boat_passengers(id) >= self.boats[i].max_passengers() {
+                if self.boat_passengers(id) >= self.simulation.boats[i].max_passengers() {
                     return Err(generic());
                 }
                 if let Some(rider) = rider {
@@ -1320,7 +1320,7 @@ impl Game<'_> {
                         return Err(generic());
                     }
                     self.riding = Some(id);
-                    self.yaw = self.boats[i].yaw;
+                    self.yaw = self.simulation.boats[i].yaw;
                     // sendEventAndTriggers: START_RIDING_TRIGGER.
                     self.trigger_player("minecraft:started_riding");
                 }
@@ -1402,9 +1402,9 @@ impl Game<'_> {
             }
             _ => return None,
         };
-        Some(if self.boats.iter().any(|b| b.id == id) {
+        Some(if self.simulation.boats.iter().any(|b| b.id == id) {
             Target::Boat(id)
-        } else if self.carts.iter().any(|c| c.id == id) {
+        } else if self.simulation.carts.iter().any(|c| c.id == id) {
             Target::Cart(id)
         } else {
             Target::Mob(id)
@@ -1428,7 +1428,7 @@ impl Game<'_> {
             f64::from(self.simulation.mobs[i].width()),
             self.simulation.mobs[i].yaw,
         );
-        let at = if let Some(b) = self.boats.iter().position(|b| b.id == v) {
+        let at = if let Some(b) = self.simulation.boats.iter().position(|b| b.id == v) {
             self.boat_dismount_target(b, width, yaw)
         } else if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == v) {
             m.extra.rider = None;
@@ -1459,12 +1459,12 @@ impl Game<'_> {
         let respect = matches!(ctx.get("respectTeams"), Some(Arg::Bool(true)));
         let max_y = match ctx.get("maxHeight") {
             Some(Arg::Int(h)) => *h,
-            _ => self.world.top_y(),
+            _ => self.simulation.world.top_y(),
         };
-        if max_y < self.world.bottom_y() {
+        if max_y < self.simulation.world.bottom_y() {
             return Err(err(
                 "commands.spreadplayers.failed.invalid.height",
-                &[&max_y, &self.world.bottom_y()],
+                &[&max_y, &self.simulation.world.bottom_y()],
             ));
         }
         let targets = self.entities(ctx, "targets", false)?;
@@ -1501,7 +1501,7 @@ impl Game<'_> {
             if lo >= hi {
                 lo
             } else {
-                g.world.random.next_double() * (hi - lo) + lo
+                g.simulation.world.random.next_double() * (hi - lo) + lo
             }
         };
         let mut points: Vec<[f64; 2]> = Vec::with_capacity(count);
@@ -1655,7 +1655,11 @@ impl Game<'_> {
     fn spread_spawn_y(&self, p: [f64; 2], max_y: i32) -> i32 {
         let (x, z) = (p[0].floor() as i32, p[1].floor() as i32);
         let air = |y: i32| {
-            let name: &str = &self.res.facts().get(self.world.block(x, y, z)).name;
+            let name: &str = &self
+                .res
+                .facts()
+                .get(self.simulation.world.block(x, y, z))
+                .name;
             matches!(
                 name,
                 "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
@@ -1665,7 +1669,7 @@ impl Game<'_> {
         let mut air2 = air(y);
         y -= 1;
         let mut air1 = air(y);
-        while y > self.world.bottom_y() {
+        while y > self.simulation.world.bottom_y() {
             y -= 1;
             let current = air(y);
             if !current && air1 && air2 {
@@ -1680,7 +1684,12 @@ impl Game<'_> {
     fn spread_safe(&self, p: [f64; 2], max_y: i32) -> bool {
         let y = self.spread_spawn_y(p, max_y) - 1;
         let (x, z) = (p[0].floor() as i32, p[1].floor() as i32);
-        let name = self.res.facts().get(self.world.block(x, y, z)).name.clone();
+        let name = self
+            .res
+            .facts()
+            .get(self.simulation.world.block(x, y, z))
+            .name
+            .clone();
         let liquid = matches!(&*name, "minecraft:water" | "minecraft:lava");
         let teleportable = self
             .res

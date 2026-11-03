@@ -27,7 +27,7 @@ impl Game<'_> {
         let name = self
             .res
             .facts()
-            .get(self.world.block(pos[0], pos[1], pos[2]))
+            .get(self.simulation.world.block(pos[0], pos[1], pos[2]))
             .name
             .clone();
         let container = is_shulker_box(&name)
@@ -52,7 +52,10 @@ impl Game<'_> {
         let Some(entity) = BlockEntity::for_block(&name) else {
             return;
         };
-        self.world.block_entities.get_or_insert_with(key, || entity);
+        self.simulation
+            .world
+            .block_entities
+            .get_or_insert_with(key, || entity);
         self.container = Some(key);
         self.screen = super::Screen::Inventory;
         self.capture(false);
@@ -63,7 +66,7 @@ impl Game<'_> {
     pub(super) fn container_title(&self, default: String) -> String {
         self.container_parts()
             .iter()
-            .find_map(|(key, _)| self.world.block_names.get(key))
+            .find_map(|(key, _)| self.simulation.world.block_names.get(key))
             .cloned()
             .unwrap_or(default)
     }
@@ -72,12 +75,19 @@ impl Game<'_> {
         (300..400).contains(&slot)
             && is_shulker_box(&stack.item)
             && self.container.is_some_and(|k| {
-                is_shulker_box(&self.res.facts().get(self.world.block(k.0, k.1, k.2)).name)
+                is_shulker_box(
+                    &self
+                        .res
+                        .facts()
+                        .get(self.simulation.world.block(k.0, k.1, k.2))
+                        .name,
+                )
             })
     }
     /// Opening an ender chest shows the player's ender inventory in its place.
     pub(super) fn open_ender_chest(&mut self, key: (i32, i32, i32)) {
-        self.world
+        self.simulation
+            .world
             .block_entities
             .insert(key, BlockEntity::Chest(self.ender_items.clone()));
         self.container = Some(key);
@@ -85,7 +95,7 @@ impl Game<'_> {
     }
     /// The block above `key` is a redstone conductor.
     fn conductor_above(&self, key: (i32, i32, i32)) -> bool {
-        let above = self.world.block(key.0, key.1 + 1, key.2);
+        let above = self.simulation.world.block(key.0, key.1 + 1, key.2);
         self.res.behaviours().facts(above).flags
             & horizon_world::level::data::state_flags::CONDUCTOR
             != 0
@@ -137,7 +147,7 @@ impl Game<'_> {
         let Some(key) = self.ender_open.take() else {
             return;
         };
-        if let Some(BlockEntity::Chest(items)) = self.world.block_entities.remove(&key) {
+        if let Some(BlockEntity::Chest(items)) = self.simulation.world.block_entities.remove(&key) {
             self.ender_items = items;
         }
     }
@@ -167,17 +177,17 @@ impl Game<'_> {
     /// the right half (`ChestBlock.getConnectedDirection`).
     pub(super) fn chest_partner(&self, key: (i32, i32, i32)) -> Option<((i32, i32, i32), bool)> {
         let registry = self.pack.assets.registry;
-        let state = registry.state(self.world.block(key.0, key.1, key.2))?;
+        let state = registry.state(self.simulation.world.block(key.0, key.1, key.2))?;
         if !is_chest_block(&state.name) {
             return None;
         }
         let own = chest_half(state)?;
         let (dx, dz) = own.connected_step()?;
         let other = (key.0 + dx, key.1, key.2 + dz);
-        let other_state = registry.state(self.world.block(other.0, other.1, other.2))?;
+        let other_state = registry.state(self.simulation.world.block(other.0, other.1, other.2))?;
         let paired = own.pairs_with(&chest_half(other_state)?)
             && matches!(
-                self.world.block_entities.get(&other),
+                self.simulation.world.block_entities.get(&other),
                 Some(BlockEntity::Chest(items)) if items.len() == 27
             );
         paired.then_some((other, own.kind == "right"))
@@ -200,7 +210,7 @@ impl Game<'_> {
                 .pack
                 .assets
                 .registry
-                .state(self.world.block(key.0, key.1, key.2))
+                .state(self.simulation.world.block(key.0, key.1, key.2))
             && let Some(facing) = state.properties.get("facing")
         {
             let (dx, dy, dz) = match facing.as_str() {
@@ -213,7 +223,7 @@ impl Game<'_> {
             };
             at = [at[0] + dx, at[1] + dy, at[2] + dz];
         }
-        let pitch = self.world.random.next_float() * 0.1 + 0.9;
+        let pitch = self.simulation.world.random.next_float() * 0.1 + 0.9;
         // A server's `playSound(null, …)`: every player around, the opener too.
         // `Audio::play` captures the sound while the world is open to the
         // network and `lan_broadcast_effects` sends that tick to every guest,
@@ -227,7 +237,7 @@ impl Game<'_> {
         let name = self
             .res
             .facts()
-            .get(self.world.block(key.0, key.1, key.2))
+            .get(self.simulation.world.block(key.0, key.1, key.2))
             .name
             .clone();
         let sound = if is_shulker_box(&name) {
@@ -269,7 +279,7 @@ impl Game<'_> {
         let Some(key) = self.container else {
             return Vec::new();
         };
-        let Some(entity) = self.world.block_entities.get(&key) else {
+        let Some(entity) = self.simulation.world.block_entities.get(&key) else {
             return Vec::new();
         };
         let own = (key, entity.slots().len());
@@ -316,7 +326,7 @@ impl Game<'_> {
         let (Some(pos), Some(eye)) = (self.craft_table, self.eye_position()) else {
             return;
         };
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         let table = &*self.res.facts().get(state).name == "minecraft:crafting_table";
         let range = self.reach() + 4.0;
         if !(table && horizon_client::lan::guest::within_block_range(eye, range, pos)) {
@@ -340,7 +350,8 @@ impl Game<'_> {
             n -= size;
         }
         match target.and_then(|(pos, i)| {
-            self.world
+            self.simulation
+                .world
                 .block_entities
                 .get_mut(&pos)
                 .and_then(|e| e.slots_mut().get_mut(i))
@@ -359,7 +370,7 @@ impl Game<'_> {
         Some(
             self.res
                 .facts()
-                .get(self.world.block(k.0, k.1, k.2))
+                .get(self.simulation.world.block(k.0, k.1, k.2))
                 .name
                 .clone(),
         )

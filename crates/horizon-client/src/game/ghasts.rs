@@ -29,7 +29,8 @@ impl Game<'_> {
             })
             .map(|m| m.bounds())
             .chain(
-                self.boats
+                self.simulation
+                    .boats
                     .iter()
                     .filter(|b| Some(b.id) != self.riding)
                     .map(super::boats::Boat::bounds),
@@ -52,8 +53,8 @@ impl Game<'_> {
                     || (m.species() == horizon_client::mobs::Species::Shulker && m.alive())
             })
             .map(|m| m.bounds())
-            .chain(self.boats.iter().map(super::boats::Boat::bounds))
-            .chain(self.carts.iter().map(|c| c.bounds()))
+            .chain(self.simulation.boats.iter().map(super::boats::Boat::bounds))
+            .chain(self.simulation.carts.iter().map(|c| c.bounds()))
             .collect()
     }
     /// `HappyGhast.mobInteract`. Returns whether the click was used.

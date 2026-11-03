@@ -375,7 +375,7 @@ impl Game<'_> {
         // Everything loaded: switch over.
         self.waypoint_styles = horizon_client::locator_bar::WaypointStyles::load(&root);
         self.armor_stand_assets.reload_trims(&root);
-        self.random_tick_sections.clear();
+        self.simulation.random_tick_sections.clear();
         self.portals.sections.clear();
         self.options.resources = root.clone();
         self.pack = pack;
@@ -450,7 +450,8 @@ impl Game<'_> {
         // reload marks every section dirty.
         self.streaming.leaf_culling = self.effective_leaf_culling();
         let context = self.worker_context();
-        self.streaming.reload_resources(&mut self.world, context);
+        self.streaming
+            .reload_resources(&mut self.simulation.world, context);
         self.pending_uploads.clear();
         // New GPU textures: a renderer built from the reloaded resources; the
         // sections are uploaded again as they are meshed.

@@ -89,13 +89,13 @@ impl Game<'_> {
     /// `AbstractBoat.canAddPassenger`: a seat is free and the boat is not
     /// under water.
     pub(super) fn boat_has_room(&self, i: usize) -> bool {
-        let b = &self.boats[i];
+        let b = &self.simulation.boats[i];
         self.boat_passengers(b.id) < b.max_passengers() && !b.under_water()
     }
     /// Where the player in boat `i` sits: in the middle alone, in front of a
     /// mob.
     pub(super) fn player_boat_seat(&self, i: usize) -> Vec3 {
-        let b = &self.boats[i];
+        let b = &self.simulation.boats[i];
         let count = self.boat_players(b.id).max(1) + self.boat_mobs(b.id).len();
         b.seat(0, count, false, PLAYER_RIDING_OFFSET, false)
     }
@@ -154,11 +154,12 @@ impl Game<'_> {
             .map(|j| self.simulation.mobs[j].bounds())
             .collect();
         out.extend(
-            self.boats
+            self.simulation
+                .boats
                 .iter()
                 .filter(|b| b.id != id)
                 .map(Boat::bounds)
-                .chain(self.carts.iter().map(|c| c.bounds()))
+                .chain(self.simulation.carts.iter().map(|c| c.bounds()))
                 .chain(self.players_outside(id).into_iter().map(|(bb, _)| bb))
                 .filter(|bb| bb.intersects(area)),
         );
@@ -184,7 +185,7 @@ impl Game<'_> {
     /// clients, which tick the boats near them (`remote_pushes`).
     pub(super) fn boat_contacts(&mut self, i: usize) {
         let (id, bb, max) = {
-            let b = &self.boats[i];
+            let b = &self.simulation.boats[i];
             (b.id, b.bounds(), b.max_passengers())
         };
         let area = bb.inflate(Vec3::new(
@@ -196,7 +197,7 @@ impl Game<'_> {
         // getControllingPassenger is a player: one rides it (players sit first).
         let pick_up = self.boat_players(id) == 0;
         // canAddPassenger, which startRiding asks after the checks below.
-        let room = !self.boats[i].under_water();
+        let room = !self.simulation.boats[i].under_water();
         // (mob, touched by the boat's sweep, its own pushEntities reaches the boat)
         let teams = self.mob_teams();
         let mobs: Vec<(u32, bool, bool)> = (0..self.simulation.mobs.len())
@@ -273,14 +274,14 @@ impl Game<'_> {
             }
         }
         for (pb, own, touched, pushes) in players {
-            let Some(v) = push_impulse(self.boats[i].position, pb.center())
+            let Some(v) = push_impulse(self.simulation.boats[i].position, pb.center())
                 .filter(|_| boat_pushes(bb, pb, false))
             else {
                 continue;
             };
             for _ in 0..usize::from(touched) + usize::from(pushes) {
                 if count == 0 {
-                    let b = &mut self.boats[i];
+                    let b = &mut self.simulation.boats[i];
                     b.velocity = b.velocity.subtract(v);
                 }
                 if own && let Some(p) = self.player.as_mut() {
@@ -288,34 +289,40 @@ impl Game<'_> {
                 }
             }
         }
-        for k in 0..self.boats.len() {
-            let ob = self.boats[k].bounds();
+        for k in 0..self.simulation.boats.len() {
+            let ob = self.simulation.boats[k].bounds();
             if k == i || !ob.intersects(area) || !boat_pushes(bb, ob, true) {
                 continue;
             }
-            let Some(v) = push_impulse(self.boats[i].position, self.boats[k].position) else {
+            let Some(v) = push_impulse(
+                self.simulation.boats[i].position,
+                self.simulation.boats[k].position,
+            ) else {
                 continue;
             };
             if count == 0 {
-                self.boats[i].velocity = self.boats[i].velocity.subtract(v);
+                self.simulation.boats[i].velocity = self.simulation.boats[i].velocity.subtract(v);
             }
-            if self.boat_passengers(self.boats[k].id) == 0 {
-                self.boats[k].velocity = self.boats[k].velocity.add_vector(v);
+            if self.boat_passengers(self.simulation.boats[k].id) == 0 {
+                self.simulation.boats[k].velocity = self.simulation.boats[k].velocity.add_vector(v);
             }
         }
         let guest_carts = self.guest_vehicles();
-        for c in 0..self.carts.len() {
-            let cb = self.carts[c].bounds();
+        for c in 0..self.simulation.carts.len() {
+            let cb = self.simulation.carts[c].bounds();
             if !cb.intersects(area) || !boat_pushes(bb, cb, false) {
                 continue;
             }
-            let Some(v) = push_impulse(self.boats[i].position, self.carts[c].position) else {
+            let Some(v) = push_impulse(
+                self.simulation.boats[i].position,
+                self.simulation.carts[c].position,
+            ) else {
                 continue;
             };
             if count == 0 {
-                self.boats[i].velocity = self.boats[i].velocity.subtract(v);
+                self.simulation.boats[i].velocity = self.simulation.boats[i].velocity.subtract(v);
             }
-            let cid = self.carts[c].id;
+            let cid = self.simulation.carts[c].id;
             let ridden = self.riding == Some(cid)
                 || guest_carts.contains(&cid)
                 || self
@@ -324,13 +331,13 @@ impl Game<'_> {
                     .iter()
                     .any(|m| m.extra.mount == Some(cid));
             if !ridden {
-                self.carts[c].velocity = self.carts[c].velocity.add_vector(v);
+                self.simulation.carts[c].velocity = self.simulation.carts[c].velocity.add_vector(v);
             }
         }
     }
     /// `AbstractBoat.push(mob)` from boat `i`, which has `count` passengers.
     fn boat_push_mob(&mut self, i: usize, j: usize, count: usize) {
-        let (b, m) = (&self.boats[i], &self.simulation.mobs[j]);
+        let (b, m) = (&self.simulation.boats[i], &self.simulation.mobs[j]);
         if !boat_pushes(b.bounds(), m.bounds(), false) {
             return;
         }
@@ -338,7 +345,7 @@ impl Game<'_> {
             return;
         };
         if count == 0 {
-            let b = &mut self.boats[i];
+            let b = &mut self.simulation.boats[i];
             b.velocity = b.velocity.subtract(v);
         }
         let m = &mut self.simulation.mobs[j];
@@ -352,15 +359,15 @@ impl Game<'_> {
     /// in its seat facing the way the boat does, an animal in a full boat
     /// sideways, its head kept within its reach of its body.
     pub(super) fn seat_boat_mobs(&mut self) {
-        for i in 0..self.boats.len() {
-            let id = self.boats[i].id;
+        for i in 0..self.simulation.boats.len() {
+            let id = self.simulation.boats[i].id;
             let mobs = self.boat_mobs(id);
             if mobs.is_empty() {
                 continue;
             }
             let players = self.boat_players(id);
             let count = players + mobs.len();
-            let b = &self.boats[i];
+            let b = &self.simulation.boats[i];
             let full = count == b.max_passengers();
             let delta = b.delta_rotation;
             let seats: Vec<_> = mobs
@@ -419,7 +426,7 @@ impl Game<'_> {
     /// `getDismountLocationForPassenger` puts it (beside the boat when it
     /// broke: `LivingEntity.dismountVehicle`) and can't board for a while.
     pub(super) fn eject_boat_mobs(&mut self, i: usize, broken: bool) {
-        let b = &self.boats[i];
+        let b = &self.simulation.boats[i];
         let (id, y) = (b.id, b.position.y);
         for j in self.boat_mobs(id) {
             let m = &self.simulation.mobs[j];

@@ -134,7 +134,7 @@ impl Game<'_> {
     /// (`isRespawnFuel`) and the block at `pos` is an anchor that takes another
     /// charge (`canBeCharged`).
     pub(super) fn anchor_takes(&self, pos: [i32; 3], held: Option<&ItemStack>) -> bool {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         held.is_some_and(|s| &*s.item == "minecraft:glowstone")
             && self.is_anchor(state)
             && self.anchor_charges(state) < 4
@@ -145,7 +145,7 @@ impl Game<'_> {
         pos: [i32; 3],
         held: Option<&ItemStack>,
     ) -> Result<AnchorUse> {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if !self.is_anchor(state) {
             return Ok(AnchorUse::Other);
         }
@@ -169,7 +169,7 @@ impl Game<'_> {
     /// `RespawnAnchorBlock.useWithoutItem` on a charged anchor: outside the
     /// Nether it explodes; inside, it becomes the respawn point.
     pub(super) fn respawn_anchor_used(&mut self, pos: [i32; 3]) -> Result<()> {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if !self.anchor_works() {
             return self.explode_anchor(pos, state);
         }
@@ -226,7 +226,10 @@ impl Game<'_> {
     }
     /// `RespawnAnchorBlock.isWaterThatWouldFlow`.
     fn water_would_flow(&self, p: [i32; 3]) -> bool {
-        let f = self.res.facts().get(self.world.block(p[0], p[1], p[2]));
+        let f = self
+            .res
+            .facts()
+            .get(self.simulation.world.block(p[0], p[1], p[2]));
         if f.fluid != Fluid::Water {
             return false;
         }
@@ -238,7 +241,7 @@ impl Game<'_> {
         }
         self.res
             .facts()
-            .get(self.world.block(p[0], p[1] - 1, p[2]))
+            .get(self.simulation.world.block(p[0], p[1] - 1, p[2]))
             .fluid
             != Fluid::Water
     }
@@ -246,14 +249,14 @@ impl Game<'_> {
     /// explosion (`badRespawnPointExplosion`, `ExplosionInteraction.BLOCK`)
     /// whose centre resists like water when water would flow into it.
     fn explode_anchor(&mut self, pos: [i32; 3], _state: BlockStateId) -> Result<()> {
-        self.level_set(pos, self.world.air)?;
+        self.level_set(pos, self.simulation.world.air)?;
         let horizontal = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]]
             .into_iter()
             .any(|d| self.water_would_flow([pos[0] + d[0], pos[1], pos[2] + d[2]]));
         let above = self
             .res
             .facts()
-            .get(self.world.block(pos[0], pos[1] + 1, pos[2]))
+            .get(self.simulation.world.block(pos[0], pos[1] + 1, pos[2]))
             .fluid
             == Fluid::Water;
         let in_water = horizontal || above;
@@ -277,7 +280,7 @@ impl Game<'_> {
             1.0,
             1.0,
         );
-        self.level_set(head, self.world.air)
+        self.level_set(head, self.simulation.world.air)
     }
     /// `BedRule.destroyOnUse` of the dimension's `bed_rule` and
     /// `straw_bed_rule`: true in the Nether and the End.
@@ -288,7 +291,7 @@ impl Game<'_> {
     /// (the bed's head at `head`): `BedBlock.destroyOnUse` removes both
     /// halves and explodes; `StrawBedBlock` just falls apart.
     pub(super) fn destroy_bed_on_use(&mut self, head: [i32; 3]) -> Result<()> {
-        let state = self.world.block(head[0], head[1], head[2]);
+        let state = self.simulation.world.block(head[0], head[1], head[2]);
         let name = self.res.facts().get(state).name.clone();
         let center = [
             f64::from(head[0]) + 0.5,
@@ -312,16 +315,16 @@ impl Game<'_> {
             "west" => [1, 0, 0],
             _ => [-1, 0, 0],
         };
-        self.level_set(head, self.world.air)?;
+        self.level_set(head, self.simulation.world.air)?;
         let foot = [head[0] + back[0], head[1], head[2] + back[2]];
         if self
             .res
             .facts()
-            .get(self.world.block(foot[0], foot[1], foot[2]))
+            .get(self.simulation.world.block(foot[0], foot[1], foot[2]))
             .name
             == name
         {
-            self.level_set(foot, self.world.air)?;
+            self.level_set(foot, self.simulation.world.air)?;
         }
         self.block_explosion(center, None)
     }
@@ -349,7 +352,7 @@ impl Game<'_> {
     /// `DismountHelper.nonClimbableShape`: the collision shape, empty for
     /// climbable blocks and open trapdoors.
     fn non_climbable_shape(&self, p: [i32; 3]) -> VoxelShape {
-        let state = self.world.block(p[0], p[1], p[2]);
+        let state = self.simulation.world.block(p[0], p[1], p[2]);
         let name = &self.res.facts().get(state).name;
         let open_trapdoor = name.ends_with("_trapdoor")
             && self
@@ -367,10 +370,10 @@ impl Game<'_> {
     /// `BlockState.getCollisionShape(level, pos)`: the shape under the empty
     /// collision context.
     pub(super) fn block_collision_shape(&self, p: [i32; 3]) -> VoxelShape {
-        let state = self.world.block(p[0], p[1], p[2]);
+        let state = self.simulation.world.block(p[0], p[1], p[2]);
         let binding = self.collision;
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding,
             subject: None,
         };
@@ -387,7 +390,7 @@ impl Game<'_> {
     /// with the box and it is inside the world border.
     pub(super) fn can_dismount_to(&self, bounds: Aabb) -> bool {
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
@@ -408,7 +411,7 @@ impl Game<'_> {
     }
     /// `EntityType.isBlockDangerous` for the player.
     fn dangerous_for_player(&self, p: [i32; 3]) -> bool {
-        let state = self.world.block(p[0], p[1], p[2]);
+        let state = self.simulation.world.block(p[0], p[1], p[2]);
         let name = &*self.res.facts().get(state).name;
         let lit_campfire = (name == "minecraft:campfire" || name == "minecraft:soul_campfire")
             && self
@@ -468,7 +471,7 @@ impl Game<'_> {
         let name = |q: [i32; 3]| {
             self.res
                 .facts()
-                .get(self.world.block(q[0], q[1], q[2]))
+                .get(self.simulation.world.block(q[0], q[1], q[2]))
                 .name
                 .clone()
         };
@@ -547,7 +550,7 @@ impl Game<'_> {
         };
         let below = [pos[0], pos[1] - 1, pos[2]];
         // isBunkBed: a bed below.
-        if self.is_bed(self.world.block(below[0], below[1], below[2])) {
+        if self.is_bed(self.simulation.world.block(below[0], below[1], below[2])) {
             return at(pos, &surround, true)
                 .or_else(|| at(below, &surround, true))
                 .or_else(|| at(pos, &above, true))
@@ -566,7 +569,7 @@ impl Game<'_> {
     /// block over the head), turned toward the bed's bottom centre with a
     /// level pitch.
     pub(super) fn bed_wake_pose(&self, head: [i32; 3], yaw: f32) -> Option<(Vec3, f32)> {
-        let state = self.world.block(head[0], head[1], head[2]);
+        let state = self.simulation.world.block(head[0], head[1], head[2]);
         if !self.is_bed(state) {
             return None;
         }
@@ -610,7 +613,7 @@ impl Game<'_> {
         c: RespawnConfig,
         consume: bool,
     ) -> Result<Option<(Vec3, f32)>> {
-        let state = self.world.block(c.pos[0], c.pos[1], c.pos[2]);
+        let state = self.simulation.world.block(c.pos[0], c.pos[1], c.pos[2]);
         if !(self.is_anchor(state)
             && (c.forced || self.anchor_charges(state) > 0)
             && self.anchor_works())
@@ -625,7 +628,7 @@ impl Game<'_> {
             let free = c.forced
                 && !self.is_anchor(state)
                 && self.possible_to_respawn_in(state)
-                && self.possible_to_respawn_in(self.world.block(x, y + 1, z));
+                && self.possible_to_respawn_in(self.simulation.world.block(x, y + 1, z));
             let at = Vec3::new(f64::from(x) + 0.5, f64::from(y) + 0.1, f64::from(z) + 0.5);
             return Ok(free.then_some((at, c.yaw)));
         }

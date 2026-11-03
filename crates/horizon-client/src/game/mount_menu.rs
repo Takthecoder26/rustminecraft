@@ -299,7 +299,7 @@ impl Game<'_> {
         items.resize(keep, None);
         m.extra.items = items;
         let (x, z) = (at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4);
-        self.world.modified.insert((x, z));
+        self.simulation.world.modified.insert((x, z));
         if let Some(sound) = sound {
             self.audio.play(&sound, Some(at), 0.5, 1.0);
         }

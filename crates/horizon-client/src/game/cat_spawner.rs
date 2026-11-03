@@ -31,14 +31,15 @@ impl Game<'_> {
             return;
         }
         let pick = self
+            .simulation
             .world
             .random
             .next_int_bound(alive.len() as i32)
             .unwrap_or(0);
         let p = alive[pick as usize];
         let mut offset = || {
-            let n = 8 + self.world.random.next_int_bound(24).unwrap_or(0);
-            if self.world.random.next_boolean() {
+            let n = 8 + self.simulation.world.random.next_int_bound(24).unwrap_or(0);
+            if self.simulation.world.random.next_boolean() {
                 -n
             } else {
                 n
@@ -54,7 +55,7 @@ impl Game<'_> {
         // hasChunksAt(pos +- 10)
         let loaded = ((pos[0] - 10) >> 4..=(pos[0] + 10) >> 4).all(|cx| {
             ((pos[2] - 10) >> 4..=(pos[2] + 10) >> 4)
-                .all(|cz| self.world.chunks.contains_key(&(cx, cz)))
+                .all(|cz| self.simulation.world.chunks.contains_key(&(cx, cz)))
         });
         if !loaded {
             return;

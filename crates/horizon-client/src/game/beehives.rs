@@ -20,7 +20,7 @@ struct GameHive<'g, 'a> {
 }
 impl HiveHost for GameHive<'_, '_> {
     fn random(&mut self) -> &mut LegacyRandom {
-        &mut self.game.world.random
+        &mut self.game.simulation.world.random
     }
     fn bees_stay_in_hive(&self, _at: [i32; 3]) -> bool {
         bee::bees_stay_in_hive(&self.game.mob_world_base(&[]))
@@ -33,7 +33,7 @@ impl HiveHost for GameHive<'_, '_> {
             .is_empty()
     }
     fn set_honey_level(&mut self, at: [i32; 3], level: i32) {
-        let state = self.game.world.block(at[0], at[1], at[2]);
+        let state = self.game.simulation.world.block(at[0], at[1], at[2]);
         if let Some(state) = self.game.hive_with_honey(state, level) {
             let _ = self.game.level_set(at, state);
         }
@@ -73,7 +73,7 @@ impl Game<'_> {
     }
     /// The hive's honey level and front, from its block state.
     pub(super) fn hive_state(&self, at: [i32; 3]) -> Option<(Option<i32>, [i32; 2])> {
-        let state = self.world.block(at[0], at[1], at[2]);
+        let state = self.simulation.world.block(at[0], at[1], at[2]);
         let name = &self.res.facts().get(state).name;
         if !self
             .res
@@ -96,7 +96,8 @@ impl Game<'_> {
         let Some((honey, facing)) = self.hive_state(at) else {
             return;
         };
-        let Some(BlockEntity::Beehive(mut hive)) = self.world.block_entities.take(&key) else {
+        let Some(BlockEntity::Beehive(mut hive)) = self.simulation.world.block_entities.take(&key)
+        else {
             return;
         };
         let fire = [
@@ -109,7 +110,10 @@ impl Game<'_> {
         ]
         .iter()
         .any(|d| {
-            let state = self.world.block(at[0] + d[0], at[1] + d[1], at[2] + d[2]);
+            let state = self
+                .simulation
+                .world
+                .block(at[0] + d[0], at[1] + d[1], at[2] + d[2]);
             &*self.res.facts().get(state).name == "minecraft:fire"
         });
         let mut host = GameHive { game: self };
@@ -117,7 +121,8 @@ impl Game<'_> {
             hive.release_all(at, facing, honey, Release::Emergency, &mut host);
         }
         hive.server_tick(at, facing, honey, &mut host);
-        self.world
+        self.simulation
+            .world
             .block_entities
             .put(key, BlockEntity::Beehive(hive));
     }
@@ -133,7 +138,7 @@ impl Game<'_> {
         else {
             return;
         };
-        if !matches!(self.world.block_entities.get(&key), Some(BlockEntity::Beehive(h)) if !h.full())
+        if !matches!(self.simulation.world.block_entities.get(&key), Some(BlockEntity::Beehive(h)) if !h.full())
         {
             return;
         }
@@ -144,11 +149,13 @@ impl Game<'_> {
         self.simulation.mobs[i].extra.mount = None;
         let tag = self.mob_tree_nbt(i);
         let flower = bee::get(&self.simulation.mobs[i]).and_then(|b| b.flower);
-        let Some(BlockEntity::Beehive(mut hive)) = self.world.block_entities.take(&key) else {
+        let Some(BlockEntity::Beehive(mut hive)) = self.simulation.world.block_entities.take(&key)
+        else {
             return;
         };
         let stored = hive.add_occupant(at, tag, flower, &mut GameHive { game: self });
-        self.world
+        self.simulation
+            .world
             .block_entities
             .put(key, BlockEntity::Beehive(hive));
         if stored {
@@ -156,7 +163,7 @@ impl Game<'_> {
             let block = self
                 .res
                 .facts()
-                .get(self.world.block(at[0], at[1], at[2]))
+                .get(self.simulation.world.block(at[0], at[1], at[2]))
                 .name
                 .clone();
             if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) {
@@ -168,11 +175,13 @@ impl Game<'_> {
     /// `BeehiveBlockEntity.emptyAllLivingFromHive` with no player about.
     pub(super) fn empty_hive(&mut self, at: [i32; 3], facing: [i32; 2], status: Release) {
         let key = (at[0], at[1], at[2]);
-        let Some(BlockEntity::Beehive(mut hive)) = self.world.block_entities.take(&key) else {
+        let Some(BlockEntity::Beehive(mut hive)) = self.simulation.world.block_entities.take(&key)
+        else {
             return;
         };
         hive.release_all(at, facing, None, status, &mut GameHive { game: self });
-        self.world
+        self.simulation
+            .world
             .block_entities
             .put(key, BlockEntity::Beehive(hive));
     }
@@ -222,7 +231,7 @@ impl Game<'_> {
         if !shears && &*held.item != "minecraft:glass_bottle" {
             return Ok(false);
         }
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if !matches!(
             &*self.res.facts().get(state).name,
             "minecraft:beehive" | "minecraft:bee_nest"
@@ -282,7 +291,7 @@ impl Game<'_> {
         let smokey = beehive::smokey(&self.mob_world_base(&[]), pos);
         let key = (pos[0], pos[1], pos[2]);
         if !smokey
-            && matches!(self.world.block_entities.get(&key), Some(BlockEntity::Beehive(h)) if !h.bees.is_empty())
+            && matches!(self.simulation.world.block_entities.get(&key), Some(BlockEntity::Beehive(h)) if !h.bees.is_empty())
         {
             self.anger_nearby_bees(pos);
         }
@@ -291,7 +300,8 @@ impl Game<'_> {
             self.level_set(pos, reset)?;
         }
         if !smokey
-            && let Some(BlockEntity::Beehive(mut hive)) = self.world.block_entities.take(&key)
+            && let Some(BlockEntity::Beehive(mut hive)) =
+                self.simulation.world.block_entities.take(&key)
         {
             // emptyAllLivingFromHive: the bees within 4 blocks of the player
             // go for them.
@@ -302,7 +312,8 @@ impl Game<'_> {
                 Release::Emergency,
                 &mut GameHive { game: self },
             );
-            self.world
+            self.simulation
+                .world
                 .block_entities
                 .put(key, BlockEntity::Beehive(hive));
             if let Some(p) = self.player_view().map(|p| p.position) {
@@ -364,6 +375,7 @@ impl Game<'_> {
         for i in bees {
             // Util.getRandom over the players.
             let pick = self
+                .simulation
                 .world
                 .random
                 .next_int_bound(players.len() as i32)

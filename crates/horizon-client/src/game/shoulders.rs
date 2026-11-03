@@ -71,7 +71,7 @@ impl Game<'_> {
         if let Some(Tag::Compound(map)) = self.level.player_extra.as_mut() {
             map.insert(key.into(), tag);
         }
-        let (uuid, now) = (self.acting_uuid(), self.world.game_time);
+        let (uuid, now) = (self.acting_uuid(), self.simulation.world.game_time);
         self.creatures.shoulder_time.insert(uuid, now);
         self.simulation.mobs[i].removed = true;
     }
@@ -119,7 +119,16 @@ impl Game<'_> {
             tag.get(&"id".into()),
             Some(Tag::String(id)) if id.to_string_lossy() == "minecraft:parrot"
         );
-        if tag.is_empty() || silent || self.world.random.next_int_bound(200).unwrap_or(1) != 0 {
+        if tag.is_empty()
+            || silent
+            || self
+                .simulation
+                .world
+                .random
+                .next_int_bound(200)
+                .unwrap_or(1)
+                != 0
+        {
             return;
         }
         let Some(p) = self.player.as_ref() else {
@@ -140,7 +149,7 @@ impl Game<'_> {
             .collect();
         let peaceful = self.ui.difficulty == 0;
         if let Some((sound, volume, pitch)) = horizon_client::mobs::parrot::shoulder_sound(
-            &mut self.world.random,
+            &mut self.simulation.world.random,
             alive,
             false,
             peaceful,
@@ -155,7 +164,7 @@ impl Game<'_> {
     /// landing) and `respawnEntityOnShoulder`: the parrots come back at the
     /// player, still owned by them.
     fn remove_entities_on_shoulder(&mut self) {
-        let (uuid, now) = (self.acting_uuid(), self.world.game_time);
+        let (uuid, now) = (self.acting_uuid(), self.simulation.world.game_time);
         if self
             .creatures
             .shoulder_time

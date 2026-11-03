@@ -22,7 +22,7 @@ use horizon_core::{geometry::Vec3, random::RandomSource};
 impl Game<'_> {
     /// `Mob.aiStep`'s looting block, once per mob per tick.
     pub(super) fn tick_mob_looting(&mut self) {
-        if self.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
+        if self.simulation.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
             return;
         }
         for i in 0..self.simulation.mobs.len() {
@@ -34,8 +34,8 @@ impl Game<'_> {
             let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
             let (species, baby, passenger) = (m.species(), m.is_baby(), m.extra.passenger);
             let mut j = 0;
-            while j < self.dropped.len() {
-                let e = &self.dropped[j];
+            while j < self.simulation.dropped.len() {
+                let e = &self.simulation.dropped[j];
                 if e.pickup_delay > 0 || !reach.intersects(e.bounds()) {
                     j += 1;
                     continue;
@@ -58,11 +58,11 @@ impl Game<'_> {
                     j += 1;
                     continue;
                 };
-                let before = self.dropped[j].clone();
+                let before = self.simulation.dropped[j].clone();
                 let id = self.simulation.mobs[i].id;
                 self.add_pickup(Taken::Item(Box::new(before.clone())), Collector::Mob(id));
                 self.mob_item_pickup_trigger(i, &before);
-                let e = &mut self.dropped[j];
+                let e = &mut self.simulation.dropped[j];
                 e.stack.count -= taken;
                 if e.stack.count == 0 {
                     self.remove_dropped(j);

@@ -263,7 +263,7 @@ impl Game<'_> {
         let mut rocket = self.new_rocket(at, stack, false);
         rocket.owner = Some(Who::Player);
         rocket.guest = self.lan_acting;
-        self.rockets.push(rocket);
+        self.simulation.rockets.push(rocket);
         if !self.creative {
             self.consume_held();
         }
@@ -284,7 +284,7 @@ impl Game<'_> {
         rocket.angled = true;
         rocket.owner = owner;
         rocket.guest = self.lan_acting.filter(|_| owner == Some(Who::Player));
-        self.rockets.push(rocket);
+        self.simulation.rockets.push(rocket);
     }
     /// `Entity.getHandHoldingItemAngle(Items.FIREWORK_ROCKET)` for the local
     /// player: half a block out towards the hand holding the rocket while
@@ -328,9 +328,9 @@ impl Game<'_> {
     pub(super) fn rocket_spark(&mut self, r: &Rocket) {
         let g = |g: &mut horizon_core::random::LegacyRandom| g.next_gaussian() * 0.05;
         let v = [
-            g(&mut self.world.random),
+            g(&mut self.simulation.world.random),
             -r.velocity.y * 0.5,
-            g(&mut self.world.random),
+            g(&mut self.simulation.world.random),
         ];
         let at = [r.position.x, r.position.y, r.position.z];
         self.particles
@@ -347,7 +347,7 @@ impl Game<'_> {
         let mut rocket = self.new_rocket(at, stack, true);
         rocket.owner = Some(Who::Player);
         rocket.guest = self.lan_acting;
-        self.rockets.push(rocket);
+        self.simulation.rockets.push(rocket);
         if !self.creative {
             self.consume_held();
         }
@@ -358,14 +358,14 @@ impl Game<'_> {
         true
     }
     pub(super) fn tick_rockets(&mut self) {
-        let targets = if self.rockets.is_empty() {
+        let targets = if self.simulation.rockets.is_empty() {
             Vec::new()
         } else {
             self.rocket_targets()
         };
         let mut i = 0;
-        while i < self.rockets.len() {
-            let mut r = self.rockets.remove(i);
+        while i < self.simulation.rockets.len() {
+            let mut r = self.simulation.rockets.remove(i);
             r.previous = r.position;
             // Projectile.tick: whether it has left its owner, before it moves.
             let owner = self.rocket_owner(&r);
@@ -403,7 +403,7 @@ impl Game<'_> {
                 // getHitResultOnMoveVector before the move.
                 hit = self.rocket_struck(&targets, &r, r.next_motion(), skip);
                 let mut scene = SceneCollisions {
-                    world: &self.world,
+                    world: &self.simulation.world,
                     binding: self.collision,
                     subject: None,
                 };
@@ -442,7 +442,7 @@ impl Game<'_> {
                 self.explode_rocket(&r);
                 continue;
             }
-            self.rockets.insert(i, r);
+            self.simulation.rockets.insert(i, r);
             i += 1;
         }
     }
@@ -628,7 +628,7 @@ impl Game<'_> {
     /// FireworkRocketEntity.handleEntityEvent: use the synchronized item data.
     pub(super) fn remote_firework_explosion(&mut self, id: i32) {
         let camera = self.eye_position();
-        if let Some(r) = self.rockets.iter().find(|r| r.id == id as u32) {
+        if let Some(r) = self.simulation.rockets.iter().find(|r| r.id == id as u32) {
             let at = [r.position.x, r.position.y, r.position.z];
             let v = [r.velocity.x, r.velocity.y, r.velocity.z];
             self.particles
@@ -687,6 +687,7 @@ impl Game<'_> {
         let orientation = glam::Mat4::from_quat(self.camera_orientation());
         // shouldRender: not while attached to an entity (`isAttachedToEntity`).
         for r in self
+            .simulation
             .rockets
             .iter()
             .filter(|r| !r.attached && r.attached_to.is_none())
@@ -723,7 +724,7 @@ impl Game<'_> {
                     * glam::Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
             }
             // getLightProbePosition: the eye, 0.85 of its 0.25 height.
-            let light = self.world.light(
+            let light = self.simulation.world.light(
                 p.x.floor() as i32,
                 (p.y + 0.2125).floor() as i32,
                 p.z.floor() as i32,

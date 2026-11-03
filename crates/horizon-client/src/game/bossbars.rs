@@ -166,7 +166,7 @@ impl Game<'_> {
                 self.bosses.add_bar(&bar, name);
                 if let Some(b) = self.bosses.bars.get_mut(&bar) {
                     // CustomBossEvents.create: Mth.createInsecureUUID(level.random).
-                    b.uuid = insecure_uuid(&mut self.world.random);
+                    b.uuid = insecure_uuid(&mut self.simulation.world.random);
                 }
                 let shown = self
                     .bosses

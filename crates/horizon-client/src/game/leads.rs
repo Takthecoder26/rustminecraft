@@ -424,10 +424,11 @@ impl Game<'_> {
         let Some(hit) = self.pick() else {
             return false;
         };
-        let name = self
-            .res
-            .facts()
-            .get(self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]));
+        let name = self.res.facts().get(
+            self.simulation
+                .world
+                .block(hit.pos[0], hit.pos[1], hit.pos[2]),
+        );
         if !self
             .res
             .items()
@@ -550,7 +551,7 @@ impl Game<'_> {
                 });
             }
         }
-        for b in &self.boats {
+        for b in &self.simulation.boats {
             if let Some(holder) = b.leash {
                 ropes.push(Rope {
                     holder,
@@ -614,7 +615,7 @@ impl Game<'_> {
                             + glam::DVec3::new(0.0, o.eye_height() * 0.7, 0.0)
                     }
                     Holder::Boat(id) => {
-                        let Some(o) = self.boats.iter().find(|o| o.id == id) else {
+                        let Some(o) = self.simulation.boats.iter().find(|o| o.id == id) else {
                             continue;
                         };
                         lerp3(o.previous, o.position) + boat_hold()
@@ -629,8 +630,11 @@ impl Game<'_> {
                 ends.push((start, end, true));
             }
             let light = |p: glam::DVec3| {
-                self.world
-                    .light(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+                self.simulation.world.light(
+                    p.x.floor() as i32,
+                    p.y.floor() as i32,
+                    p.z.floor() as i32,
+                )
             };
             // Block and sky light averaged between the two ends.
             let (a, b) = (light(ends[0].0), light(ends[0].1));
@@ -698,7 +702,7 @@ impl Game<'_> {
             let base = glam::Mat4::from_translation(at.as_vec3())
                 * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0));
             let poses = horizon_client::mobs::anim::Poses::new(model);
-            let light = pack_light(self.world.light(p[0], p[1], p[2]));
+            let light = pack_light(self.simulation.world.light(p[0], p[1], p[2]));
             horizon_client::mobs::render::draw(
                 model,
                 base,

@@ -94,7 +94,12 @@ impl Game<'_> {
         let mut add = |s: Slot| out.push(s);
         match owner {
             Owner::Block(p) => {
-                let size = match self.world.block_entities.get(&(p[0], p[1], p[2])) {
+                let size = match self
+                    .simulation
+                    .world
+                    .block_entities
+                    .get(&(p[0], p[1], p[2]))
+                {
                     Some(horizon_client::containers::BlockEntity::Chest(items)) => items.len(),
                     _ => 0,
                 };
@@ -173,6 +178,7 @@ impl Game<'_> {
             // `getChestVehicleSlot` takes any index below `getContainerSize`.
             Owner::Entity(Target::Cart(id)) => {
                 let size = self
+                    .simulation
                     .carts
                     .iter()
                     .find(|c| c.id == *id)
@@ -217,6 +223,7 @@ impl Game<'_> {
                 })
             }
             Slot::Stand(id, i) => self
+                .simulation
                 .armor_stands
                 .iter()
                 .find(|a| a.id == *id)?
@@ -224,9 +231,20 @@ impl Game<'_> {
                 .get(*i)
                 .cloned()
                 .flatten(),
-            Slot::Frame(id) => self.item_frames.iter().find(|f| f.id == *id)?.item.clone(),
+            Slot::Frame(id) => self
+                .simulation
+                .item_frames
+                .iter()
+                .find(|f| f.id == *id)?
+                .item
+                .clone(),
             Slot::Cart(id, i) => self.cart_slots(*id)?.get(*i).cloned().flatten(),
-            Slot::Block(p, i) => match self.world.block_entities.get(&(p[0], p[1], p[2])) {
+            Slot::Block(p, i) => match self
+                .simulation
+                .world
+                .block_entities
+                .get(&(p[0], p[1], p[2]))
+            {
                 Some(horizon_client::containers::BlockEntity::Chest(items)) => {
                     items.get(*i).cloned().flatten()
                 }
@@ -326,6 +344,7 @@ impl Game<'_> {
                 true
             }
             Slot::Stand(id, i) => match self
+                .simulation
                 .armor_stands
                 .iter_mut()
                 .find(|a| a.id == *id)
@@ -337,7 +356,7 @@ impl Game<'_> {
                 }
                 None => false,
             },
-            Slot::Frame(id) => match self.item_frames.iter_mut().find(|f| f.id == *id) {
+            Slot::Frame(id) => match self.simulation.item_frames.iter_mut().find(|f| f.id == *id) {
                 Some(f) => {
                     f.item = stack;
                     true
@@ -351,7 +370,12 @@ impl Game<'_> {
                 }
                 None => false,
             },
-            Slot::Block(p, i) => match self.world.block_entities.get_mut(&(p[0], p[1], p[2])) {
+            Slot::Block(p, i) => match self
+                .simulation
+                .world
+                .block_entities
+                .get_mut(&(p[0], p[1], p[2]))
+            {
                 Some(horizon_client::containers::BlockEntity::Chest(items)) => {
                     match items.get_mut(*i) {
                         Some(slot) => {
@@ -738,7 +762,11 @@ impl Game<'_> {
             let slots = self.slots_named(o, &slot_name);
             if slots.is_empty() {
                 if let Owner::Block(p) = o
-                    && !self.world.block_entities.contains_key(&(p[0], p[1], p[2]))
+                    && !self
+                        .simulation
+                        .world
+                        .block_entities
+                        .contains_key(&(p[0], p[1], p[2]))
                 {
                     return Err(err(
                         "commands.item.target.not_a_container",
@@ -881,7 +909,11 @@ impl Game<'_> {
             let slots = self.slots_named(o, &slot_name);
             if slots.is_empty() {
                 if let Owner::Block(p) = o
-                    && !self.world.block_entities.contains_key(&(p[0], p[1], p[2]))
+                    && !self
+                        .simulation
+                        .world
+                        .block_entities
+                        .contains_key(&(p[0], p[1], p[2]))
                 {
                     return Err(err(
                         "commands.item.target.not_a_container",

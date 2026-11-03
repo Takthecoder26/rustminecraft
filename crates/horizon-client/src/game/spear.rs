@@ -80,12 +80,12 @@ impl Game<'_> {
     /// first meets a block, if it does (tall grass lets a stab through).
     fn clip_collider(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
         traverse_blocks(from, to, 512, |p: BlockPos| {
-            let state = self.world.block(p.x, p.y, p.z);
+            let state = self.simulation.world.block(p.x, p.y, p.z);
             if self.res.facts().is_air(state) {
                 return None;
             }
@@ -146,7 +146,7 @@ impl Game<'_> {
         let look = Vec3::new(look[0], look[1], look[2]);
         let movement = self.known_player_movement();
         let attacker_speed = look.dot(movement.scale(20.0));
-        let now = self.world.game_time;
+        let now = self.simulation.world.game_time;
         let actor = self.lan_acting;
         let mut affected = false;
         for i in self.stab_targets(eye, look, movement) {
@@ -255,7 +255,7 @@ impl Game<'_> {
         if magic_boost > 0.0 {
             self.critical_hit(self.lan_acting, id as i32, feet, width, height, true);
         }
-        self.combat.last_hurt_mob = Some((id, self.world.game_time));
+        self.combat.last_hurt_mob = Some((id, self.simulation.world.game_time));
         // itemAttackInteraction: hurtEnemy (statistic, wear), and the
         // post-attack enchantments when the target was hurt.
         if let Some(stack) = self.held().cloned() {
@@ -355,7 +355,7 @@ impl Game<'_> {
     /// moves back, `kinetic_hit_ticks`) and sounds, at most once every ten
     /// ticks.
     pub(super) fn kinetic_hit_feedback(&mut self, entity: i32, kinetic: &Kinetic, at: [f64; 3]) {
-        let now = self.world.game_time;
+        let now = self.simulation.world.game_time;
         if self
             .kinetic_feedback
             .get(&entity)
@@ -369,9 +369,9 @@ impl Game<'_> {
 
     /// `getTicksSinceLastKineticHitFeedback` of this window's player.
     pub(super) fn kinetic_hit_ticks(&self, partial: f32) -> f32 {
-        self.kinetic_feedback
-            .get(&OWN)
-            .map_or(0.0, |&t| (self.world.game_time - t) as f32 + partial)
+        self.kinetic_feedback.get(&OWN).map_or(0.0, |&t| {
+            (self.simulation.world.game_time - t) as f32 + partial
+        })
     }
 
     /// `LivingEntity.handleEntityEvent(2)` on a server's client: the

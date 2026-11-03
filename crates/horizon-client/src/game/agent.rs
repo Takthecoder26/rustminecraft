@@ -329,12 +329,12 @@ impl Game<'_> {
         format!("{}[{}]", s.name, props.join(","))
     }
     fn block_json(&self, pos: [i32; 3]) -> Value {
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         let mut v = json!({
             "pos": pos,
             "block": &*self.res.facts().get(state).name,
             "state": self.state_string(state),
-            "loaded": self.world.chunks.contains_key(&(pos[0] >> 4, pos[2] >> 4)),
+            "loaded": self.simulation.world.chunks.contains_key(&(pos[0] >> 4, pos[2] >> 4)),
         });
         // How far a chest's or a shulker box's lid is open, 0..1, as drawn.
         match self.be_anims.ticker(state.0) {
@@ -343,8 +343,11 @@ impl Game<'_> {
             _ => {}
         }
         // The lines of a sign, as this client has them.
-        if let Some(horizon_client::containers::BlockEntity::Sign(sign)) =
-            self.world.block_entities.get(&(pos[0], pos[1], pos[2]))
+        if let Some(horizon_client::containers::BlockEntity::Sign(sign)) = self
+            .simulation
+            .world
+            .block_entities
+            .get(&(pos[0], pos[1], pos[2]))
         {
             v["sign"] = json!({ "front": sign.front.lines, "back": sign.back.lines });
         }
@@ -518,8 +521,8 @@ impl Game<'_> {
             "mining": self.mining.as_ref().map(|m| json!({ "pos": m.pos, "progress": m.progress, "ticks": m.ticks })),
             // The arm swings started (LivingEntity.swing).
             "swings": self.swings_started,
-            "time": { "day_time": self.world.day_time, "day": self.world.day_time.div_euclid(24000), "time_of_day": self.world.day_time.rem_euclid(24000) },
-            "weather": { "raining": self.world.weather.raining, "thundering": self.world.weather.thundering },
+            "time": { "day_time": self.simulation.world.day_time, "day": self.simulation.world.day_time.div_euclid(24000), "time_of_day": self.simulation.world.day_time.rem_euclid(24000) },
+            "weather": { "raining": self.simulation.world.weather.raining, "thundering": self.simulation.world.weather.thundering },
             "paused": self.pause,
             // Mouse movement turns the camera (`apply_mouse_look`): the real
             // pointer is grabbed, or an agent's `mouse-move` stands in for it.
@@ -709,14 +712,14 @@ impl Game<'_> {
                 v,
             );
         }
-        for item in &self.dropped {
+        for item in &self.simulation.dropped {
             push(
                 [item.position.x, item.position.y, item.position.z],
                 "minecraft:item",
                 json!({ "id": item.id, "kind": "item", "item": self.stack_value(&item.stack) }),
             );
         }
-        for orb in &self.orbs {
+        for orb in &self.simulation.orbs {
             push(
                 [orb.position.x, orb.position.y, orb.position.z],
                 "minecraft:experience_orb",
@@ -828,10 +831,18 @@ impl Game<'_> {
         blocked: &[(Node, Node)],
     ) -> Option<Plan> {
         navigation::find_path(from, goal, near, blocked, |n| {
-            if !self.world.chunks.contains_key(&(n[0] >> 4, n[2] >> 4)) {
+            if !self
+                .simulation
+                .world
+                .chunks
+                .contains_key(&(n[0] >> 4, n[2] >> 4))
+            {
                 return None;
             }
-            let f = self.res.facts().get(self.world.block(n[0], n[1], n[2]));
+            let f = self
+                .res
+                .facts()
+                .get(self.simulation.world.block(n[0], n[1], n[2]));
             Some(Cell {
                 solid: f.full_collision || f.legacy_solid,
                 fluid: f.fluid != horizon_client::blocks::Fluid::None,
@@ -1041,7 +1052,7 @@ impl Game<'_> {
                 for y in lo[1]..=hi[1] {
                     for z in lo[2]..=hi[2] {
                         for x in lo[0]..=hi[0] {
-                            let state = self.world.block(x, y, z);
+                            let state = self.simulation.world.block(x, y, z);
                             if self.res.facts().is_air(state) {
                                 continue;
                             }
@@ -1069,11 +1080,14 @@ impl Game<'_> {
                     for z in lo[2]..=hi[2] {
                         for x in lo[0]..=hi[0] {
                             let packed = self
+                                .simulation
                                 .world
                                 .chunks
                                 .get(&(x >> 4, z >> 4))
                                 .filter(|_| {
-                                    (self.world.bottom_y()..self.world.top_y()).contains(&y)
+                                    (self.simulation.world.bottom_y()
+                                        ..self.simulation.world.top_y())
+                                        .contains(&y)
                                 })
                                 .map(|c| c.light(x & 15, y, z & 15));
                             let digit = |v: u8| char::from_digit(u32::from(v), 16).unwrap_or('.');
@@ -1098,7 +1112,7 @@ impl Game<'_> {
                 for y in (c[1] - radius).max(-64)..=(c[1] + radius).min(319) {
                     for z in c[2] - radius..=c[2] + radius {
                         for x in c[0] - radius..=c[0] + radius {
-                            let state = self.world.block(x, y, z);
+                            let state = self.simulation.world.block(x, y, z);
                             if *self.res.facts().get(state).name == *want {
                                 let d = dist(eye, [x, y, z].map(|v| f64::from(v) + 0.5));
                                 found.push((d, [x, y, z]));
@@ -1316,7 +1330,7 @@ impl Game<'_> {
             "break" => {
                 self.playing()?;
                 let pos = a.block_pos(0)?;
-                let before = self.world.block(pos[0], pos[1], pos[2]);
+                let before = self.simulation.world.block(pos[0], pos[1], pos[2]);
                 if self.res.facts().is_air(before) {
                     return Err(format!("there is no block at {pos:?}").into());
                 }
@@ -1325,7 +1339,7 @@ impl Game<'_> {
                 let task = Break {
                     pos,
                     before,
-                    items_before: self.dropped.iter().map(|i| i.id).collect(),
+                    items_before: self.simulation.dropped.iter().map(|i| i.id).collect(),
                     inventory: self.inventory_counts(),
                     started_tick: self.ticks,
                     collect_until: None,
@@ -1345,7 +1359,7 @@ impl Game<'_> {
                     .held()
                     .ok_or("nothing in hand to place; select an item")?;
                 let held = held.item.clone();
-                let before = self.world.block(pos[0], pos[1], pos[2]);
+                let before = self.simulation.world.block(pos[0], pos[1], pos[2]);
                 if !self.res.facts().get(before).replaceable && !self.res.facts().is_air(before) {
                     return Err(format!(
                         "{pos:?} holds {}; break it first",
@@ -1361,7 +1375,10 @@ impl Game<'_> {
                 for (_, d) in FACES.iter().filter(|_| !aimed) {
                     let d = *d;
                     let support = add(pos, d);
-                    let state = self.world.block(support[0], support[1], support[2]);
+                    let state = self
+                        .simulation
+                        .world
+                        .block(support[0], support[1], support[2]);
                     let f = self.res.facts().get(state);
                     if self.res.facts().is_air(state)
                         || f.replaceable
@@ -1410,7 +1427,7 @@ impl Game<'_> {
                 } else {
                     None
                 };
-                let before = pos.map(|p| self.world.block(p[0], p[1], p[2]));
+                let before = pos.map(|p| self.simulation.world.block(p[0], p[1], p[2]));
                 let inventory = self.inventory_counts();
                 self.agent_mouse(MouseButton::Right, true)?;
                 let release = if hold > 0.0 {
@@ -1953,7 +1970,7 @@ impl Game<'_> {
                     return None;
                 }
                 let changed = match (*pos, *before) {
-                    (Some(p), Some(b)) => self.world.block(p[0], p[1], p[2]) != b,
+                    (Some(p), Some(b)) => self.simulation.world.block(p[0], p[1], p[2]) != b,
                     _ => false,
                 };
                 // A client of a server (single player's server thread, a LAN
@@ -2088,7 +2105,7 @@ impl Game<'_> {
             let b = p.map(|v| v.floor() as i32);
             self.res
                 .facts()
-                .get(self.world.block(b[0], b[1], b[2]))
+                .get(self.simulation.world.block(b[0], b[1], b[2]))
                 .fluid
                 != horizon_client::blocks::Fluid::None
         };
@@ -2109,7 +2126,7 @@ impl Game<'_> {
         timed_out: bool,
         interrupted: Option<&str>,
     ) -> Option<Value> {
-        let state = self.world.block(b.pos[0], b.pos[1], b.pos[2]);
+        let state = self.simulation.world.block(b.pos[0], b.pos[1], b.pos[2]);
         if b.collect_until.is_none() {
             if let Some(why) = interrupted {
                 return Some(json!({ "error": why, "pos": b.pos }));
@@ -2145,7 +2162,7 @@ impl Game<'_> {
         }
         // New item entities near the block are its drops.
         let centre = b.pos.map(|v| f64::from(v) + 0.5);
-        for item in &self.dropped {
+        for item in &self.simulation.dropped {
             if !b.items_before.contains(&item.id)
                 && dist(centre, [item.position.x, item.position.y, item.position.z]) < 3.0
             {
@@ -2155,7 +2172,7 @@ impl Game<'_> {
         let remaining = b
             .drops
             .keys()
-            .filter(|id| self.dropped.iter().any(|i| i.id == **id))
+            .filter(|id| self.simulation.dropped.iter().any(|i| i.id == **id))
             .count();
         let until = b.collect_until.unwrap_or(0);
         if (self.ticks < until && (remaining > 0 || self.ticks < b.broke_tick + 3)) && !timed_out {
@@ -2170,7 +2187,7 @@ impl Game<'_> {
             "drops": counts(b.drops.values().cloned()),
             "picked_up": delta(&b.inventory, &self.inventory_counts()),
             "items_left_on_ground": remaining,
-            "on_ground": self.dropped.iter().filter(|i| b.drops.contains_key(&i.id)).map(|i| json!({
+            "on_ground": self.simulation.dropped.iter().filter(|i| b.drops.contains_key(&i.id)).map(|i| json!({
                 "id": i.id, "item": &*i.stack.item, "count": i.stack.count,
                 "pos": [i.position.x, i.position.y, i.position.z],
             })).collect::<Vec<_>>(),

@@ -15,8 +15,8 @@ impl Game<'_> {
     pub(super) fn lay_sniffer_egg(&mut self, parent: &Mob) {
         let at = [parent.position.x, parent.position.y, parent.position.z];
         // new ItemEntity(level, x, y, z, stack): a little random push.
-        let vx = self.world.random.next_double() * 0.2 - 0.1;
-        let vz = self.world.random.next_double() * 0.2 - 0.1;
+        let vx = self.simulation.world.random.next_double() * 0.2 - 0.1;
+        let vz = self.simulation.world.random.next_double() * 0.2 - 0.1;
         self.spawn_item(
             ItemStack::new("minecraft:sniffer_egg", 1),
             at,
@@ -35,7 +35,7 @@ impl Game<'_> {
             && let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id)
         {
             m.extra.age = sniffer::BABY_START_AGE;
-            let yaw = self.world.random.next_float() * 360.0 - 180.0;
+            let yaw = self.simulation.world.random.next_float() * 360.0 - 180.0;
             m.yaw = yaw;
             m.body_yaw = yaw;
             m.head_yaw = yaw;
@@ -86,7 +86,7 @@ impl Game<'_> {
                 continue;
             }
             let head = sniffer::head_block(m);
-            let below = self.world.block(head[0], head[1] - 1, head[2]);
+            let below = self.simulation.world.block(head[0], head[1] - 1, head[2]);
             if self
                 .particle_sprite(below, [head[0], head[1] - 1, head[2]])
                 .is_none()

@@ -39,6 +39,7 @@ impl Game<'_> {
             if griefing && m.can_pick_up_loot() && m.extra.main_hand.is_none() {
                 let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
                 let taken = self
+                    .simulation
                     .dropped
                     .iter()
                     .position(|e| wants(self, e) && reach.intersects(e.bounds()));
@@ -57,10 +58,12 @@ impl Game<'_> {
             let area = |r: f64| m.bounds().inflate(Vec3::new(r, r, r));
             let (near, wide) = (area(6.0), area(8.0));
             let food_near = self
+                .simulation
                 .dropped
                 .iter()
                 .any(|e| wants(self, e) && near.intersects(e.bounds()));
             let food_at = self
+                .simulation
                 .dropped
                 .iter()
                 .find(|e| wants(self, e) && wide.intersects(e.bounds()))

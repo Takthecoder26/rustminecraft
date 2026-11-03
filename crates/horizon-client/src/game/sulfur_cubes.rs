@@ -223,6 +223,7 @@ impl Game<'_> {
                 .inflate(horizon_core::geometry::Vec3::new(8.0, 8.0, 8.0));
             let pos = m.position;
             let best = self
+                .simulation
                 .dropped
                 .iter()
                 .enumerate()
@@ -241,7 +242,7 @@ impl Game<'_> {
             let touch = m
                 .bounds()
                 .inflate(horizon_core::geometry::Vec3::new(1.0, 0.0, 1.0));
-            let e = &self.dropped[j];
+            let e = &self.simulation.dropped[j];
             let close = touch.contains(e.position);
             self.simulation.mobs[i].extra.point = Some([e.position.x, e.position.y, e.position.z]);
             if !griefing || !close {
@@ -258,7 +259,7 @@ impl Game<'_> {
                 super::pickups::Taken::Item(Box::new(taken_item)),
                 super::pickups::Collector::Mob(id),
             );
-            let e = &mut self.dropped[j];
+            let e = &mut self.simulation.dropped[j];
             e.stack.count -= 1;
             if e.stack.count == 0 {
                 self.remove_dropped(j);
@@ -289,7 +290,7 @@ impl Game<'_> {
             let xd = (f64::from(i % 2) - 0.5) * offset;
             let zd = (f64::from(i / 2) - 0.5) * offset;
             let at = [m.position.x + xd, m.position.y + 0.5, m.position.z + zd];
-            let yaw = self.world.random.next_float() * 360.0;
+            let yaw = self.simulation.world.random.next_float() * 360.0;
             if let Some(id) = self.spawn_mob(&m.kind.id, at, m.persistent)
                 && let Some(c) = self.simulation.mobs.iter_mut().find(|c| c.id == id)
             {

@@ -2848,18 +2848,22 @@ pub fn step_sound(
 }
 /// A block sound id as a static string (the block facts intern them).
 pub fn intern_sound(s: &std::sync::Arc<str>) -> &'static str {
-    use std::{collections::HashSet, sync::Mutex};
-    static NAMES: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
-    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let set = names.get_or_insert_with(HashSet::new);
-    let key = s.strip_prefix("minecraft:").unwrap_or(s);
-    if let Some(found) = set.get(key) {
-        return found;
+    // Worker threads persist, so each distinct sound is interned at most once
+    // per worker. There is no process-wide lock in the living-entity tick.
+    thread_local! {
+        static NAMES: std::cell::RefCell<crate::fast_hash::FxHashSet<&'static str>> = Default::default();
     }
-    let leaked: &'static str = Box::leak(key.to_owned().into_boxed_str());
-    set.insert(leaked);
-    leaked
+    NAMES.with_borrow_mut(|names| {
+        let key = s.strip_prefix("minecraft:").unwrap_or(s);
+        if let Some(&found) = names.get(key) {
+            return found;
+        }
+        let leaked: &'static str = Box::leak(key.to_owned().into_boxed_str());
+        names.insert(leaked);
+        leaked
+    })
 }
+
 /// `getSwimSound`. A skeleton horse's own override counts the steps it takes
 /// through the water, so it needs the mob, not just its species.
 pub fn swim_sound(m: &mut Mob) -> &'static str {

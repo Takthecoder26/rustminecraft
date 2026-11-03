@@ -147,7 +147,7 @@ impl Game<'_> {
             held.as_ref(),
             "minecraft:smash_damage_per_fallen_block",
             &ctx,
-            &mut self.world.random,
+            &mut self.simulation.world.random,
             0.0,
         );
         (damage + f64::from(per_block) * fall) as f32
@@ -225,7 +225,7 @@ impl Game<'_> {
             ..Default::default()
         };
         let enchantments = &world_stations!(self).enchantments;
-        let random = &mut self.world.random;
+        let random = &mut self.simulation.world.random;
         // CombatRules.getDamageAfterAbsorb: EnchantmentHelper.modifyArmorEffectiveness.
         let mut breach = |fraction: f32| {
             enchantments.modify_value(
@@ -413,6 +413,7 @@ impl Game<'_> {
             smash_push(center, heavy, m.position, &mut m.velocity, resistance);
         }
         for s in self
+            .simulation
             .armor_stands
             .iter_mut()
             .filter(|s| !s.marker && target != Spared::Stand(s.id))
@@ -537,7 +538,7 @@ impl Game<'_> {
                 victims.push((section(m.position), m.id, false));
             }
         }
-        for s in &self.armor_stands {
+        for s in &self.simulation.armor_stands {
             if !s.marker
                 && spared != Spared::Stand(s.id)
                 && s.bounds().intersects(area)
@@ -549,7 +550,7 @@ impl Game<'_> {
         victims.sort_by_key(|&(key, id, _)| (key, id));
         for (_, id, is_stand) in victims {
             if is_stand {
-                let Some(i) = self.armor_stands.iter().position(|s| s.id == id) else {
+                let Some(i) = self.simulation.armor_stands.iter().position(|s| s.id == id) else {
                     continue;
                 };
                 // knockback(0.4, ..) follows a hurtServer that landed, on a
@@ -576,12 +577,12 @@ impl Game<'_> {
                 }
                 let (mut kx, mut kz) = (knock.x, knock.z);
                 while kx * kx + kz * kz < f64::from(1.0e-5_f32) {
-                    let r = &mut self.world.random;
+                    let r = &mut self.simulation.world.random;
                     kx = (r.next_double() - r.next_double()) * 0.01;
                     kz = (r.next_double() - r.next_double()) * 0.01;
                 }
                 let len = (kx * kx + kz * kz).sqrt();
-                if let Some(s) = self.armor_stands.iter_mut().find(|s| s.id == id) {
+                if let Some(s) = self.simulation.armor_stands.iter_mut().find(|s| s.id == id) {
                     s.velocity = Vec3::new(
                         s.velocity.x / 2.0 - kx / len * knock.strength,
                         if s.on_ground {
@@ -626,7 +627,7 @@ impl Game<'_> {
     /// Level event 2013 (`ParticleUtils.spawnSmashAttackParticles`): dust
     /// pillars of the block at `pos`, a cluster over it and a ring 3.5 out.
     pub(super) fn smash_dust(&mut self, pos: BlockPos, count: i32) {
-        let state = self.world.block(pos.x, pos.y, pos.z);
+        let state = self.simulation.world.block(pos.x, pos.y, pos.z);
         let Some((sprite, tint)) = self.particle_sprite(state, [pos.x, pos.y, pos.z]) else {
             return;
         };

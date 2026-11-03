@@ -64,7 +64,7 @@ impl Game<'_> {
     /// swaps the flying loop for the aggressive one and back), forget the mobs
     /// that are gone, and read what the instances follow.
     pub(super) fn start_mob_sounds(&mut self) -> Vec<MobSound> {
-        let game_time = self.world.game_time;
+        let game_time = self.simulation.world.game_time;
         let mobs: Vec<MobSound> = self
             .simulation
             .mobs

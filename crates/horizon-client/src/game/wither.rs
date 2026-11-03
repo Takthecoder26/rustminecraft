@@ -35,7 +35,7 @@ impl Game<'_> {
             && self
                 .res
                 .facts()
-                .is_air(self.world.block(pos[0], pos[1], pos[2]))
+                .is_air(self.simulation.world.block(pos[0], pos[1], pos[2]))
             && self.with_level(|b, level, ticks| {
                 b.can_survive(level, ticks, BlockPos::new(pos[0], pos[1], pos[2]), rose)
             })
@@ -54,7 +54,7 @@ impl Game<'_> {
         let name = &*self
             .res
             .facts()
-            .get(self.world.block(p[0], p[1], p[2]))
+            .get(self.simulation.world.block(p[0], p[1], p[2]))
             .name;
         matches!(
             name,
@@ -66,7 +66,7 @@ impl Game<'_> {
         let name = &*self
             .res
             .facts()
-            .get(self.world.block(p[0], p[1], p[2]))
+            .get(self.simulation.world.block(p[0], p[1], p[2]))
             .name;
         self.res
             .items()
@@ -84,7 +84,10 @@ impl Game<'_> {
         pattern.find(pos, |key, p| match key {
             '^' => self.is_wither_skull(p),
             '#' => self.is_soul_base(p),
-            _ => self.res.facts().is_air(self.world.block(p[0], p[1], p[2])),
+            _ => self
+                .res
+                .facts()
+                .is_air(self.simulation.world.block(p[0], p[1], p[2])),
         })
     }
     /// `WitherSkullBlock.checkSpawn`, after a wither skeleton skull is

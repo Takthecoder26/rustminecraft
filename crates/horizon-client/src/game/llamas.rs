@@ -11,7 +11,10 @@ use horizon_core::random::RandomSource;
 impl Game<'_> {
     fn llama_sound(&mut self, index: usize, sound: &str, volume: f32) {
         let at = self.simulation.mobs[index].center();
-        let pitch = (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
+        let pitch = (self.simulation.world.random.next_float()
+            - self.simulation.world.random.next_float())
+            * 0.2
+            + 1.0;
         self.audio
             .play(&format!("minecraft:{sound}"), Some(at), volume, pitch);
     }

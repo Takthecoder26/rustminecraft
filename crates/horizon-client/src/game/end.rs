@@ -381,7 +381,7 @@ impl Game<'_> {
     pub(super) fn block_name(&self, p: [i32; 3]) -> std::sync::Arc<str> {
         self.res
             .facts()
-            .get(self.world.block(p[0], p[1], p[2]))
+            .get(self.simulation.world.block(p[0], p[1], p[2]))
             .name
             .clone()
     }
@@ -401,7 +401,11 @@ impl Game<'_> {
         }
         let registry = self.pack.assets.registry;
         let target = self.pick().and_then(|hit| {
-            let state = registry.state(self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]))?;
+            let state = registry.state(
+                self.simulation
+                    .world
+                    .block(hit.pos[0], hit.pos[1], hit.pos[2]),
+            )?;
             (state.name == "minecraft:end_portal_frame").then(|| (hit, state.clone()))
         });
         let Some((hit, state)) = target else {
@@ -486,7 +490,7 @@ impl Game<'_> {
             let c = [frame[0] - ox, frame[1], frame[2] - oz];
             for inward in [true, false] {
                 let ok = ring.iter().all(|&([dx, dz], facing)| {
-                    let id = self.world.block(c[0] + dx, c[1], c[2] + dz);
+                    let id = self.simulation.world.block(c[0] + dx, c[1], c[2] + dz);
                     let Some(s) = registry.state(id) else {
                         return false;
                     };
@@ -519,7 +523,7 @@ impl Game<'_> {
         self.tick_crystals();
         self.tick_eyes();
         if self.dim == Dim::End {
-            self.end.flash.tick(self.world.game_time);
+            self.end.flash.tick(self.simulation.world.game_time);
             if let Some(n) = self.end.flash.sound_in.as_mut() {
                 *n = n.saturating_sub(1);
                 if *n == 0 {
@@ -682,7 +686,7 @@ impl Game<'_> {
         if self.exit_portal().is_some() {
             // The gateway may have been out of range when it was placed.
             if won
-                && self.world.loaded(gateway[0], gateway[2])
+                && self.simulation.world.loaded(gateway[0], gateway[2])
                 && &*self.block_name(gateway) != "minecraft:end_gateway"
                 && &*self.block_name([gateway[0], gateway[1] + 2, gateway[2]])
                     != "minecraft:bedrock"
@@ -695,7 +699,7 @@ impl Game<'_> {
         let mut y = (0..256)
             .rev()
             .find(|&y| {
-                let f = self.res.facts().get(self.world.block(0, y, 0));
+                let f = self.res.facts().get(self.simulation.world.block(0, y, 0));
                 (f.full_collision || f.fluid != horizon_client::blocks::Fluid::None)
                     && !f.name.ends_with("_leaves")
             })
@@ -706,7 +710,7 @@ impl Game<'_> {
         let origin = [0, y.max(1), 0];
         self.set_exit_portal(origin);
         self.place_podium(origin, won)?;
-        if won && self.world.loaded(gateway[0], gateway[2]) {
+        if won && self.simulation.world.loaded(gateway[0], gateway[2]) {
             self.place_gateway(gateway)?;
         }
         Ok(())
@@ -847,7 +851,8 @@ impl Game<'_> {
                 }
             }
         }
-        self.world
+        self.simulation
+            .world
             .block_entities
             .get_or_insert_with((origin[0], origin[1], origin[2]), || {
                 BlockEntity::EndGateway(Default::default())
@@ -858,7 +863,7 @@ impl Game<'_> {
     /// `TheEndGatewayBlockEntity.setExitPosition`: the block entity alone owns the exit.
     fn set_gateway_exit(&mut self, gateway: [i32; 3], exit: [i32; 3], exact: bool) -> Result<()> {
         let chunk = (gateway[0] >> 4, gateway[2] >> 4);
-        if !self.world.chunks.contains_key(&chunk) {
+        if !self.simulation.world.chunks.contains_key(&chunk) {
             return Err("gateway source chunk is not loaded".into());
         }
         // A gateway removed while an entity waits for the destination stays removed.
@@ -866,6 +871,7 @@ impl Game<'_> {
             return Ok(());
         }
         if let BlockEntity::EndGateway(g) = self
+            .simulation
             .world
             .block_entities
             .get_or_insert_with((gateway[0], gateway[1], gateway[2]), || {
@@ -874,13 +880,14 @@ impl Game<'_> {
         {
             g.exit_portal = Some(exit);
             g.exact_teleport = exact;
-            self.world.modified.insert(chunk);
+            self.simulation.world.modified.insert(chunk);
         }
         Ok(())
     }
 
     fn known_gateway_exit(&self, gateway: [i32; 3]) -> Option<([i32; 3], bool)> {
         match self
+            .simulation
             .world
             .block_entities
             .get(&(gateway[0], gateway[1], gateway[2]))
@@ -896,7 +903,8 @@ impl Game<'_> {
     pub(super) fn gateway_job(&mut self, gateway: [i32; 3]) -> (GatewayJob, Vec3) {
         let job = GatewayJob::for_gateway(
             gateway,
-            self.world
+            self.simulation
+                .world
                 .block_entities
                 .get(&(gateway[0], gateway[1], gateway[2])),
         );
@@ -924,6 +932,7 @@ impl Game<'_> {
 
     fn chunk_empty(&self, x: f64, z: f64) -> Option<bool> {
         let chunk = self
+            .simulation
             .world
             .chunks
             .get(&((x / 16.0).floor() as i32, (z / 16.0).floor() as i32))?;
@@ -942,7 +951,10 @@ impl Game<'_> {
                 let mut y = 255;
                 while y > floor {
                     let p = [around[0] + xd, y, around[2] + zd];
-                    let f = self.res.facts().get(self.world.block(p[0], p[1], p[2]));
+                    let f = self
+                        .res
+                        .facts()
+                        .get(self.simulation.world.block(p[0], p[1], p[2]));
                     if f.full_collision && (allow_bedrock || &*f.name != "minecraft:bedrock") {
                         tallest = Some(p);
                         break;
@@ -968,6 +980,7 @@ impl Game<'_> {
             }))),
             GatewayJob::Find { gateway, exact } => {
                 if !self
+                    .simulation
                     .world
                     .chunks
                     .contains_key(&(gateway[0] >> 4, gateway[2] >> 4))
@@ -1006,12 +1019,12 @@ impl Game<'_> {
                                 || self
                                     .res
                                     .facts()
-                                    .get(self.world.block(x, y + 1, z))
+                                    .get(self.simulation.world.block(x, y + 1, z))
                                     .full_collision
                                 || self
                                     .res
                                     .facts()
-                                    .get(self.world.block(x, y + 2, z))
+                                    .get(self.simulation.world.block(x, y + 2, z))
                                     .full_collision
                             {
                                 continue;
@@ -1099,14 +1112,14 @@ impl Game<'_> {
         };
         let uv = [r.u0, r.v0, r.u1, r.v1];
         let partial = self.clock.fraction() as f32;
-        for crystal in &self.crystals {
+        for crystal in &self.simulation.crystals {
             let feet = glam::DVec3::new(crystal.position.x, crystal.position.y, crystal.position.z);
             let rel = feet - camera;
             if rel.length_squared() > 256.0 * 256.0 {
                 continue;
             }
             let age = crystal.time as f32 + partial;
-            let light = self.world.light(
+            let light = self.simulation.world.light(
                 feet.x.floor() as i32,
                 feet.y.floor() as i32,
                 feet.z.floor() as i32,
@@ -1197,7 +1210,7 @@ impl Game<'_> {
         } else {
             target
         };
-        let survive = self.world.random.next_int_bound(5).unwrap_or(0) > 0;
+        let survive = self.simulation.world.random.next_int_bound(5).unwrap_or(0) > 0;
         let at = [p.position.x, p.position.y, p.position.z];
         let id = self.take_entity_id();
         self.end.eyes.push(EyeOfEnder {
@@ -1209,7 +1222,7 @@ impl Game<'_> {
             life: 0,
             survive,
         });
-        let r = self.world.random.next_float();
+        let r = self.simulation.world.random.next_float();
         let pitch = 0.33 + r * (0.5 - 0.33);
         self.audio
             .play("minecraft:entity.ender_eye.launch", Some(at), 1.0, pitch);
@@ -1235,8 +1248,8 @@ impl Game<'_> {
                 .play("minecraft:entity.ender_eye.death", Some(at), 1.0, 1.0);
             if eye.survive {
                 // new ItemEntity(level, x, y, z, item): random spread, 0.2 up.
-                let vx = self.world.random.next_double() * 0.2 - 0.1;
-                let vz = self.world.random.next_double() * 0.2 - 0.1;
+                let vx = self.simulation.world.random.next_double() * 0.2 - 0.1;
+                let vz = self.simulation.world.random.next_double() * 0.2 - 0.1;
                 let stack = ItemStack {
                     item: "minecraft:ender_eye".into(),
                     count: 1,
@@ -1295,7 +1308,7 @@ impl Game<'_> {
             let water = self
                 .res
                 .facts()
-                .get(self.world.block(block[0], block[1], block[2]))
+                .get(self.simulation.world.block(block[0], block[1], block[2]))
                 .fluid
                 == horizon_client::blocks::Fluid::Water;
             if water {
@@ -1343,9 +1356,15 @@ impl Game<'_> {
             return;
         }
         let is_gateway = |game: &Self, p: BlockPos| {
-            &*game.res.facts().get(game.world.block(p.x, p.y, p.z)).name == "minecraft:end_gateway"
+            &*game
+                .res
+                .facts()
+                .get(game.simulation.world.block(p.x, p.y, p.z))
+                .name
+                == "minecraft:end_gateway"
         };
         let items: Vec<(u32, Vec3, f32, f32)> = self
+            .simulation
             .dropped
             .iter()
             .map(|e| (e.id, e.position, 0.25, 0.25))
@@ -1369,7 +1388,7 @@ impl Game<'_> {
         }
         // A pearl's move this tick, from where it started it.
         let pearls: Vec<(u32, Option<Who>, Option<u32>, BlockPos)> = self
-            .creatures
+            .simulation
             .projectiles
             .iter()
             .filter_map(|p| {
@@ -1401,7 +1420,7 @@ impl Game<'_> {
     /// walked in. A guest's pearl triggers theirs; one whose guest has left
     /// has no owner.
     fn pearl_owner_in_gateway(&mut self, guest: Option<u32>, pos: BlockPos) {
-        let state = self.world.block(pos.x, pos.y, pos.z);
+        let state = self.simulation.world.block(pos.x, pos.y, pos.z);
         let Some(conn) = guest else {
             self.trigger_enter_block(state);
             return;
@@ -1419,6 +1438,7 @@ impl Game<'_> {
             return;
         }
         let ids: Vec<(u32, bool)> = self
+            .simulation
             .dropped
             .iter()
             .map(|e| (e.id, true))
@@ -1429,7 +1449,7 @@ impl Game<'_> {
                     .map(|m| (m.id, self.mob_can_use_portal(m))),
             )
             .chain(
-                self.creatures
+                self.simulation
                     .projectiles
                     .iter()
                     .filter(|p| matches!(p.kind, ProjectileKind::EnderPearl))
@@ -1464,16 +1484,16 @@ impl Game<'_> {
     /// `Entity.teleportToPortalDestination` for an entity that goes through an
     /// End gateway: it is saved and waits for the exit's chunks.
     fn send_through_gateway(&mut self, id: u32, gateway: BlockPos) {
-        let tag = if let Some(i) = self.dropped.iter().position(|e| e.id == id) {
+        let tag = if let Some(i) = self.simulation.dropped.iter().position(|e| e.id == id) {
             let uuid = self.uuid_for(id);
             let tag = horizon_client::entity_nbt::item_entity_to_nbt(
-                &self.dropped[i],
+                &self.simulation.dropped[i],
                 uuid,
                 self.persist_raw(id),
             );
             // A gateway keeps the item in its level (teleportSameDimension
             // moves it): it doesn't leave, so no native_entity_leave_level.
-            self.dropped.remove(i);
+            self.simulation.dropped.remove(i);
             self.native_leave_skip(id);
             self.detach_entity(id);
             tag
@@ -1503,8 +1523,8 @@ impl Game<'_> {
                 self.detach_entity(g);
             }
             tag
-        } else if let Some(i) = self.creatures.projectiles.iter().position(|p| p.id == id) {
-            let pearl = Box::new(self.creatures.projectiles.remove(i));
+        } else if let Some(i) = self.simulation.projectiles.iter().position(|p| p.id == id) {
+            let pearl = Box::new(self.simulation.projectiles.remove(i));
             self.native_leave_skip(id);
             let (job, target) = self.gateway_job([gateway.x, gateway.y, gateway.z]);
             let arrival = GatewayArrival {
@@ -1547,11 +1567,15 @@ impl Game<'_> {
     /// on from there. The traveller comes back while it still waits.
     fn arrive_through_gateway(&mut self, arrival: GatewayArrival) -> Option<GatewayArrival> {
         let chunk = |at: Vec3| ((at.x.floor() as i32) >> 4, (at.z.floor() as i32) >> 4);
-        if !self.world.chunks.contains_key(&chunk(arrival.target))
+        if !self
+            .simulation
+            .world
+            .chunks
+            .contains_key(&chunk(arrival.target))
             || arrival
                 .job
                 .source_chunk()
-                .is_some_and(|c| !self.world.chunks.contains_key(&c))
+                .is_some_and(|c| !self.simulation.world.chunks.contains_key(&c))
         {
             return Some(arrival);
         }
@@ -1576,13 +1600,14 @@ impl Game<'_> {
                 // moves it, no addDuringTeleport): it doesn't join again.
                 super::persist::mark_moved(&mut tag);
                 match self
+                    .simulation
                     .world
                     .loaded_entities
                     .iter_mut()
                     .find(|(k, _)| *k == key)
                 {
                     Some((_, tags)) => tags.push(tag),
-                    None => self.world.loaded_entities.push((key, vec![tag])),
+                    None => self.simulation.world.loaded_entities.push((key, vec![tag])),
                 }
             }
             Arriving::Pearl(mut pearl) => {

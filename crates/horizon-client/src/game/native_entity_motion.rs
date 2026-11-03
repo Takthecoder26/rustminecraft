@@ -90,8 +90,18 @@ impl Game<'_> {
             return Some(corners(with_entity!(self, h, e => e.bounds())));
         }
         let (lo, hi) = match t {
-            Target::Frame(id) => self.item_frames.iter().find(|f| f.id == id)?.bounds(),
-            Target::Painting(id) => self.paintings.iter().find(|p| p.id == id)?.bounds(),
+            Target::Frame(id) => self
+                .simulation
+                .item_frames
+                .iter()
+                .find(|f| f.id == id)?
+                .bounds(),
+            Target::Painting(id) => self
+                .simulation
+                .paintings
+                .iter()
+                .find(|p| p.id == id)?
+                .bounds(),
             _ => return None,
         };
         Some([lo, hi])

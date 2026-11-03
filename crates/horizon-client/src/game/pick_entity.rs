@@ -44,7 +44,7 @@ impl Game<'_> {
                 best = Some((distance, uuid));
             }
         };
-        let uuid_of = |id: u32| self.persist.uuids.get(&id).copied();
+        let uuid_of = |id: u32| self.simulation.persist.uuids.get(&id).copied();
         if let Some(hit) = self.remote_object_hit(true) {
             offer(hit.distance, uuid_of(hit.id as u32));
         }
@@ -52,7 +52,7 @@ impl Game<'_> {
             offer(d, uuid_of(self.simulation.mobs[i].id));
         }
         if let Some((i, d)) = self.redirectable_hit() {
-            offer(d, uuid_of(self.creatures.projectiles[i].id));
+            offer(d, uuid_of(self.simulation.projectiles[i].id));
         }
         if let Some((_, d)) = self.dragon_hit() {
             offer(d, None);
@@ -69,24 +69,24 @@ impl Game<'_> {
             // Mob.getPickResult: SpawnEggItem.byId.
             let egg = format!("{}_spawn_egg", m.kind.id);
             return self.items().get(&egg).map(|_| ItemStack::new(&egg, 1));
-        } else if let Some(b) = self.boats.iter().find(|b| b.id == id) {
+        } else if let Some(b) = self.simulation.boats.iter().find(|b| b.id == id) {
             b.entity_type()
-        } else if let Some(c) = self.carts.iter().find(|c| c.id == id) {
+        } else if let Some(c) = self.simulation.carts.iter().find(|c| c.id == id) {
             c.kind.item().to_owned()
-        } else if self.armor_stands.iter().any(|a| a.id == id) {
+        } else if self.simulation.armor_stands.iter().any(|a| a.id == id) {
             "minecraft:armor_stand".to_owned()
-        } else if let Some(c) = self.cushions.iter().find(|c| c.id == id) {
+        } else if let Some(c) = self.simulation.cushions.iter().find(|c| c.id == id) {
             c.item()
-        } else if let Some(f) = self.item_frames.iter().find(|f| f.id == id) {
+        } else if let Some(f) = self.simulation.item_frames.iter().find(|f| f.id == id) {
             // ItemFrame.getPickResult: what it frames, else the frame itself.
             return Some(
                 f.item
                     .clone()
                     .unwrap_or_else(|| ItemStack::new(f.kind(), 1)),
             );
-        } else if self.paintings.iter().any(|p| p.id == id) {
+        } else if self.simulation.paintings.iter().any(|p| p.id == id) {
             "minecraft:painting".to_owned()
-        } else if self.crystals.iter().any(|c| c.id == id) {
+        } else if self.simulation.crystals.iter().any(|c| c.id == id) {
             "minecraft:end_crystal".to_owned()
         } else {
             return None;

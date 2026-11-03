@@ -50,7 +50,7 @@ impl Game<'_> {
         {
             return;
         }
-        let difficulty = self.world.health_rules.difficulty;
+        let difficulty = self.simulation.world.health_rules.difficulty;
         let random = &mut self.simulation.mobs[k].random;
         if !infects(difficulty, || random.next_boolean()) {
             return;
@@ -73,7 +73,10 @@ impl Game<'_> {
         };
         convert_to_zombie_villager(&old, z);
         let killer_at = self.simulation.mobs[k].position;
-        let pitch = (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
+        let pitch = (self.simulation.world.random.next_float()
+            - self.simulation.world.random.next_float())
+            * 0.2
+            + 1.0;
         self.audio.play(
             "minecraft:entity.zombie.infect",
             Some([killer_at.x, killer_at.y, killer_at.z]),
@@ -98,6 +101,7 @@ impl Game<'_> {
         let starter = Some(self.acting_player_uuid());
         let time = zombie_villager::WAIT_MIN
             + self
+                .simulation
                 .world
                 .random
                 .next_int_bound(zombie_villager::WAIT_SPREAD)
@@ -157,7 +161,10 @@ impl Game<'_> {
                 g.trigger_cured_zombie_villager(&zombie_view, &villager_view)
             });
         }
-        let pitch = (self.world.random.next_float() - self.world.random.next_float()) * 0.2 + 1.0;
+        let pitch = (self.simulation.world.random.next_float()
+            - self.simulation.world.random.next_float())
+            * 0.2
+            + 1.0;
         self.audio.play(
             "minecraft:entity.zombie_villager.converted",
             Some(at),

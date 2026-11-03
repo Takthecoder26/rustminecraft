@@ -21,7 +21,12 @@ impl Game<'_> {
     /// the clients see the block event (`openerCountChanged`).
     pub(super) fn golem_chest_open(&mut self, chest: [i32; 3], open: bool) {
         let key = (chest[0], chest[1], chest[2]);
-        let entry = self.world.chest_openers.entry(key).or_insert((0, 0.0));
+        let entry = self
+            .simulation
+            .world
+            .chest_openers
+            .entry(key)
+            .or_insert((0, 0.0));
         if open {
             entry.0 += 1;
             entry.1 = entry.1.max(3.0);
@@ -33,7 +38,7 @@ impl Game<'_> {
         }
         let count = entry.0;
         if count <= 0 {
-            self.world.chest_openers.remove(&key);
+            self.simulation.world.chest_openers.remove(&key);
         }
         self.block_entity_event(chest, 1, count.max(0));
         // The guests get the same `ClientboundBlockEventPacket` (the lid).
@@ -47,7 +52,7 @@ impl Game<'_> {
         stack: Option<ItemStack>,
     ) {
         let key = (chest[0], chest[1], chest[2]);
-        if let Some(e) = self.world.block_entities.get_mut(&key)
+        if let Some(e) = self.simulation.world.block_entities.get_mut(&key)
             && let Some(s) = e.slots_mut().get_mut(slot)
         {
             *s = stack;
@@ -59,14 +64,26 @@ impl Game<'_> {
     /// whose opened chest is this one, within its range plus 4; when none
     /// is left the chest closes (a double chest the golem left open).
     pub(super) fn recheck_golem_openers(&mut self) {
-        if self.world.game_time % RECHECK_TICKS != 0 {
+        if self.simulation.world.game_time % RECHECK_TICKS != 0 {
             return;
         }
-        let open: Vec<(i32, i32, i32)> = self.world.chest_openers.keys().copied().collect();
+        let open: Vec<(i32, i32, i32)> = self
+            .simulation
+            .world
+            .chest_openers
+            .keys()
+            .copied()
+            .collect();
         for key in open {
             let p = [key.0, key.1, key.2];
             let other = self.chest_other_half(key).map(|o| [o.0, o.1, o.2]);
-            let range = self.world.chest_openers.get(&key).map_or(0.0, |o| o.1) + 4.0;
+            let range = self
+                .simulation
+                .world
+                .chest_openers
+                .get(&key)
+                .map_or(0.0, |o| o.1)
+                + 4.0;
             let area = horizon_core::geometry::Aabb::new(
                 horizon_core::geometry::Vec3::new(
                     f64::from(p[0]) - range,
@@ -92,14 +109,19 @@ impl Game<'_> {
                         && m.bounds().intersects(area)
                 })
                 .count() as i32;
-            let before = self.world.chest_openers.get(&key).map_or(0, |o| o.0);
+            let before = self
+                .simulation
+                .world
+                .chest_openers
+                .get(&key)
+                .map_or(0, |o| o.0);
             if count == before {
                 continue;
             }
             if count == 0 {
-                self.world.chest_openers.remove(&key);
+                self.simulation.world.chest_openers.remove(&key);
                 self.golem_chest_sound(p, false);
-            } else if let Some(o) = self.world.chest_openers.get_mut(&key) {
+            } else if let Some(o) = self.simulation.world.chest_openers.get_mut(&key) {
                 o.0 = count;
             }
             self.block_entity_event(p, 1, count);
@@ -111,7 +133,7 @@ impl Game<'_> {
         let name = self
             .res
             .facts()
-            .get(self.world.block(p[0], p[1], p[2]))
+            .get(self.simulation.world.block(p[0], p[1], p[2]))
             .name
             .clone();
         let base = name
@@ -132,7 +154,7 @@ impl Game<'_> {
             f64::from(p[1]) + 0.5,
             f64::from(p[2]) + 0.5,
         ];
-        let pitch = self.world.random.next_float() * 0.1 + 0.9;
+        let pitch = self.simulation.world.random.next_float() * 0.1 + 0.9;
         self.audio.play(
             &format!("minecraft:block.{kind}.{side}"),
             Some(at),
@@ -217,7 +239,8 @@ impl Game<'_> {
             return false;
         }
         let registry = self.pack.assets.registry;
-        let Some(state) = registry.state(self.world.block(pos[0], pos[1], pos[2])) else {
+        let Some(state) = registry.state(self.simulation.world.block(pos[0], pos[1], pos[2]))
+        else {
             return false;
         };
         if state.name != "minecraft:copper_golem_statue" {
@@ -263,7 +286,10 @@ impl Game<'_> {
         if let Some(replacement) = replacement {
             let _ = self.level_set(pos, replacement);
         }
-        self.world.block_entities.remove(&(pos[0], pos[1], pos[2]));
+        self.simulation
+            .world
+            .block_entities
+            .remove(&(pos[0], pos[1], pos[2]));
         true
     }
     /// `CopperGolem.mobInteract`; true when handled.

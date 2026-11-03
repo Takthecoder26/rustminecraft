@@ -26,8 +26,8 @@ impl Game<'_> {
             if griefing && m.can_pick_up_loot() {
                 let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
                 let mut j = 0;
-                while j < self.dropped.len() {
-                    let e = &self.dropped[j];
+                while j < self.simulation.dropped.len() {
+                    let e = &self.simulation.dropped[j];
                     if e.pickup_delay > 0 || e.stack.count == 0 || !reach.intersects(e.bounds()) {
                         j += 1;
                         continue;
@@ -50,6 +50,7 @@ impl Game<'_> {
             let m = &self.simulation.mobs[i];
             let area = m.bounds().inflate(Vec3::new(8.0, 8.0, 8.0));
             let at = self
+                .simulation
                 .dropped
                 .iter()
                 .find(|e| e.pickup_delay == 0 && e.health > 0 && area.intersects(e.bounds()))
@@ -64,7 +65,7 @@ impl Game<'_> {
         let in_water = |g: &Self, e: &horizon_client::entities::ItemEntity| {
             g.res
                 .facts()
-                .get(g.world.block(
+                .get(g.simulation.world.block(
                     e.position.x.floor() as i32,
                     e.position.y.floor() as i32,
                     e.position.z.floor() as i32,
@@ -82,8 +83,8 @@ impl Game<'_> {
             if griefing && m.can_pick_up_loot() {
                 let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
                 let mut j = 0;
-                while j < self.dropped.len() {
-                    let e = &self.dropped[j];
+                while j < self.simulation.dropped.len() {
+                    let e = &self.simulation.dropped[j];
                     if e.pickup_delay > 0
                         || e.stack.count == 0
                         || !reach.intersects(e.bounds())
@@ -92,7 +93,7 @@ impl Game<'_> {
                         j += 1;
                         continue;
                     }
-                    let before = self.dropped[j].clone();
+                    let before = self.simulation.dropped[j].clone();
                     self.mob_item_pickup_trigger(i, &before);
                     let m = &mut self.simulation.mobs[i];
                     set_item_stack(m, Slot::MainHand.index(), before.stack.clone());
@@ -106,6 +107,7 @@ impl Game<'_> {
                 .bounds()
                 .inflate(Vec3::new(8.0, 8.0, 8.0));
             let at = self
+                .simulation
                 .dropped
                 .iter()
                 .find(|e| {
@@ -127,7 +129,7 @@ impl Game<'_> {
     /// `Fox.pickUpItem`: the extra items drop where it stands, what it held is spat out
     /// ahead of it, and it holds one of the item.
     fn fox_pick_up(&mut self, fox_index: usize, item_index: usize) {
-        let before = self.dropped[item_index].clone();
+        let before = self.simulation.dropped[item_index].clone();
         let mut stack = before.stack.clone();
         let count = stack.count;
         let at = {

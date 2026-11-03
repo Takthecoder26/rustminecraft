@@ -65,17 +65,20 @@ pub mod parrot;
 pub mod path;
 pub mod phantom;
 pub mod piglin;
+pub mod players;
 pub mod polar_bear;
 pub mod rabbit;
 pub mod raider;
 pub mod random_textures;
 pub mod ravager;
+pub mod region_tick;
 pub mod render;
 pub mod riders;
 pub mod seen_grid;
 pub mod shulker;
 pub mod skin;
 pub mod skin_layers;
+pub mod snapshot;
 pub mod sniffer;
 pub mod spawn_rules;
 pub mod spawn_selection;
@@ -2471,20 +2474,35 @@ pub fn apply_mob_pushes(m: &mut Mob, pending: &mut PendingPushes) {
         pushes.into_iter().for_each(add);
     }
 }
+/// Mutable inputs changed by immediate brain events. Complex passenger and
+/// schooling changes remain explicit global conflicts.
+#[derive(Default)]
+pub struct BrainWrites {
+    pub targets: Vec<u32>,
+    pub global: bool,
+}
+
 /// Applies the brain memories a mob's tick set on other mobs (from event
 /// index `from` on), at once: vanilla sets them on the other entity during
 /// the tick, before the mobs after it tick.
-pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: usize) {
+pub fn apply_brain_events(
+    mobs: &mut [Mob],
+    events: &mut Vec<MobEvent>,
+    from: usize,
+) -> BrainWrites {
+    let mut writes = BrainWrites::default();
     let mut i = from;
     while i < events.len() {
         match events[i] {
             MobEvent::BreedTarget { mob, partner } => {
+                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     animal_brain::set_breed_partner(m, partner);
                 }
                 events.remove(i);
             }
             MobEvent::LockGaze { mob, partner } => {
+                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     animal_brain::lock_gaze(m, partner);
                     villager_brain::lock_gaze_half(m, Who::Mob(partner));
@@ -2492,20 +2510,24 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
                 events.remove(i);
             }
             MobEvent::Retreat { mob, from, at } => {
+                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     piglin::receive_retreat(m, from, at);
                 }
                 events.remove(i);
             }
             MobEvent::StartRiding { rider, vehicle } => {
+                writes.global = true;
                 riders::start_riding(mobs, rider, vehicle);
                 events.remove(i);
             }
             MobEvent::StartFollowing { fish, leader } => {
+                writes.global = true;
                 aquatic::start_following(mobs, fish, leader);
                 events.remove(i);
             }
             MobEvent::SchoolSize { leader, by } => {
+                writes.targets.push(leader);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == leader) {
                     m.extra.followers += by;
                 }
@@ -2516,6 +2538,7 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
             MobEvent::Breed {
                 parent, partner, ..
             } => {
+                writes.targets.push(partner);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == partner) {
                     m.extra.age = 6000;
                     m.extra.in_love = 0;
@@ -2526,6 +2549,7 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
             _ => i += 1,
         }
     }
+    writes
 }
 /// The player as mobs see it.
 #[derive(Clone, Debug)]
@@ -2618,13 +2642,13 @@ pub struct MobWorld<'a> {
     /// `getNearestPlayer(mob, -1)`: where the nearest non-spectator of every
     /// player in the level stands, alive or not (the despawn distance).
     pub nearest_player: Option<Vec3>,
-    pub others: &'a [Seen],
+    pub others: snapshot::SeenView<'a>,
     /// The separately simulated dragon, visible to revenge and melee goals.
     pub dragon: Option<(u32, TargetInfo)>,
     /// The boats and rafts a lead can hang on (`Holder::Boat`): id and state.
     pub leash_boats: &'a [(u32, leash::HolderState)],
     /// `others` by position, when the caller keeps one (the mob ticks).
-    pub others_grid: Option<&'a seen_grid::SeenGrid>,
+    pub others_grid: Option<&'a dyn seen_grid::SnapshotGrid>,
     /// Where each id stands in `others`, when the caller keeps one.
     pub others_index: Option<&'a crate::fast_hash::FxHashMap<u32, u32>>,
     pub daylight: bool,
@@ -3328,14 +3352,34 @@ impl Mob {
         level_random: &mut LegacyRandom,
         events: &mut Vec<MobEvent>,
     ) -> bool {
-        self.track_section();
-        // LivingEntity.tick: CombatTracker.recheckStatus.
+        self.tick_ordered(w, level_random, events, None)
+    }
+    /// The same tick with a section-insertion number reserved by the level
+    /// coordinator in global entity order, independent of worker scheduling.
+    pub fn tick_with_order(
+        &mut self,
+        w: &MobWorld,
+        level_random: &mut LegacyRandom,
+        events: &mut Vec<MobEvent>,
+        section_order: u64,
+    ) -> bool {
+        self.tick_ordered(w, level_random, events, Some(section_order))
+    }
+    fn tick_ordered(
+        &mut self,
+        w: &MobWorld,
+        level_random: &mut LegacyRandom,
+        events: &mut Vec<MobEvent>,
+        section_order: Option<u64>,
+    ) -> bool {
+        self.track_section(section_order);
         let alive = self.alive();
         self.combat.recheck(alive, self.age);
         ai::tick(self, w, level_random, events)
     }
-    /// The section the mob is in, noted when it changes (`EntitySection` lists).
-    fn track_section(&mut self) {
+    fn track_section(&mut self, order: Option<u64>) {
+        // Standalone callers retain their original serial allocator. Server
+        // transactions always provide their level-owned reserved order.
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let section = [
             (self.position.x.floor() as i32) >> 4,
@@ -3344,7 +3388,8 @@ impl Mob {
         ];
         if self.extra.section_seq == 0 || section != self.extra.section {
             self.extra.section = section;
-            self.extra.section_seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.extra.section_seq = order
+                .unwrap_or_else(|| SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         }
     }
     pub fn distance_to(&self, p: [f64; 3]) -> f64 {

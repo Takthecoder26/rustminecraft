@@ -207,7 +207,7 @@ impl Game<'_> {
     /// Whether the chunk holding `pos` is loaded in the level in place.
     fn native_chunk_loaded(&self, pos: [f64; 3]) -> bool {
         let (x, z) = (pos[0].floor() as i32, pos[2].floor() as i32);
-        self.world.chunks.contains_key(&(x >> 4, z >> 4))
+        self.simulation.world.chunks.contains_key(&(x >> 4, z >> 4))
     }
     /// The living mob `id` in the level in place, `dimension`; none on a
     /// client's copy. API 37.

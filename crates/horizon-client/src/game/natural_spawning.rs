@@ -374,7 +374,7 @@ impl GameLevel<'_, '_> {
         )
     }
     fn biome(&self, x: i32, y: i32, z: i32) -> Option<&BiomeInfo> {
-        let chunk = self.game.world.chunks.get(&(x >> 4, z >> 4))?;
+        let chunk = self.game.simulation.world.chunks.get(&(x >> 4, z >> 4))?;
         Some(world_biomes!(self.game).get(chunk.biome(x, y, z)))
     }
     /// The block whose noise cell `BiomeManager.getBiome` reads.
@@ -533,11 +533,11 @@ impl NaturalLevel for GameLevel<'_, '_> {
         })
     }
     fn can_spawn_in_chunk(&self, cx: i32, cz: i32) -> bool {
-        self.game.world.chunks.contains_key(&(cx, cz))
+        self.game.simulation.world.chunks.contains_key(&(cx, cz))
     }
     fn no_collision(&self, bounds: Aabb) -> bool {
         let mut scene = SceneCollisions {
-            world: &self.game.world,
+            world: &self.game.simulation.world,
             binding: self.w.collision,
             subject: None,
         };
@@ -658,8 +658,8 @@ impl<'a> Game<'a> {
     /// Adds the mobs a spawn pass created: ids, enchanted gear and jockeys.
     fn add_spawned(&mut self, pending: Vec<Mob>, persistent: bool) {
         for mut mob in pending {
-            self.next_entity += 1;
-            mob.id = self.next_entity;
+            self.simulation_server.next_entity += 1;
+            mob.id = self.simulation_server.next_entity;
             mob.persistent = persistent;
             let id = mob.id;
             self.simulation.mobs.push(mob);
@@ -720,9 +720,9 @@ impl<'a> Game<'a> {
         players: &[LevelPlayer],
         scratch: &mut SpawnScratch,
     ) -> i32 {
-        let levels = self.tickets.levels();
+        let levels = self.simulation.tickets.levels();
         scratch.collect(players, |(cx, cz)| {
-            levels.loaded_ticking(cx, cz) && super::ticking_chunk(&self.world, cx, cz)
+            levels.loaded_ticking(cx, cz) && super::ticking_chunk(&self.simulation.world, cx, cz)
         })
     }
     /// `ServerChunkCache.tickChunks`: the spawn state over the loaded mobs,
@@ -741,11 +741,11 @@ impl<'a> Game<'a> {
         let mut scratch = std::mem::take(&mut self.simulation.spawn_scratch);
         let spawnable = self.spawning_chunks(&players, &mut scratch);
         for &key in &scratch.candidates {
-            *self.world.inhabited.entry(key).or_insert(0) += 1;
+            *self.simulation.world.inhabited.entry(key).or_insert(0) += 1;
         }
         let spawn_mobs = self.ui.rules.bool("spawn_mobs");
         let spawn_enemies = self.ui.rules.bool("spawn_monsters");
-        let mut random = std::mem::replace(&mut self.world.random, LegacyRandom::new(0));
+        let mut random = std::mem::replace(&mut self.simulation.world.random, LegacyRandom::new(0));
         let mut pending = Vec::new();
         let last_state;
         {
@@ -775,11 +775,11 @@ impl<'a> Game<'a> {
                 })
                 .collect();
             let mut state = SpawnState::new(&level, spawnable, players, &counted, |cx, cz| {
-                self.world.chunks.contains_key(&(cx, cz))
+                self.simulation.world.chunks.contains_key(&(cx, cz))
             });
             last_state = state.counts();
             let categories = if spawn_mobs {
-                state.filtered_categories(spawn_enemies, self.world.game_time % 400 == 0)
+                state.filtered_categories(spawn_enemies, self.simulation.world.game_time % 400 == 0)
             } else {
                 Vec::new()
             };
@@ -809,7 +809,7 @@ impl<'a> Game<'a> {
                 }
             }
         }
-        self.world.random = random;
+        self.simulation.world.random = random;
         // ServerChunkCache.lastSpawnState, for the debug overlay.
         self.spawn_counts.insert(self.dim, last_state);
         self.add_spawned(pending, false);
@@ -821,7 +821,7 @@ impl<'a> Game<'a> {
     /// region's random as generation adds them (mobs are not generated in
     /// the End).
     pub(super) fn spawn_generation_creatures(&mut self, cx: i32, cz: i32) {
-        if !self.world.chunks.contains_key(&(cx, cz)) || self.dim == Dim::End {
+        if !self.simulation.world.chunks.contains_key(&(cx, cz)) || self.dim == Dim::End {
             return;
         }
         let Some(terrain) = self.end.locator() else {

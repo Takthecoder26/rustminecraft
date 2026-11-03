@@ -493,7 +493,7 @@ impl Game<'_> {
             .get_mut(&mut self.simulation.mobs, id as u32)
         {
             apply(m, values, &r.builtin, r.entity_id);
-            apply_registry_data(m, values, &r.registries, self.world.game_time);
+            apply_registry_data(m, values, &r.registries, self.simulation.world.game_time);
             if let Some(code) = bed
                 && m.species() == Species::Villager
             {

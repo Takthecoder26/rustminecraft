@@ -66,9 +66,12 @@ impl Game<'_> {
                 m.extra.boarding_cooldown -= 1;
             }
         }
-        let boats: std::collections::HashSet<u32> = self.boats.iter().map(|b| b.id).collect();
-        let carts: std::collections::HashSet<u32> = self.carts.iter().map(|c| c.id).collect();
+        let boats: std::collections::HashSet<u32> =
+            self.simulation.boats.iter().map(|b| b.id).collect();
+        let carts: std::collections::HashSet<u32> =
+            self.simulation.carts.iter().map(|c| c.id).collect();
         let tnts: std::collections::HashSet<u32> = self
+            .simulation
             .tnts
             .iter()
             .map(|t| t.id)
@@ -237,8 +240,8 @@ impl Game<'_> {
         // stand is drawn between the two even while the level is frozen and
         // its vehicle is not. Those riding the local player are seated after
         // its move (`seat_own_stands`).
-        for i in 0..self.armor_stands.len() {
-            let Some(vehicle) = self.armor_stands[i].vehicle else {
+        for i in 0..self.simulation.armor_stands.len() {
+            let Some(vehicle) = self.simulation.armor_stands[i].vehicle else {
                 continue;
             };
             let Some(&j) = index.get(&vehicle).filter(|_| Some(vehicle) != me) else {
@@ -248,7 +251,7 @@ impl Game<'_> {
             let attach = riders::passenger_attachment(vehicle);
             let at = riders::seat(attach, 0.0, vehicle.position, vehicle.yaw);
             let before = riders::seat(attach, 0.0, vehicle.previous, vehicle.previous_yaw);
-            let stand = &mut self.armor_stands[i];
+            let stand = &mut self.simulation.armor_stands[i];
             stand.position = at;
             stand.previous = before;
             stand.velocity = Vec3::ZERO;
@@ -272,6 +275,7 @@ impl Game<'_> {
             self.previous_position.add_vector(up),
         );
         for stand in self
+            .simulation
             .armor_stands
             .iter_mut()
             .filter(|a| a.vehicle == Some(me))
@@ -307,18 +311,23 @@ impl Game<'_> {
             let at = i.position;
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
-        if let Some(b) = self.boats.iter().find(|b| b.id == vehicle) {
+        if let Some(b) = self.simulation.boats.iter().find(|b| b.id == vehicle) {
             let count = self.boat_players(vehicle).max(1) + self.boat_mobs(vehicle).len();
             let at = b.seat(0, count, false, 0.0, false);
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
-        if let Some(c) = self.carts.iter().find(|c| c.id == vehicle) {
+        if let Some(c) = self.simulation.carts.iter().find(|c| c.id == vehicle) {
             let at = c
                 .position
                 .add_vector(Vec3::new(0.0, super::minecarts::SEAT, 0.0));
             return Some(glam::DVec3::new(at.x, at.y, at.z));
         }
-        if let Some(a) = self.armor_stands.iter().find(|a| a.id == vehicle) {
+        if let Some(a) = self
+            .simulation
+            .armor_stands
+            .iter()
+            .find(|a| a.id == vehicle)
+        {
             // ArmorStand.getDefaultDimensions: a marker has no box to sit on.
             let height = if a.marker {
                 0.0
@@ -361,12 +370,12 @@ impl Game<'_> {
         let mounts = mount_rolls(species, baby, natural);
         match species {
             s if zombie_kind(s) && baby => {
-                if self.world.random.next_float() < CHICKEN_JOCKEY_ODDS {
+                if self.simulation.world.random.next_float() < CHICKEN_JOCKEY_ODDS {
                     if let Some(chicken) = self.free_chicken_near(at) {
                         self.make_chicken_jockey(chicken);
                         self.mount_mob(id, chicken);
                     }
-                } else if self.world.random.next_float() < CHICKEN_JOCKEY_ODDS
+                } else if self.simulation.world.random.next_float() < CHICKEN_JOCKEY_ODDS
                     && let Some(chicken) = self.spawn_mob("minecraft:chicken", at, false)
                 {
                     self.make_chicken_jockey(chicken);
@@ -374,7 +383,15 @@ impl Game<'_> {
                 }
             }
             // Spider.finalizeSpawn: one in a hundred carries a skeleton.
-            Species::Spider if self.world.random.next_int_bound(100).unwrap_or(1) == 0 => {
+            Species::Spider
+                if self
+                    .simulation
+                    .world
+                    .random
+                    .next_int_bound(100)
+                    .unwrap_or(1)
+                    == 0 =>
+            {
                 if let Some(skeleton) = self.spawn_mob("minecraft:skeleton", at, false) {
                     self.mount_mob(skeleton, id);
                 }
@@ -418,7 +435,7 @@ impl Game<'_> {
                 Vec3::new(bx + 0.5 + 0.85, by + 2.375, bz + 0.5 + 0.85),
             ))
         };
-        if !room || self.world.random.next_float() >= 0.1 {
+        if !room || self.simulation.world.random.next_float() >= 0.1 {
             return;
         }
         if let Some(h) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
@@ -438,7 +455,7 @@ impl Game<'_> {
             return;
         };
         if d.extra.main_hand.as_deref() != Some("minecraft:trident")
-            || self.world.random.next_float() >= 0.5
+            || self.simulation.world.random.next_float() >= 0.5
         {
             return;
         }
@@ -447,12 +464,17 @@ impl Game<'_> {
             at[1].floor() as i32,
             at[2].floor() as i32,
         );
-        let frequent = self.world.chunks.get(&(x >> 4, z >> 4)).is_some_and(|c| {
-            let b = world_biomes!(self).get(c.biome(x, y, z));
-            self.res
-                .mob_data()
-                .biome_has("minecraft:more_frequent_drowned_spawns", &b.name)
-        });
+        let frequent = self
+            .simulation
+            .world
+            .chunks
+            .get(&(x >> 4, z >> 4))
+            .is_some_and(|c| {
+                let b = world_biomes!(self).get(c.biome(x, y, z));
+                self.res
+                    .mob_data()
+                    .biome_has("minecraft:more_frequent_drowned_spawns", &b.name)
+            });
         if frequent {
             return;
         }
@@ -484,12 +506,12 @@ impl Game<'_> {
     /// piglin holding a warped fungus on a stick (and wears a saddle), one in
     /// ten of the rest a baby strider.
     fn spawn_strider_jockey(&mut self, id: u32, at: [f64; 3]) {
-        if self.world.random.next_int_bound(30).unwrap_or(1) == 0 {
+        if self.simulation.world.random.next_int_bound(30).unwrap_or(1) == 0 {
             if !self.ui.rules.bool("spawn_mobs") {
                 return;
             }
             if let Some(piglin) = self.spawn_mob("minecraft:zombified_piglin", at, false) {
-                let baby = self.world.random.next_float() < CHICKEN_JOCKEY_ODDS;
+                let baby = self.simulation.world.random.next_float() < CHICKEN_JOCKEY_ODDS;
                 if let Some(p) = self.simulation.mobs.iter_mut().find(|m| m.id == piglin) {
                     p.extra
                         .set_main_hand(Some("minecraft:warped_fungus_on_a_stick".into()));
@@ -500,7 +522,7 @@ impl Game<'_> {
                 }
                 self.mount_mob(piglin, id);
             }
-        } else if self.world.random.next_int_bound(10).unwrap_or(1) == 0
+        } else if self.simulation.world.random.next_int_bound(10).unwrap_or(1) == 0
             && let Some(baby) = self.spawn_mob("minecraft:strider", at, false)
         {
             if let Some(b) = self.simulation.mobs.iter_mut().find(|m| m.id == baby) {
@@ -562,8 +584,8 @@ impl Game<'_> {
                 continue;
             };
             let (dx, dz) = (
-                self.world.random.triangle(0.0, 1.1485),
-                self.world.random.triangle(0.0, 1.1485),
+                self.simulation.world.random.triangle(0.0, 1.1485),
+                self.simulation.world.random.triangle(0.0, 1.1485),
             );
             if let Some(h) = self.simulation.mobs.iter_mut().find(|m| m.id == other) {
                 h.invulnerable = TRAP_INVULNERABLE;

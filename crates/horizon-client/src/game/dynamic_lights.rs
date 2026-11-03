@@ -74,7 +74,7 @@ impl Game<'_> {
                 item,
             ));
         }
-        for dropped in &self.dropped {
+        for dropped in &self.simulation.dropped {
             let (level, item) =
                 brighter([Some(&*dropped.stack.item), None], dropped.fire_ticks > 0);
             if level == 0 {

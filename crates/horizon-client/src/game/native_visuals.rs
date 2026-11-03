@@ -61,17 +61,18 @@ impl Game<'_> {
         let mut edges = 0;
         for rim in rims.into_iter().take(8) {
             let pos = rim.pos;
-            let state = self.world.block(pos[0], pos[1], pos[2]);
+            let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
             if edges >= 256
                 || !rim.width.is_finite()
                 || !(0.5..=4.0).contains(&rim.width)
                 || !close(pos.map(|v| f64::from(v) + 0.5))
                 || !rim_target_valid(
-                    self.world
+                    self.simulation
+                        .world
                         .chunks
                         .contains_key(&(pos[0].div_euclid(16), pos[2].div_euclid(16))),
                     state,
-                    self.world.air,
+                    self.simulation.world.air,
                 )
             {
                 continue;
@@ -121,7 +122,7 @@ impl Game<'_> {
                 && (0.25..=16.0).contains(&l.radius)
                 && l.intensity.is_finite()
                 && (0.0..=1.0).contains(&l.intensity)
-                && self.world.chunks.contains_key(&(
+                && self.simulation.world.chunks.contains_key(&(
                     (l.at[0].floor() as i32).div_euclid(16),
                     (l.at[2].floor() as i32).div_euclid(16),
                 ))

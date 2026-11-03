@@ -244,7 +244,8 @@ impl Game<'_> {
     /// `getLastHurtByMob`: the last mob to hurt the player, for 100 ticks.
     pub(super) fn player_hurt_by(&self) -> Option<(horizon_client::mobs::Who, i64)> {
         let ((id, _), at) = self.combat.last_hurt_by.as_ref()?;
-        (self.world.game_time - at <= 100).then_some((horizon_client::mobs::Who::Mob(*id), *at))
+        (self.simulation.world.game_time - at <= 100)
+            .then_some((horizon_client::mobs::Who::Mob(*id), *at))
     }
     /// Remember who deals the next `damage_type` damage to the player.
     pub(super) fn note_attacker(&mut self, damage_type: &str, mob: u32) {
@@ -326,7 +327,7 @@ impl Game<'_> {
                     .map(|i| self.combat.pending_direct.remove(i).1),
             };
             let (fall_location, fall_distance) = self.fall_location();
-            let now = self.world.game_time;
+            let now = self.simulation.world.game_time;
             if let Some(a) = &attacker {
                 self.combat.last_hurt_by = Some((a.clone(), now));
                 if !self.combat.in_combat {
@@ -367,7 +368,7 @@ impl Game<'_> {
             let name = self
                 .res
                 .facts()
-                .get(self.world.block(c.x, c.y, c.z))
+                .get(self.simulation.world.block(c.x, c.y, c.z))
                 .name
                 .clone();
             Some(match &*name {
@@ -379,7 +380,7 @@ impl Game<'_> {
                 _ => "other_climbable",
             })
         } else {
-            let f = self.res.facts().get(self.world.block(
+            let f = self.res.facts().get(self.simulation.world.block(
                 p.position.x.floor() as i32,
                 (p.position.y + 0.1).floor() as i32,
                 p.position.z.floor() as i32,
@@ -391,7 +392,8 @@ impl Game<'_> {
     /// `CombatTracker.recheckStatus`: forget old fights.
     fn recheck_combat(&mut self) {
         let reset = if self.combat.in_combat { 300 } else { 100 };
-        if !self.combat.entries.is_empty() && self.world.game_time - self.combat.last_damage > reset
+        if !self.combat.entries.is_empty()
+            && self.simulation.world.game_time - self.combat.last_damage > reset
         {
             self.combat.entries.clear();
             self.combat.in_combat = false;
@@ -544,7 +546,7 @@ impl Game<'_> {
         }
         // getKillCredit: the last mob that hurt the player in the past 100 ticks.
         if let Some(((_, name), at)) = &self.combat.last_hurt_by
-            && self.world.game_time - at <= 100
+            && self.simulation.world.game_time - at <= 100
         {
             return Text::translate(&format!("{key}.player"), &[me, name.clone()]);
         }
@@ -670,7 +672,7 @@ impl Game<'_> {
                 .filter(|_| m.age as i32 - m.ai.last_hurt_by_time <= 100)
                 .and_then(|w| name(self, w))
         };
-        let now = self.world.game_time;
+        let now = self.simulation.world.game_time;
         let mut tracker = CombatTracker {
             entries,
             last_damage: now,

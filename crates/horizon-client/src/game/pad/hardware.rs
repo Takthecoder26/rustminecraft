@@ -397,7 +397,7 @@ impl Game<'_> {
         // Creative breaks at once; blocks that can't be broken have a negative hardness.
         let attacking = match &self.mining {
             Some(m) if !self.creative => {
-                let state = self.world.block(m.pos[0], m.pos[1], m.pos[2]);
+                let state = self.simulation.world.block(m.pos[0], m.pos[1], m.pos[2]);
                 TriggerFeel::Texture(self.res.facts().get(state).hardness)
             }
             _ => TriggerFeel::Free,

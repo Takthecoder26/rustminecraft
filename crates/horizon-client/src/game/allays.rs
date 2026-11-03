@@ -24,7 +24,8 @@ impl Game<'_> {
             let pos = self.simulation.mobs[i].position;
             // Dancing: a playing jukebox within 10 blocks.
             let jukeboxes = jukeboxes.get_or_insert_with(|| {
-                self.world
+                self.simulation
+                    .world
                     .block_entities
                     .iter()
                     .filter(|(_, e)| matches!(e, BlockEntity::Jukebox(j) if j.playing))
@@ -64,7 +65,7 @@ impl Game<'_> {
             let wanted = if !wants {
                 None
             } else if self.simulation.mobs[i].no_ai {
-                self.dropped.iter().position(|e| {
+                self.simulation.dropped.iter().position(|e| {
                     e.pickup_delay == 0
                         && allay::considers_item_equal(&held, &e.stack)
                         && reach.contains(e.position)
@@ -79,7 +80,8 @@ impl Game<'_> {
                 // The sensor looks in the allay's box grown by (32, 16, 32).
                 let b = self.simulation.mobs[i].bounds();
                 let (low, high) = (b.min_position().y - 16.0, b.max_position().y + 16.0);
-                self.dropped
+                self.simulation
+                    .dropped
                     .iter()
                     .enumerate()
                     .filter(|(_, e)| {
@@ -88,12 +90,12 @@ impl Game<'_> {
                     .map(|(j, e)| (j, e.position.distance_squared(pos)))
                     .filter(|(_, d)| *d < 32.0 * 32.0)
                     .filter(|(j, _)| {
-                        let y = self.dropped[*j].position.y;
+                        let y = self.simulation.dropped[*j].position.y;
                         y <= high && y + 0.25 >= low
                     })
                     .filter(|(j, _)| {
                         // ItemEntity's eye height is 0.2125.
-                        let e = &self.dropped[*j];
+                        let e = &self.simulation.dropped[*j];
                         let at = horizon_core::geometry::Vec3::new(
                             e.position.x,
                             e.position.y + 0.2125,
@@ -112,7 +114,7 @@ impl Game<'_> {
                 }
                 continue;
             };
-            let e = &self.dropped[j];
+            let e = &self.simulation.dropped[j];
             if reach.contains(e.position) {
                 let take = (max - carried).min(e.stack.count as i32);
                 let (item, id) = (e.clone(), self.simulation.mobs[i].id);
@@ -128,14 +130,16 @@ impl Game<'_> {
                     super::pickups::Collector::Mob(id),
                 );
                 self.simulation.mobs[i].extra.ints[1] += take;
-                let e = &mut self.dropped[j];
+                let e = &mut self.simulation.dropped[j];
                 e.stack.count -= take as u32;
                 if e.stack.count == 0 {
                     self.remove_dropped(j);
                 }
                 let at = [pos.x, pos.y, pos.z];
-                let pitch =
-                    (self.world.random.next_float() - self.world.random.next_float()) * 1.4 + 2.0;
+                let pitch = (self.simulation.world.random.next_float()
+                    - self.simulation.world.random.next_float())
+                    * 1.4
+                    + 2.0;
                 self.audio
                     .play("minecraft:entity.item.pickup", Some(at), 0.2, pitch);
                 self.simulation.mobs[i].extra.point = None;
@@ -193,7 +197,7 @@ impl Game<'_> {
             &*self
                 .res
                 .facts()
-                .get(self.world.block(p[0], p[1], p[2]))
+                .get(self.simulation.world.block(p[0], p[1], p[2]))
                 .name
                 == "minecraft:note_block"
         });
@@ -249,12 +253,15 @@ impl Game<'_> {
         if let Some(thrown) = self.just_spawned_item() {
             thrown.thrower = Some(allay);
         }
-        if self.world.game_time % 7 == 0 && self.world.random.next_double() < 0.9 {
+        if self.simulation.world.game_time % 7 == 0
+            && self.simulation.world.random.next_double() < 0.9
+        {
             const PITCHES: [f32; 16] = [
                 0.5625, 0.625, 0.75, 0.9375, 1.0, 1.0, 1.125, 1.25, 1.5, 1.875, 2.0, 2.25, 2.5,
                 3.0, 3.75, 4.0,
             ];
-            let pitch = PITCHES[self.world.random.next_int_bound(16).unwrap_or(4) as usize];
+            let pitch =
+                PITCHES[self.simulation.world.random.next_int_bound(16).unwrap_or(4) as usize];
             self.audio
                 .play("minecraft:entity.allay.item_thrown", Some(from), 1.0, pitch);
         }
