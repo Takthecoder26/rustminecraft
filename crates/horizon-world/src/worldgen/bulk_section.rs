@@ -6,14 +6,14 @@ use super::{
 };
 use crate::{heightmap::HeightmapType, registry::BlockStateId};
 use horizon_core::position::{BlockPos, SectionPos};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub struct TerrainBulkAccess<'a, 'r, B: TerrainBlockStates> {
     region: &'a mut TerrainRegion<'r, B>,
     min_section: i32,
     section_count: i32,
     air: BlockStateId,
-    acquired: BTreeMap<i64, SectionPos>,
+    acquired: HashMap<i64, SectionPos>,
     last: Option<(i64, SectionPos)>,
 }
 impl<'a, 'r, B: TerrainBlockStates> TerrainBulkAccess<'a, 'r, B> {
@@ -30,7 +30,7 @@ impl<'a, 'r, B: TerrainBlockStates> TerrainBulkAccess<'a, 'r, B> {
             min_section,
             section_count,
             air,
-            acquired: BTreeMap::new(),
+            acquired: HashMap::new(),
             last: None,
         })
     }
