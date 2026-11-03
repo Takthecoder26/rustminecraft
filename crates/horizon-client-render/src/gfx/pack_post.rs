@@ -4952,6 +4952,7 @@ mod tests {
             gpu: Gpu::of(&adapter, device.features()),
             storable: 0,
             rgb: 0,
+            shadow_storable: 0,
             released: std::cell::Cell::new(("", 0)),
             stand_ins: &stand_ins,
         };
