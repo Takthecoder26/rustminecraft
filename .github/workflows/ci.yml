@@ -74,11 +74,36 @@ jobs:
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      # Cargo registry cache for GitHub-hosted runners: crate sources and the registry index, keyed on the lockfile
+      # so a warm cache survives unrelated pull requests and only refreshes when dependencies change.
+      - uses: actions/cache@v4
+        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      # Prefer sccache when it is installed (self-hosted runners, or a workflow that provides it); keep incremental
+      # compilation off in that case. GitHub-hosted runs without sccache simply skip this.
+      - name: Enable sccache when available
+        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          fi
       # Dependencies and the workspace's own build, saved from main's runs (pull requests read main's cache).
       - uses: Swatinem/rust-cache@v2
         if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:
           shared-key: verify
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check formatting and lint
         if: steps.rust.outputs.required != 'false'
@@ -127,11 +152,34 @@ jobs:
               libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev libudev-dev
           fi
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      # Cargo registry cache for the launcher workspace's GitHub-hosted runs.
+      - uses: actions/cache@v4
+        if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+          key: ${{ runner.os }}-cargo-registry-launcher-${{ hashFiles('launcher/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-launcher-
+            ${{ runner.os }}-cargo-registry-
+      - name: Enable sccache when available
+        if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          fi
       - uses: Swatinem/rust-cache@v2
         if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:
           workspaces: launcher
           shared-key: launcher
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the launcher's formatting, lint and tests
         if: steps.launcher.outputs.required != 'false'
