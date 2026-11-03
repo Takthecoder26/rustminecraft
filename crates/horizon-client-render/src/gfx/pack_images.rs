@@ -474,7 +474,8 @@ impl Buffers {
                     buffer
                         .slice(..)
                         .get_mapped_range_mut()
-                        .expect("new buffer is mapped")[..data.len()]
+                        .expect("new buffer is mapped")
+                        .slice(..data.len())
                         .copy_from_slice(data);
                     buffer.unmap();
                 }
