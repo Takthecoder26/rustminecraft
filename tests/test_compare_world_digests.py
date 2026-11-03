@@ -70,6 +70,25 @@ class WorldDigestsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'expected .* / regions'):
             compare(self.write('one', 'serial'), self.write('two', 'serial'))
 
+    def test_rejects_duplicate_header_fields(self):
+        serial = self.write('serial', 'serial')
+        parallel = self.write('parallel', 'regions')
+        lines = parallel.read_text().splitlines()
+        lines[0] = lines[0][:-1] + ', "seed": 12345}'
+        parallel.write_text('\n'.join(lines) + '\n')
+        with self.assertRaisesRegex(ValueError, 'duplicate JSON field: seed'):
+            compare(serial, parallel)
+
+    def test_rejects_duplicate_component_fields(self):
+        serial = self.write('serial', 'serial')
+        parallel = self.write('parallel', 'regions')
+        lines = parallel.read_text().splitlines()
+        lines[1] = lines[1].replace('"components": {',
+                                  '"components": {"blocks": "' + digest('hidden difference') + '", ', 1)
+        parallel.write_text('\n'.join(lines) + '\n')
+        with self.assertRaisesRegex(ValueError, 'duplicate JSON field: blocks'):
+            compare(serial, parallel)
+
     def test_queue_order_changes_its_digest(self):
         self.records[0]['components']['scheduled_block_ticks'] = digest(['a', 'b'])
         serial = self.write('serial', 'serial')

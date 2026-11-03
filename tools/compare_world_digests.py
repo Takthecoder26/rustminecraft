@@ -13,7 +13,7 @@ and RNG states must retain simulation order. Include unloaded/pending state,
 not just visible chunks. See issue #8018 for the scheduler/digest contract.
 A region transcript must come from a real region runtime: this tool provides
 no serial-as-parallel fallback. Missing inputs and malformed/incomplete traces
-fail closed. Matching traces prove only the supplied workload, not all parity.
+and duplicate JSON fields fail closed. Matching traces prove only the supplied workload, not all parity.
 """
 import argparse
 import json
@@ -29,9 +29,18 @@ REQUIRED = frozenset({
 SHA256 = re.compile(r'[0-9a-f]{64}')
 
 
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate JSON field: {key}')
+        result[key] = value
+    return result
+
+
 def read_trace(path, mode):
     with Path(path).open() as stream:
-        header = json.loads(next(stream))
+        header = json.loads(next(stream), object_pairs_hook=unique_fields)
         if header.get('format') != FORMAT or header.get('mode') != mode:
             raise ValueError(f'{path}: expected {FORMAT} / {mode}')
         if type(header.get('seed')) is not int:
@@ -51,7 +60,7 @@ def read_trace(path, mode):
         current = []
         previous_tick = 1
         for line in stream:
-            record = json.loads(line)
+            record = json.loads(line, object_pairs_hook=unique_fields)
             tick, dimension = record.get('tick'), record.get('dimension')
             if (type(tick) is not int or tick not in (previous_tick, previous_tick + 1)
                     or tick > ticks or (not records and tick != 1)):
