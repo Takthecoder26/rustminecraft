@@ -430,7 +430,13 @@ impl Game<'_> {
         {
             return;
         }
-        let group = 1 + self.world.random.next_int_bound(3).unwrap_or(0);
+        // `1 + nextInt(getDifficulty().getId() + 1)`: 1 on peaceful, 1-2 on
+        // easy, 1-3 on normal and 1-4 on hard.
+        let group = 1 + self
+            .world
+            .random
+            .next_int_bound(i32::from(self.ui.difficulty) + 1)
+            .unwrap_or(0);
         for _ in 0..group {
             let _ = self.spawn_mob(
                 "minecraft:phantom",
