@@ -1154,7 +1154,7 @@ impl StaticGeometry {
             if !geometry.dirty {
                 continue;
             }
-            let mut vertices = Vec::new();
+            let mut vertices = Vec::with_capacity(entries.iter().map(|(_, entry)| entry.vertices.len()).sum());
             for &(local, ref entry) in entries {
                 let block_offset = Vec3::new(
                     f32::from(local & 15),

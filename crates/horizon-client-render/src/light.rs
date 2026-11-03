@@ -1183,7 +1183,7 @@ mod tests {
             }
             let mut changes = LightChanges::default();
             changes.add((0, 5, 0), LightChanges::classes_differing(&a, &b));
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(8);
             changes.dirty_sections(|p| out.push(p));
             out.sort_unstable();
             out

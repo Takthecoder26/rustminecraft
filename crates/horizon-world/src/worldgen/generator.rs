@@ -300,7 +300,7 @@ fn quantize_parameter_report(json: &str) -> Result<String, GeneratorError> {
         .ok_or_else(|| resource("biome parameter report"))?
     {
         let parameters = &entry["parameters"];
-        let mut coordinates = Vec::new();
+        let mut coordinates = Vec::with_capacity(6);
         for key in [
             "temperature",
             "humidity",
@@ -2851,7 +2851,7 @@ where
             for dz in 0..side {
                 for dx in 0..side {
                     let (wx, wz) = (x + dx as i32 * width, z + dz as i32 * width);
-                    let mut spans = Vec::new();
+                    let mut spans = Vec::with_capacity(4);
                     let sample =
                         SeededPipeline::surface_sample(self, worker, wx, wz, Some(&mut spans));
                     columns.push((sample, spans));
@@ -2984,7 +2984,7 @@ where
                 let mut water = None;
                 let mut below = 0;
                 let mut complete = false;
-                let mut spans: Vec<(i32, i32, BlockStateId)> = Vec::new();
+                let mut spans: Vec<(i32, i32, BlockStateId)> = Vec::with_capacity(4);
                 for (iy, density) in profile.iter_mut().enumerate() {
                     *density = value(wx, iy, wz);
                 }

@@ -458,7 +458,7 @@ impl Text {
         let mut out = Text::default();
         for span in &self.spans {
             let mut style = span.style.clone();
-            let mut current = String::new();
+            let mut current = String::with_capacity(span.text.len());
             let mut chars = span.text.chars();
             while let Some(c) = chars.next() {
                 if c != '§' {
@@ -534,7 +534,7 @@ impl Text {
         let mut out = Text::default();
         let mut index = 0;
         for span in &self.spans {
-            let mut part = String::new();
+            let mut part = String::with_capacity(span.text.len());
             for c in span.text.chars() {
                 if index >= from && index < to {
                     part.push(c);

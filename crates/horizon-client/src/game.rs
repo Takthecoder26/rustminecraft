@@ -4885,7 +4885,7 @@ impl Game<'_> {
         }
         self.with_level(|b, level, ticks| {
             // LilyPadBlock.entityInside: a boat inside a lily pad breaks it.
-            let mut boat_cells: Vec<BlockPos> = Vec::new();
+            let mut boat_cells: Vec<BlockPos> = Vec::with_capacity(4);
             for bounds in level.boat_trigger_boxes() {
                 let (lo, hi) = (bounds.min_position(), bounds.max_position());
                 for x in (lo.x + 1e-7).floor() as i32..=(hi.x - 1e-7).floor() as i32 {
@@ -4900,7 +4900,7 @@ impl Game<'_> {
                 b.boat_inside(level, ticks, pos);
             }
             // The mobs and the other entities (items, orbs, projectiles...) too.
-            let mut touched: Vec<BlockPos> = Vec::new();
+            let mut touched: Vec<BlockPos> = Vec::with_capacity(16);
             use entity::{Entity as _, for_each_entity};
             let mut touch = |bounds: Aabb| {
                 let (lo, hi) = (bounds.min_position(), bounds.max_position());
