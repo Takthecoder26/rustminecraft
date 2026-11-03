@@ -223,7 +223,7 @@ impl WorldRequest {
             level.position = None;
         }
         let dim = Dim::from_id(&level.dimension);
-        let shapes = level_shapes(&save_root, res.biomes());
+        let shapes = level_shapes(&save_root, res.biomes(), &level.enabled_features);
         let shape = shapes.get(dim.id());
         let streaming_step = startup::step("world.make_streaming");
         let (mut streaming, save, locator) = make_streaming(
@@ -609,13 +609,11 @@ fn worldgen_overrides_of(
 pub(super) fn level_shapes(
     world_root: &std::path::Path,
     biomes: &horizon_client::biome::Biomes,
+    enabled_features: &[String],
 ) -> horizon_client::chunk::LevelShapes {
     use horizon_client::chunk::{LevelShape, LevelShapes};
     let packs = horizon_client::datapack::discover(world_root);
-    let enabled_features = horizon_client::save::Level::read(world_root)
-        .map(|l| l.enabled_features)
-        .unwrap_or_default();
-    let enabled = horizon_client::datapack::enabled_ids(world_root, &packs, &enabled_features);
+    let enabled = horizon_client::datapack::enabled_ids(world_root, &packs, enabled_features);
     let enabled: Vec<_> = enabled
         .iter()
         .filter_map(|id| packs.iter().find(|p| &p.id == id))
@@ -677,24 +675,34 @@ pub(super) fn make_streaming(
         enabled_features,
     );
     let mut locator = None;
-    let flat = (dim == Dim::Overworld)
-        .then(|| horizon_client::save::world_gen_settings(world_root))
-        .flatten()
+    // Read the world's generator settings once; the flat-world, debug-world and
+    // structure-plan branches below each needed them, and `WorldGen::read` re-read
+    // the same file for the final chunk generator.
+    let (gen_settings, world_gen) = if dim == Dim::Overworld {
+        let settings = horizon_client::save::world_gen_settings(world_root);
+        let wg = settings
+            .as_ref()
+            .map(horizon_client::save::WorldGen::from_settings);
+        (settings, wg)
+    } else {
+        (None, None)
+    };
+    let flat = gen_settings
+        .as_ref()
         .and_then(|s| {
             horizon_client::flatgen::FlatTerrain::from_settings(
-                &s,
+                s,
                 pack.assets.registry,
                 res.biomes(),
                 shape,
             )
         });
     // `DebugLevelSource`: the overworld of the Debug preset.
-    let debug = (dim == Dim::Overworld)
-        .then(|| horizon_client::save::world_gen_settings(world_root))
-        .flatten()
+    let debug = gen_settings
+        .as_ref()
         .and_then(|s| {
             horizon_client::debugworld::DebugTerrain::from_settings(
-                &s,
+                s,
                 pack.assets.registry,
                 res.biomes(),
                 shape,
@@ -702,11 +710,10 @@ pub(super) fn make_streaming(
         });
     // `FlatLevelSource.createState`: a superflat world whose settings let structure sets
     // generate runs them on its flat ground.
-    let flat_structures = (dim == Dim::Overworld)
-        .then(|| horizon_client::save::world_gen_settings(world_root))
-        .flatten()
-        .and_then(|s| horizon_client::flatgen::FlatTerrain::structure_settings(&s))
-        .filter(|_| horizon_client::save::WorldGen::read(world_root).is_none_or(|w| w.structures));
+    let flat_structures = gen_settings
+        .as_ref()
+        .and_then(|s| horizon_client::flatgen::FlatTerrain::structure_settings(s))
+        .filter(|_| world_gen.as_ref().is_none_or(|w| w.structures));
     // A generator that cannot be built (a layer block the registry lacks, a level shorter
     // than the noise) leaves the world on its flat ground, as it was before.
     let flat_vanilla = flat_structures.and_then(|settings| {
@@ -790,9 +797,10 @@ pub(super) fn make_streaming(
         )
     } else {
         // WorldOptions.generateStructures, from the world's settings.
-        let structures =
-            horizon_client::save::WorldGen::read(world_root).is_none_or(|w| w.structures);
-        let preset = horizon_client::save::WorldGen::preset(world_root);
+        let structures = world_gen.as_ref().is_none_or(|w| w.structures);
+        let preset = world_gen
+            .as_ref()
+            .map_or("minecraft:normal", |w| w.preset.id());
         let overrides =
             world_worldgen_overrides(world_root, &options.resources, &biomes, enabled_features);
         let mut inner = VanillaTerrain::for_world_with(&options.resources.join("worldgen"), &overrides, pack.assets.registry, &biomes, seed, preset, dim.id(), structures).map_err(|e| {

@@ -3385,6 +3385,21 @@ pub struct WorldGen {
 }
 impl WorldGen {
     /// A saved world's choices, from its `world_gen_settings`.
+    /// The same as [`Self::read`], but from settings already read for the
+    /// world: avoids reading `world_gen_settings.dat` a second time.
+    pub fn from_settings(settings: &Tag) -> Self {
+        let flag = |key: &str, default: bool| number(settings.get(key)).map_or(default, |v| v != 0);
+        let generator = settings
+            .get("dimensions")
+            .and_then(|d| d.get("minecraft:overworld"))
+            .and_then(|o| o.get("generator"));
+        Self {
+            preset: generator.map_or(WorldPreset::Normal, WorldPreset::of_generator),
+            structures: flag("generate_structures", true),
+            bonus_chest: flag("bonus_chest", false),
+        }
+    }
+
     pub fn read(world: &Path) -> Option<Self> {
         let settings = world_gen_settings(world)?;
         let flag = |key: &str, default: bool| number(settings.get(key)).map_or(default, |v| v != 0);
