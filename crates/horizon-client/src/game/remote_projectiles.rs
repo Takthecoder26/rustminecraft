@@ -201,6 +201,46 @@ pub(super) fn has_smoke_trail(kind: &ProjectileKind) -> bool {
     )
 }
 
+/// `AbstractArrow.onSyncedDataUpdated`: updates client-side arrow or projectile synced data.
+pub(super) fn apply_projectile_synced_data(p: &mut Projectile, index: u8, value: &Value) {
+    match (&mut p.kind, index, value) {
+        // Entity.DATA_SHARED_FLAGS_ID's FLAG_ONFIRE: Entity.isOnFire on
+        // a client, which draws the flames. A client doesn't count the
+        // fire down: the flag goes off when the server's fire is out.
+        (_, 0, Value::Byte(flags)) => {
+            if let Some(a) = p.arrow.as_mut() {
+                a.fire_ticks = i32::from(flags & 1);
+            }
+        }
+        // AbstractArrow.ID_FLAGS (critical) and IN_GROUND.
+        (ProjectileKind::Arrow { critical, .. }, 8, Value::Byte(flags)) => {
+            *critical = flags & 1 != 0;
+        }
+        (ProjectileKind::Arrow { .. }, 10, Value::Bool(in_ground)) => {
+            // AbstractArrow.onSyncedDataUpdated: IN_GROUND turning true starts the shake.
+            if *in_ground
+                && !p.stuck
+                && let Some(a) = p.arrow.as_mut()
+                && a.shake <= 0
+            {
+                a.shake = 7;
+            }
+            p.stuck = *in_ground;
+        }
+        // Arrow.ID_EFFECT_COLOR.
+        (ProjectileKind::Arrow { .. }, 11, Value::Int(color)) => {
+            if let Some(a) = p.arrow.as_mut() {
+                a.effect_color = *color;
+            }
+        }
+        // WitherSkull.DATA_DANGEROUS.
+        (ProjectileKind::WitherSkull { dangerous }, 8, Value::Bool(d)) => {
+            *dangerous = *d;
+        }
+        _ => {}
+    }
+}
+
 impl Game<'_> {
     /// `Arrow.tick` and `SpectralArrow.tick` on a client: a tipped arrow
     /// sheds two entity-effect swirls in its colour while flying, one every
@@ -522,44 +562,7 @@ impl Game<'_> {
                     _ => {}
                 }
             } else if let Some(p) = self.creatures.projectiles.iter_mut().find(|p| p.id == id) {
-                match (&mut p.kind, index, value) {
-                    // Entity.DATA_SHARED_FLAGS_ID's FLAG_ONFIRE: Entity.isOnFire on
-                    // a client, which draws the flames. A client doesn't count the
-                    // fire down: the flag goes off when the server's fire is out.
-                    (_, 0, Value::Byte(flags)) => {
-                        if let Some(a) = p.arrow.as_mut() {
-                            a.fire_ticks = i32::from(flags & 1);
-                        }
-                    }
-                    // AbstractArrow.ID_FLAGS (critical) and IN_GROUND.
-                    (ProjectileKind::Arrow { critical, .. }, 8, Value::Byte(flags)) => {
-                        *critical = flags & 1 != 0;
-                    }
-                    (ProjectileKind::Arrow { .. }, 10, Value::Bool(in_ground)) => {
-                        // AbstractArrow.onSyncedDataUpdated: IN_GROUND turning true after
-                        // the first tick starts the shake.
-                        if *in_ground
-                            && !p.stuck
-                            && p.age > 0
-                            && let Some(a) = p.arrow.as_mut()
-                            && a.shake <= 0
-                        {
-                            a.shake = 7;
-                        }
-                        p.stuck = *in_ground;
-                    }
-                    // Arrow.ID_EFFECT_COLOR.
-                    (ProjectileKind::Arrow { .. }, 11, Value::Int(color)) => {
-                        if let Some(a) = p.arrow.as_mut() {
-                            a.effect_color = *color;
-                        }
-                    }
-                    // WitherSkull.DATA_DANGEROUS.
-                    (ProjectileKind::WitherSkull { dangerous }, 8, Value::Bool(d)) => {
-                        *dangerous = *d;
-                    }
-                    _ => {}
-                }
+                apply_projectile_synced_data(p, *index, value);
             }
         }
     }
@@ -998,5 +1001,59 @@ mod tests {
             list.iter().map(|p| p.acceleration).collect::<Vec<_>>(),
             [0.1; 3]
         );
+    }
+
+    #[test]
+    fn arrow_in_ground_at_age_zero_triggers_impact_shake() {
+        // AbstractArrow.onSyncedDataUpdated (#7461): when shooting point-blank
+        // into a wall, an arrow impacts on tick 0 (age == 0). Receiving IN_GROUND
+        // must trigger the 7-tick impact shake even when age is 0.
+        let mut arrow = Projectile::new(
+            ProjectileKind::Arrow {
+                base_damage: 2.0,
+                critical: false,
+                effect: None,
+            },
+            Vec3::ZERO,
+            None,
+        );
+        assert_eq!(arrow.age, 0);
+        assert!(!arrow.stuck);
+        assert_eq!(arrow.arrow.as_ref().unwrap().shake, 0);
+
+        apply_projectile_synced_data(&mut arrow, 10, &Value::Bool(true));
+
+        assert!(arrow.stuck);
+        assert_eq!(arrow.arrow.as_ref().unwrap().shake, 7);
+    }
+
+    #[test]
+    fn arrow_in_ground_subsequent_updates_do_not_overwrite_active_shake() {
+        // AbstractArrow.onSyncedDataUpdated: once an arrow is stuck in the ground,
+        // subsequent IN_GROUND = true updates must not reset an active countdown.
+        let mut arrow = Projectile::new(
+            ProjectileKind::Arrow {
+                base_damage: 2.0,
+                critical: false,
+                effect: None,
+            },
+            Vec3::ZERO,
+            None,
+        );
+        apply_projectile_synced_data(&mut arrow, 10, &Value::Bool(true));
+        assert_eq!(arrow.arrow.as_ref().unwrap().shake, 7);
+
+        // Simulate shake countdown ticking down
+        arrow.arrow.as_mut().unwrap().shake = 4;
+
+        // Receiving another IN_GROUND = true while already stuck
+        apply_projectile_synced_data(&mut arrow, 10, &Value::Bool(true));
+
+        // Shake must remain at 4, not reset to 7
+        assert_eq!(arrow.arrow.as_ref().unwrap().shake, 4);
+
+        // If the arrow comes unstuck (e.g. supporting block broken)
+        apply_projectile_synced_data(&mut arrow, 10, &Value::Bool(false));
+        assert!(!arrow.stuck);
     }
 }
