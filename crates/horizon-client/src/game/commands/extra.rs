@@ -798,7 +798,7 @@ impl Game<'_> {
                 _ => String::new(),
             };
             self.cmds.profile_fetches.push(ProfileFetch {
-                key: NameOrId::Name(name.clone()),
+                key: NameOrId::Name(Box::new(name.clone())),
                 kind: "name",
                 argument: Text::literal(name),
                 source: self.command_source,

@@ -407,7 +407,7 @@ pub fn parse_profile(v: &serde_json::Value) -> ProfileInfo {
         return ProfileInfo {
             id: horizon_protocol::crypto::offline_uuid(name),
             textures: None,
-            dynamic: valid_player_name(name).then(|| NameOrId::Name(name.clone())),
+            dynamic: valid_player_name(name).then(|| NameOrId::Name(Box::new(name.clone()))),
         };
     }
     let name = v.get("name").and_then(|n| n.as_str()).map(str::to_owned);
@@ -433,7 +433,7 @@ pub fn parse_profile(v: &serde_json::Value) -> ProfileInfo {
         (properties.is_none_or(|p| p.is_empty()) && name.is_some() != id.is_some()).then(|| {
             name.as_deref().map_or_else(
                 || NameOrId::Id(id.unwrap()),
-                |n| NameOrId::Name(n.to_owned()),
+                |n| NameOrId::Name(Box::new(n.to_owned())),
             )
         });
     ProfileInfo {
@@ -452,14 +452,14 @@ pub fn parse_profile(v: &serde_json::Value) -> ProfileInfo {
 pub fn dynamic_nbt(profile: &horizon_world::nbt::Tag) -> Option<NameOrId> {
     if let horizon_world::nbt::Tag::String(s) = profile {
         let name = s.to_string_lossy();
-        return valid_player_name(&name).then_some(NameOrId::Name(name));
+        return valid_player_name(&name).then_some(NameOrId::Name(Box::new(name)));
     }
     if matches!(profile.get("properties"), Some(horizon_world::nbt::Tag::List(l)) if !l.is_empty())
     {
         return None;
     }
     match (nbt_text(profile.get("name")), profile_uuid_nbt(profile)) {
-        (Some(name), None) => Some(NameOrId::Name(name)),
+        (Some(name), None) => Some(NameOrId::Name(Box::new(name))),
         (None, Some(id)) => Some(NameOrId::Id(id)),
         _ => None,
     }
@@ -1187,12 +1187,12 @@ mod tests {
         // A bare name is `createUnresolved`: dynamic by name, and its partial
         // id is the name's offline UUID.
         let p = parse_profile(&serde_json::json!("Notch"));
-        assert_eq!(p.dynamic, Some(NameOrId::Name("Notch".into())));
+        assert_eq!(p.dynamic, Some(NameOrId::Name(Box::new("Notch".into()))));
         assert_eq!(p.id, horizon_protocol::crypto::offline_uuid("Notch"));
         assert!(p.textures.is_none());
         // A name-only compound resolves the same way.
         let p = parse_profile(&serde_json::json!({"name": "Notch"}));
-        assert_eq!(p.dynamic, Some(NameOrId::Name("Notch".into())));
+        assert_eq!(p.dynamic, Some(NameOrId::Name(Box::new("Notch".into()))));
         // An id-only compound resolves by id (int array or UUID string).
         let id = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
         let ints: Vec<i64> = [
@@ -1226,7 +1226,7 @@ mod tests {
         assert_eq!(p.textures, Some(("v".into(), Signature::Signed)));
         // Empty properties leave it dynamic.
         let p = parse_profile(&serde_json::json!({"name": "Notch", "properties": []}));
-        assert_eq!(p.dynamic, Some(NameOrId::Name("Notch".into())));
+        assert_eq!(p.dynamic, Some(NameOrId::Name(Box::new("Notch".into()))));
     }
 
     #[test]
@@ -1296,7 +1296,7 @@ mod tests {
             "session": {"endpoints": {"getProfileById": {"uri": format!("{base}/session/minecraft/profile/{{profileId}}")}}},
         }});
         let resolved =
-            super::resolve_profile(&super::NameOrId::Name("Notch".into()), &doc).unwrap();
+            super::resolve_profile(&super::NameOrId::Name(Box::new("Notch".into())), &doc).unwrap();
         assert_eq!(resolved.id, 0x069a_79f4_44e9_4726_a5be_fca9_0e38_aaf5);
         assert_eq!(resolved.name, "Notch");
         assert_eq!(
@@ -1313,7 +1313,7 @@ mod tests {
         let doc = serde_json::json!({"discovery": {
             "session": {"endpoints": {"getProfileById": {"uri": format!("{base}/session/minecraft/profile/{{profileId}}")}}},
         }});
-        assert!(super::resolve_profile(&super::NameOrId::Name("Notch".into()), &doc).is_none());
+        assert!(super::resolve_profile(&super::NameOrId::Name(Box::new("Notch".into())), &doc).is_none());
     }
 
     /// More skins drawn every frame than there are slots (#3829): a frame's

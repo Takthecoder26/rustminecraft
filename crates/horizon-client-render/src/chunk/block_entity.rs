@@ -345,7 +345,7 @@ pub struct SkullSkin {
 /// by (`ResolvableProfile.nameOrId`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NameOrId {
-    Name(String),
+    Name(Box<String>),
     Id(u128),
 }
 /// `CrafterBlockEntity`: nine slots that can be disabled, the powered flag

@@ -5290,7 +5290,7 @@ impl Game<'_> {
                     // only a name or an id resolves through the services.
                     let key = profile.and_then(|p| match (&p.name, p.uuid) {
                         (Some(name), None) => {
-                            Some(horizon_client::skins::NameOrId::Name(name.clone()))
+                            Some(horizon_client::skins::NameOrId::Name(Box::new(name.clone())))
                         }
                         (None, Some(id)) => Some(horizon_client::skins::NameOrId::Id(id)),
                         _ => None,
