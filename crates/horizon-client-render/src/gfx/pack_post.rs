@@ -4383,3 +4383,7 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_post/indirect_tests.rs"]
+mod indirect_tests;
