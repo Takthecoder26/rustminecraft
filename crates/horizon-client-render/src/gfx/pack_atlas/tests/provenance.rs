@@ -4,31 +4,10 @@ use super::*;
 /// The first live quad begins at arena vertex 256, after an unused allocation.
 #[test]
 fn terrain_provenance_reads_the_bound_arena_records() {
-    use crate::mesher::{SectionMesh, TerrainVertex};
-    use wgpu::util::DeviceExt;
-    let instance = crate::gfx::test_gpu::instance();
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
-        .expect("provenance render requires an adapter");
-    eprintln!("terrain provenance GPU: {:?}", adapter.get_info());
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: 16,
-            height: 16,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let mut copy = device.create_command_encoder(&Default::default());
-    let atlas = PackAtlas::new(&device, &mut copy, &[texture], 1, 1, 16).unwrap();
-    queue.submit([copy.finish()]);
-    let inputs = atlas.terrain_inputs(true);
+    render_probe(flat_vertex);
+}
+
+fn flat_vertex(inputs: &horizon_shaders::GbuffersInputs) -> (naga::Module, bool, u32) {
     let attribute = |name: &str| &inputs.attributes.iter().find(|(n, _)| n == name).unwrap().1;
     let source = format!(
         r#"#version 450
@@ -56,6 +35,42 @@ void main() {{
             &source,
         )
         .unwrap();
+    (module, false, 0)
+}
+
+pub(super) fn render_probe(
+    vertex: impl FnOnce(&horizon_shaders::GbuffersInputs) -> (naga::Module, bool, u32),
+) {
+    use crate::mesher::{SectionMesh, TerrainVertex};
+    use wgpu::util::DeviceExt;
+    let instance = crate::gfx::test_gpu::instance();
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+        .expect("provenance render requires an adapter");
+    eprintln!("terrain provenance GPU: {:?}", adapter.get_info());
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 16,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut copy = device.create_command_encoder(&Default::default());
+    let atlas = PackAtlas::new(&device, &mut copy, &[texture], 1, 1, 16).unwrap();
+    queue.submit([copy.finish()]);
+    let inputs = atlas.terrain_inputs(true);
+    let (module, geometry, uniform_size) = vertex(&inputs);
     let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Production terrain provenance inputs"),
         source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -86,14 +101,59 @@ void main() {{
         layout: &empty,
         entries: &[],
     });
+    let indices_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[storage(0)],
+    });
+    let uniform_entries = if uniform_size > 0 {
+        vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }]
+    } else {
+        vec![]
+    };
+    let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &uniform_entries,
+    });
+    let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(uniform_size.max(16)),
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
+    let uniform_bindings = if uniform_size > 0 {
+        vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniforms.as_entire_binding(),
+        }]
+    } else {
+        vec![]
+    };
+    let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &uniform_layout,
+        entries: &uniform_bindings,
+    });
+    let mut layouts = vec![
+        Some(&uniform_layout),
+        Some(&origins_layout),
+        Some(&empty),
+        Some(&ids_layout),
+    ];
+    if geometry {
+        layouts.extend([Some(&empty), Some(&indices_layout)]);
+    }
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[
-            Some(&empty),
-            Some(&origins_layout),
-            Some(&empty),
-            Some(&ids_layout),
-        ],
+        bind_group_layouts: &layouts,
         ..Default::default()
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -103,11 +163,15 @@ void main() {{
             module: &vs,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<TerrainVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &crate::gfx::TERRAIN_ATTRIBUTES,
-            })],
+            buffers: if geometry {
+                &[]
+            } else {
+                &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<TerrainVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &crate::gfx::TERRAIN_ATTRIBUTES,
+                })]
+            },
         },
         primitive: Default::default(),
         depth_stencil: None,
@@ -194,12 +258,17 @@ void main() {{
         ]),
         wgpu::BufferUsages::STORAGE,
     );
+    let index_values = [
+        0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 256, 257, 258, 256, 258, 259, 512, 513, 514, 512,
+        514, 515,
+    ];
     let indices = buffer(
-        bytemuck::cast_slice(&[
-            0u32, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 256, 257, 258, 256, 258, 259, 512, 513, 514,
-            512, 514, 515,
-        ]),
+        bytemuck::cast_slice(&index_values),
         wgpu::BufferUsages::INDEX,
+    );
+    let pulled = buffer(
+        bytemuck::cast_slice(&index_values.map(|index| index + 256)),
+        wgpu::BufferUsages::STORAGE,
     );
     fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry {
@@ -216,6 +285,11 @@ void main() {{
         label: None,
         layout: &ids_layout,
         entries: &[entry(0, &ids), entry(1, &vertices), entry(2, &provenance)],
+    });
+    let pulled = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &indices_layout,
+        entries: &[entry(0, &pulled)],
     });
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
@@ -254,13 +328,19 @@ void main() {{
             ..Default::default()
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(0, &uniform_group, &[]);
         pass.set_bind_group(1, &origins, &[]);
         pass.set_bind_group(2, &empty_group, &[]);
         pass.set_bind_group(3, &group, &[]);
-        pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..24, 256, 0..1);
+        if geometry {
+            pass.set_bind_group(4, &empty_group, &[]);
+            pass.set_bind_group(5, &pulled, &[]);
+            pass.draw(0..24, 0..1);
+        } else {
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..24, 256, 0..1);
+        }
     }
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),

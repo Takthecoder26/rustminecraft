@@ -395,3 +395,7 @@ mod tests {
 #[cfg(test)]
 #[path = "pack_atlas/tests/provenance.rs"]
 mod provenance_tests;
+
+#[cfg(test)]
+#[path = "pack_atlas/tests/provenance_geometry.rs"]
+mod provenance_geometry_tests;
