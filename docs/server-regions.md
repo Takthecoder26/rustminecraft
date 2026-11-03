@@ -109,3 +109,52 @@ Initial topology construction took 7.8–8.4 ms. The projection benchmark gives 
 reason to enable workers by default. An identical live 100-player baseline and
 changed server benchmark, with whole-tick median/p95/p99, CPU and memory, is still
 required. These numbers must not be reported as a speedup of the mob pipeline.
+
+### Actual mob snapshot check
+
+`tools/bench_mob_snapshot.rs` also measures the real `Mob::seen` function for
+7,000 constructed zombies, cows and villagers in the same 100-region layout,
+with 100 synthetic player coordinates. It compares every final snapshot field
+against the original serial projection outside the timing. This is still only
+immutable preparation: it runs no AI, movement, damage or network clients.
+
+Build `horizon-client-lib`, then link the standalone driver against that build's
+rlib and dependency directory (the source header gives the command). Run each
+mode with the prepared resource root as its second argument. The quick run used
+20 warmups and 100 samples, with the same inputs and resources in all modes:
+
+| Actual `Mob::seen` mode | Median ms | p95 ms | p99 ms | CPU | Max RSS KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Original serial method | 0.670 | 1.553 | 1.946 | 95.0% | 52,432 |
+| Region index + serial method | 0.642 | 0.711 | 0.857 | 99.5% | 52,888 |
+| Region index + 8 scoped workers | 0.834 | 1.582 | 1.929 | 204.2% | 61,924 |
+
+Every snapshot comparison passed. This single sweep has substantial timing
+variation; the small serial difference is not evidence of a speedup. It again
+gives no reason to enable workers by default, and is not the outstanding live
+100-player tick benchmark.
+
+## Validation results
+
+After clearing the disk space that interrupted the first build:
+
+- `tools/pr_ready.py --quick`: passed, including 2,442 Rust tests, 627 Python
+  tests (one skipped), rustfmt, clippy, public tree and doc-test checks. The
+  runner lists 166 affected parity harnesses for CI; this is not a full parity pass.
+- `test_mob_ai_parity.py --only zombie_player cow_alone villager_village`:
+  all three scenarios and 703 mob ticks matched vanilla.
+- `test_natural_spawn_parity.py`: 15,500 cases matched vanilla, including
+  98,686 spawn attempts and 10,730 spawns.
+- `test_dedicated_server_parity.py`: all 601 transcript lines matched, including
+  client connection, spawn, chunks, chat and `/list` checks.
+- `test_server_entities_parity.py`: all 34 entities matched.
+- `test_server_player_damage_parity.py`: both client and server compared
+  373,455 output lines successfully.
+- `lan_e2e.py --check mobs`: host/guest zombie and skeleton combat passed using
+  freshly built binaries from this commit and disposable data directories.
+- `port_ledger.py check --base origin/main` ran and reported the existing ledger
+  gaps in the mechanically touched functions; no parity port was claimed.
+
+The initial unrestricted mob-AI run was interrupted after disk errors; only the
+three scenarios above are claimed as passing. Full parallel gameplay validation
+and a live before/after 100-player benchmark remain outstanding.
