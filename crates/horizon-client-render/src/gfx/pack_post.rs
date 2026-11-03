@@ -1973,6 +1973,8 @@ impl PackPost {
             post.entities_translucent,
             post.particles,
             post.damaged_block,
+            post.block_translucent,
+            post.particles_translucent,
         ];
         let late = [
             false,
@@ -1980,6 +1982,8 @@ impl PackPost {
             post.translucent_late,
             post.particles_late,
             false,
+            post.translucent_late,
+            post.particles_late || post.particles_mixed,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
         let shadow_programs = [post.shadow_entities, post.shadow_block];
@@ -2114,6 +2118,9 @@ impl PackPost {
             "block entities",
             "translucent entities",
             "particles",
+            "breaking overlays",
+            "translucent block entities",
+            "translucent particles",
         ];
         if let Some(c) = &clouds {
             notes.push(format!("clouds draw with {}", c.name));
@@ -2978,7 +2985,7 @@ impl PackPost {
                 continue;
             };
             let mut draws = (geometry.draws.iter())
-                .filter(|d| d.shadow && d.program == program)
+                .filter(|d| d.shadow && super::pack_entities::shadow_program(d.program) == program)
                 .peekable();
             if draws.peek().is_none() {
                 continue;
@@ -4383,3 +4390,6 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+mod stage_routes_test;

@@ -186,7 +186,7 @@ pub struct Casters {
 impl Casters {
     /// Whether the shadow pass draws `span`'s run, of kind `program`.
     pub fn cast(&self, span: &EntitySpan, program: usize) -> bool {
-        match program {
+        match shadow_program(program) {
             ENTITY => self.entities && (!self.only_player || span.player),
             BLOCK => self.blocks && (!self.only_lit || span.emissive),
             _ => false,
@@ -329,7 +329,7 @@ impl PackEntities {
         rest.clear();
         let first = spans.first().map_or(entities.len(), |s| s.start as usize);
         rest.extend_from_slice(&entities[..first.min(entities.len())]);
-        for (span, range) in runs(entities.len(), spans) {
+        for (span, range) in material_runs(entities, spans) {
             let run = &entities[range];
             let program = program_of(&span).filter(|&p| {
                 plain(run) || (p == DESTROY && run.iter().all(|v| matches!(v.layer, 11 | 12)))
@@ -348,7 +348,7 @@ impl PackEntities {
                 project_cracks(&mut self.scratch[start as usize..], crack.0, crack.1);
             }
             let (entity_id, block_id) = match program {
-                BLOCK => (0, span.id),
+                BLOCK | BLOCK_TRANSLUCENT => (0, span.id),
                 _ => (span.id, 0),
             };
             let mut bytes = [0u8; SLOT as usize];
@@ -426,7 +426,18 @@ pub const BLOCK: usize = 1;
 pub const TRANSLUCENT: usize = 2;
 pub const PARTICLE: usize = 3;
 pub const DESTROY: usize = 4;
-pub const PROGRAMS: usize = 5;
+pub const BLOCK_TRANSLUCENT: usize = 5;
+pub const PARTICLE_TRANSLUCENT: usize = 6;
+pub const PROGRAMS: usize = 7;
+
+/// Translucent block geometry uses the same block shadow caster and ID.
+pub fn shadow_program(program: usize) -> usize {
+    if program == BLOCK_TRANSLUCENT {
+        BLOCK
+    } else {
+        program
+    }
+}
 
 /// Which program draws `span`'s run, given which of them (or their fallbacks) the pack has;
 /// `None`: Horizon draws it.
@@ -444,13 +455,58 @@ pub fn program_of(span: &EntitySpan) -> Option<usize> {
             ENTITY
         }
     } else if span.stage == render_stage("BLOCK_ENTITIES") {
-        BLOCK
+        if span.translucent {
+            BLOCK_TRANSLUCENT
+        } else {
+            BLOCK
+        }
     } else if span.stage == render_stage("PARTICLES") {
-        PARTICLE
+        if span.translucent {
+            PARTICLE_TRANSLUCENT
+        } else {
+            PARTICLE
+        }
     } else if span.stage == render_stage("DESTROY") {
         DESTROY
     } else {
         return None;
+    })
+}
+
+/// Ordinary gameplay spans may contain both material categories. Split only at quad
+/// boundaries using the same material tags the vanilla renderer consumes.
+fn material_runs<'a>(
+    entities: &'a [Vertex],
+    spans: &'a [EntitySpan],
+) -> impl Iterator<Item = (EntitySpan, Range<usize>)> + 'a {
+    runs(entities.len(), spans).flat_map(|(span, range)| {
+        let mut at = range.start;
+        let translucent = move |v: &Vertex| {
+            span.translucent
+                || (span.stage == render_stage("BLOCK_ENTITIES")
+                    && v.layer & super::entity_batch::OIT_ENTITY != 0)
+                || (span.stage == render_stage("PARTICLES")
+                    && v.layer & 0xffff == super::TRANSLUCENT_PARTICLE_OVERLAY)
+        };
+        std::iter::from_fn(move || {
+            if at >= range.end {
+                return None;
+            }
+            let start = at;
+            let blended = translucent(&entities[start]);
+            at = (at + 4).min(range.end);
+            while at < range.end && translucent(&entities[at]) == blended {
+                at = (at + 4).min(range.end);
+            }
+            Some((
+                EntitySpan {
+                    start: start as u32,
+                    translucent: blended,
+                    ..span
+                },
+                start..at,
+            ))
+        })
     })
 }
 
@@ -478,6 +534,47 @@ mod tests {
         };
         assert!(drawn_by_pack(&destroy, [true; PROGRAMS]).is_some());
         assert_eq!(drawn_by_pack(&destroy, [false; PROGRAMS]), None);
+    }
+
+    #[test]
+    fn mixed_block_materials_keep_ids_and_shadow_ownership() {
+        let mut vertices = vec![
+            Vertex {
+                layer: 0,
+                ..bytemuck::Zeroable::zeroed()
+            };
+            16
+        ];
+        super::super::entity_batch::mark_oit(&mut vertices[4..12]);
+        let span = EntitySpan {
+            stage: render_stage("BLOCK_ENTITIES"),
+            id: 17,
+            emissive: true,
+            ..Default::default()
+        };
+        let runs: Vec<_> = material_runs(&vertices, &[span]).collect();
+        assert_eq!(
+            runs.iter()
+                .map(|(s, r)| (program_of(s).unwrap(), r.clone()))
+                .collect::<Vec<_>>(),
+            [(BLOCK, 0..4), (BLOCK_TRANSLUCENT, 4..12), (BLOCK, 12..16)]
+        );
+        let casters = Casters {
+            blocks: true,
+            only_lit: true,
+            ..Default::default()
+        };
+        for (s, _) in runs {
+            assert_eq!(s.id, 17);
+            assert!(casters.cast(&s, program_of(&s).unwrap()));
+            assert!(!casters.cast(
+                &EntitySpan {
+                    emissive: false,
+                    ..s
+                },
+                program_of(&s).unwrap()
+            ));
+        }
     }
 
     #[test]

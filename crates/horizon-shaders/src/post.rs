@@ -151,6 +151,16 @@ const BLOCK: [&str; 5] = [
     "gbuffers_basic",
 ];
 
+/// Translucent block entities retain the ordinary block fallback chain.
+const BLOCK_TRANSLUCENT: [&str; 6] = [
+    "gbuffers_block_translucent",
+    "gbuffers_block",
+    "gbuffers_terrain",
+    "gbuffers_textured_lit",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
 /// `gbuffers_clouds`: no fallback, the game draws its clouds otherwise (OQ-3).
 const CLOUDS: [&str; 1] = ["gbuffers_clouds"];
 
@@ -181,6 +191,15 @@ const ENTITIES_TRANSLUCENT: [&str; 5] = [
 
 /// `gbuffers_particles` and its fallbacks (2.3).
 const PARTICLES: [&str; 4] = [
+    "gbuffers_particles",
+    "gbuffers_textured_lit",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
+/// Mixed-order translucent particles retain the ordinary particle fallback chain.
+const PARTICLES_TRANSLUCENT: [&str; 5] = [
+    "gbuffers_particles_translucent",
     "gbuffers_particles",
     "gbuffers_textured_lit",
     "gbuffers_textured",
@@ -392,10 +411,12 @@ pub struct Post {
     pub entities: Option<PostProgram>,
     /// What draws block entities, after terrain.
     pub block: Option<PostProgram>,
+    pub block_translucent: Option<PostProgram>,
     /// What draws translucent entities (name tags, shadows), after the others.
     pub entities_translucent: Option<PostProgram>,
     /// What draws particles.
     pub particles: Option<PostProgram>,
+    pub particles_translucent: Option<PostProgram>,
     pub damaged_block: Option<PostProgram>,
     /// What draws the game's clouds.
     pub clouds: Option<PostProgram>,
@@ -424,6 +445,8 @@ pub struct Post {
     pub translucent_late: bool,
     /// Particles draw after deferred (`particles.ordering`, `particles.before.deferred`, 3.2).
     pub particles_late: bool,
+    /// Opaque particles before deferred, translucent particles after it.
+    pub particles_mixed: bool,
     /// The custom uniforms of `shaders.properties` (3.4).
     pub custom: Custom,
     /// `texture.*`: the textures the pack binds to sampler names.
@@ -453,8 +476,10 @@ impl Post {
             &self.sky_textured,
             &self.entities,
             &self.block,
+            &self.block_translucent,
             &self.entities_translucent,
             &self.particles,
+            &self.particles_translucent,
             &self.damaged_block,
             &self.clouds,
             &self.weather,
@@ -543,8 +568,10 @@ pub fn load_post(
         sky_textured: None,
         entities: None,
         block: None,
+        block_translucent: None,
         entities_translucent: None,
         particles: None,
+        particles_translucent: None,
         damaged_block: None,
         clouds: None,
         weather: None,
@@ -559,6 +586,7 @@ pub fn load_post(
         shadow_comp: Vec::new(),
         translucent_late: false,
         particles_late: false,
+        particles_mixed: false,
         custom: Custom::parse(properties),
         textures: Vec::new(),
         sizes: [None; crate::BUFFERS],
@@ -629,6 +657,25 @@ pub fn load_post(
             }
         }
     }
+    let flag = |key: &str| properties.get(key).map(|v| v.trim() == "true");
+    let separate_entities = flag("separateEntityDraws").unwrap_or(false);
+    let particle_order = properties
+        .get("particles.ordering")
+        .map(str::trim)
+        .unwrap_or_else(|| match flag("particles.before.deferred") {
+            Some(true) => "before",
+            Some(false) => "after",
+            None if loader
+                .post
+                .programs
+                .iter()
+                .any(|p| p.group == Group::Deferred) =>
+            {
+                "after"
+            }
+            None => "mixed",
+        });
+    let particles_mixed = particle_order == "mixed";
     let mut gbuffers = |names: &[&str], group, inputs: &GbuffersInputs| {
         names.iter().find_map(|name| {
             // `alphaTest.<program>` replaces the geometry's default test (OQ-23).
@@ -705,7 +752,42 @@ pub fn load_post(
         };
     let mut gbuffers_dyn = |names: &[&str], i: &GbuffersInputs| gbuffers(names, Group::Gbuffers, i);
     let entities_translucent = translucent(&ENTITIES_TRANSLUCENT, 0.0, &mut gbuffers_dyn);
-    let particles = translucent(&PARTICLES, 0.1, &mut gbuffers_dyn);
+    let particles = translucent(&PARTICLES, 0.1, &mut gbuffers_dyn).map(|mut p| {
+        if particle_order != "before" && !particles_mixed {
+            p.group = Group::Translucent;
+        }
+        p
+    });
+    let block_translucent = translucent(
+        if separate_entities {
+            &BLOCK_TRANSLUCENT
+        } else {
+            &BLOCK
+        },
+        0.0,
+        &mut gbuffers_dyn,
+    )
+    .map(|mut p| {
+        if separate_entities {
+            p.group = Group::Translucent;
+        }
+        p
+    });
+    let particles_translucent = translucent(
+        if particles_mixed {
+            &PARTICLES_TRANSLUCENT
+        } else {
+            &PARTICLES
+        },
+        0.1,
+        &mut gbuffers_dyn,
+    )
+    .map(|mut p| {
+        if particle_order != "before" {
+            p.group = Group::Translucent;
+        }
+        p
+    });
     // Clouds blend, as vanilla's do (OQ-23).
     let clouds = inputs
         .clouds
@@ -757,21 +839,17 @@ pub fn load_post(
     loader.post.sky_textured = sky_textured;
     loader.post.entities = entities;
     loader.post.block = block;
+    loader.post.block_translucent = block_translucent;
     loader.post.entities_translucent = entities_translucent;
     loader.post.particles = particles;
+    loader.post.particles_translucent = particles_translucent;
     loader.post.damaged_block = damaged_block;
     loader.post.clouds = clouds;
     loader.post.weather = weather;
     loader.post.hand = hand;
-    let flag = |key: &str| properties.get(key).map(|v| v.trim() == "true");
-    loader.post.translucent_late = flag("separateEntityDraws").unwrap_or(false);
-    // `after` when the pack has a deferred program, else `mixed`; ours are all translucent, so
-    // `mixed` draws them after deferred too.
-    loader.post.particles_late = match properties.get("particles.ordering").map(str::trim) {
-        Some("before") => false,
-        Some(_) => true,
-        None => !flag("particles.before.deferred").unwrap_or(false),
-    };
+    loader.post.translucent_late = separate_entities;
+    loader.post.particles_late = particle_order != "before" && !particles_mixed;
+    loader.post.particles_mixed = particles_mixed;
     load_shadow(
         &mut loader,
         inputs.terrain.as_ref(),
@@ -799,8 +877,10 @@ fn load_shadow(
         &post.sky_textured,
         &post.entities,
         &post.block,
+        &post.block_translucent,
         &post.entities_translucent,
         &post.particles,
+        &post.particles_translucent,
         &post.damaged_block,
         &post.clouds,
         &post.weather,
@@ -1731,6 +1811,62 @@ mod tests {
         assert!(post.shadow.is_some() && post.shadow_water.is_none());
     }
 
+    #[test]
+    fn particle_ordering_splits_mixed_and_preserves_legacy_overrides() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/terrain-test");
+        let pack = Pack::open(&dir).unwrap();
+        let inputs = GameInputs {
+            entities: Some(crate::GbuffersInputs {
+                declarations: "layout(location=0)in vec3 fixture_pos;".into(),
+                body: "hz_Vertex=vec4(fixture_pos,1.0);hz_Color=vec4(1.0);".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for (property, late, mixed) in [
+            ("", false, true),
+            ("particles.ordering=mixed", false, true),
+            ("particles.ordering=before", false, false),
+            ("particles.ordering=after", true, false),
+            ("particles.before.deferred=true", false, false),
+            ("particles.before.deferred=false", true, false),
+            (
+                "particles.ordering=mixed\nparticles.before.deferred=true",
+                false,
+                true,
+            ),
+        ] {
+            let properties = Properties::parse(property, &Macros::standard());
+            let post = load_post(&pack, "", &properties, &Macros::standard(), &inputs);
+            assert_eq!(
+                (post.particles_late, post.particles_mixed),
+                (late, mixed),
+                "{property}"
+            );
+            assert!(
+                post.particles.is_some() && post.particles_translucent.is_some(),
+                "{:?}",
+                post.notes
+            );
+            assert_eq!(
+                post.particles.unwrap().group,
+                if late {
+                    Group::Translucent
+                } else {
+                    Group::Gbuffers
+                }
+            );
+            assert_eq!(
+                post.particles_translucent.unwrap().group,
+                if late || mixed {
+                    Group::Translucent
+                } else {
+                    Group::Gbuffers
+                }
+            );
+        }
+    }
+
     /// Water falls back to the terrain chain and blends by default, as the sky does; entities
     /// and block entities fall back along theirs; `blend.*` overrides.
     #[test]
@@ -1798,7 +1934,7 @@ mod tests {
             ("gbuffers_textured", Some(TRANSLUCENT_BLEND))
         );
         assert_eq!(particles.blend, Some(TRANSLUCENT_BLEND));
-        assert!(post.particles_late && !post.translucent_late);
+        assert!(post.particles_mixed && !post.particles_late && !post.translucent_late);
         // gbuffers_clouds has no fallback (OQ-3): without it the game draws its clouds.
         assert!(post.clouds.is_none());
         // The hand falls back to gbuffers_textured and does not blend.
