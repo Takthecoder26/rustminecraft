@@ -401,7 +401,24 @@ pub fn atlases(root: &Path) -> BTreeMap<String, Vec<SpriteSource>> {
     };
     for ns in namespaces.flatten() {
         let namespace = ns.file_name().to_string_lossy().into_owned();
-        let Ok(files) = fs::read_dir(ns.path().join("atlases")) else {
+        let base = ns.path().join("atlases");
+        if let Some(listed) = horizon_core::prepared_files::files_under(&base) {
+            for rel in listed {
+                if !rel.ends_with(".json") {
+                    continue;
+                }
+                let path = base.join(&rel);
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                if let Some(sources) = horizon_core::prepared_files::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| decode(&t))
+                {
+                    out.insert(format!("{namespace}:{stem}"), sources);
+                }
+            }
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&base) else {
             continue;
         };
         for f in files.flatten() {

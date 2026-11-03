@@ -521,11 +521,17 @@ fn font_ids(root: &Path) -> Vec<String> {
         .flatten()
     {
         let ns = ns.file_name().to_string_lossy().into_owned();
-        walk(
-            &root.join("assets").join(&ns).join("font"),
-            &format!("{ns}:"),
-            &mut ids,
-        );
+        let base = root.join("assets").join(&ns).join("font");
+        if let Some(listed) = horizon_core::prepared_files::files_under(&base) {
+            for rel in listed {
+                if let Some(stemmed) = rel.strip_suffix(".json") {
+                    let id = stemmed.replace('/', "/");
+                    ids.push(format!("{ns}:{id}"));
+                }
+            }
+            continue;
+        }
+        walk(&base, &format!("{ns}:"), &mut ids);
     }
     ids.sort();
     ids

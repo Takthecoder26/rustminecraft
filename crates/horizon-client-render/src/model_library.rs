@@ -19,6 +19,20 @@ impl ParsedModels {
         for ns in namespaces.flatten() {
             let namespace = ns.file_name().to_string_lossy().into_owned();
             let base = ns.path().join("models");
+            // A prepared root lists its files from the data file, without the
+            // disk walk and a stat per entry; fall back to walking for mirrors
+            // and content packs.
+            if let Some(listed) = horizon_core::prepared_files::files_under(&base) {
+                for rel in listed {
+                    if !rel.ends_with(".json") {
+                        continue;
+                    }
+                    let stem = rel[..rel.len() - ".json".len()].replace('\\', "/");
+                    let path = base.join(&rel);
+                    files.push((format!("{namespace}:{stem}"), path));
+                }
+                continue;
+            }
             let mut stack = vec![base.clone()];
             while let Some(dir) = stack.pop() {
                 let Ok(entries) = fs::read_dir(&dir) else {
