@@ -4432,6 +4432,7 @@ mod tests {
             &device,
             Default::default(),
             Default::default(),
+            Default::default(),
             wgpu::ShaderStages::FRAGMENT,
         );
         let stand_ins = std::cell::RefCell::new(Vec::new());
