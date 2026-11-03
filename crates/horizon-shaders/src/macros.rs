@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 /// hardware filtering is on, `shadowtex0HW`/`shadowtex1HW` compare; Horizon picks a comparison
 /// sampler by the declared type (`sampler2DShadow`), so they always are. `HIGHER_SHADOWCOLOR`:
 /// `shadowcolor2` to `shadowcolor7` beside the first two.
-const FEATURES: [&str; 8] = [
+const FEATURES: [&str; 9] = [
     "BLOCK_EMISSION_ATTRIBUTE",
     "COMPUTE_SHADERS",
     "CUSTOM_IMAGES",
