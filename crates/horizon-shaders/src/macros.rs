@@ -253,7 +253,9 @@ impl Macros {
                     }
                 }
             }
-            pending.extendleft(replacement.into_iter().rev());
+            for token in replacement.into_iter().rev() {
+                pending.push_front(token);
+            }
         }
         out
     }
