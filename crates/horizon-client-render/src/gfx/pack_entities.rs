@@ -479,7 +479,7 @@ fn material_runs<'a>(
     entities: &'a [Vertex],
     spans: &'a [EntitySpan],
 ) -> impl Iterator<Item = (EntitySpan, Range<usize>)> + 'a {
-    runs(entities.len(), spans).flat_map(|(span, range)| {
+    runs(entities.len(), spans).flat_map(move |(span, range)| {
         let mut at = range.start;
         let translucent = move |v: &Vertex| {
             span.translucent
@@ -600,11 +600,11 @@ mod tests {
         assert_eq!(drawn_by_pack(&spans[0], all), Some(ENTITY));
         assert_eq!(drawn_by_pack(&spans[1], all), Some(PARTICLE));
         assert_eq!(
-            drawn_by_pack(&spans[1], [true, true, true, false, true]),
+            drawn_by_pack(&spans[1], [true, true, true, false, true, false, false]),
             None
         );
         assert_eq!(
-            drawn_by_pack(&spans[2], [true, false, true, true, true]),
+            drawn_by_pack(&spans[2], [true, false, true, true, true, false, false]),
             None
         );
         assert_eq!(drawn_by_pack(&spans[2], all), Some(BLOCK));
