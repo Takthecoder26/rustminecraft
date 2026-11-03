@@ -1351,7 +1351,9 @@ impl Game<'_> {
         self.guest_close_all(host, conn);
         // A block's or a double chest's menu counts among the openers of its
         // lid (a vehicle keeps its own `Container`, an ender chest has none).
-        let counts_openers = matches!(slots, Slots::Block(_) | Slots::Double(_, _));
+        // Spectators never count as openers (`ChestBlockEntity.startOpen`,
+        // `ShulkerBoxBlockEntity.startOpen`, `BarrelBlockEntity.startOpen`).
+        let counts_openers = counts_container_openers(spectator, &slots);
         let hidden = self.native_hidden_slots(pos, items.len());
         host.hub
             .open_container(conn, menu, title, pos, slots, items);
@@ -5575,6 +5577,219 @@ mod aim_point_tests {
         assert_eq!(
             visible_aim_point(EYE, LO, HI, behind_top_slab),
             visible_aim_point(EYE, LO, HI, behind_top_slab)
+        );
+    }
+}
+
+/// `ChestBlockEntity.startOpen`, `ShulkerBoxBlockEntity.startOpen`, `BarrelBlockEntity.startOpen`:
+/// Whether opening this container counts toward the block entity's opener count.
+/// Spectators never count as openers and do not trigger lid/barrel animations or sounds.
+pub(super) fn counts_container_openers(spectator: bool, slots: &Slots) -> bool {
+    !spectator && matches!(slots, Slots::Block(_) | Slots::Double(_, _))
+}
+
+#[cfg(test)]
+mod spectator_container_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Mock state simulating `Game::lid_openers` and the container open/close packet pipeline
+    /// from `lan_open_container` and `guest_container_closed`.
+    struct ContainerTracker {
+        lid_openers: HashMap<(i32, i32, i32), i32>,
+        open_events: Vec<((i32, i32, i32), bool)>,
+    }
+
+    impl ContainerTracker {
+        fn new() -> Self {
+            Self {
+                lid_openers: HashMap::new(),
+                open_events: Vec::new(),
+            }
+        }
+
+        /// Simulates `lan_open_container` opener logic (`counts_openers && self.container_openers_changed(pos, true)`).
+        fn open(&mut self, spectator: bool, slots: &Slots, pos: (i32, i32, i32)) -> bool {
+            let counts_openers = counts_container_openers(spectator, slots);
+            if counts_openers && self.container_openers_changed(pos, true) {
+                self.open_events.push((pos, true));
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Simulates `guest_container_closed` (`!g.spectator() && self.container_openers_changed(pos, false)`).
+        fn close(&mut self, spectator: bool, pos: (i32, i32, i32)) -> bool {
+            if !spectator && self.container_openers_changed(pos, false) {
+                self.open_events.push((pos, false));
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Simulates `Game::container_openers_changed` and `count_opener` (`(before == 0) != (after == 0)`).
+        fn container_openers_changed(&mut self, pos: (i32, i32, i32), open: bool) -> bool {
+            let count = self.lid_openers.entry(pos).or_default();
+            let before = *count;
+            *count = (before + if open { 1 } else { -1 }).max(0);
+            let after = *count;
+            if after == 0 {
+                self.lid_openers.remove(&pos);
+            }
+            (before == 0) != (after == 0)
+        }
+    }
+
+    /// Standard positive: A survival/creative player opening a chest/shulker/barrel counts as an
+    /// opener, triggers opener change (`container_openers_changed` returns true) and close decrements it.
+    #[test]
+    fn survival_player_counts_as_opener_and_triggers_open_close_events() {
+        let mut tracker = ContainerTracker::new();
+        let pos = (10, 64, 10);
+        let slots = Slots::Block(pos);
+
+        // Survival guest opens container
+        let opened = tracker.open(false, &slots, pos);
+        assert!(opened, "first opener must trigger sound/edge event");
+        assert_eq!(tracker.lid_openers.get(&pos), Some(&1));
+        assert_eq!(tracker.open_events, vec![(pos, true)]);
+
+        // Survival guest closes container
+        let closed = tracker.close(false, pos);
+        assert!(closed, "last opener leaving must trigger close event");
+        assert_eq!(tracker.lid_openers.get(&pos), None, "count must reach 0");
+        assert_eq!(tracker.open_events, vec![(pos, true), (pos, false)]);
+    }
+
+    /// Blocked negative: A spectator opening a chest/shulker/barrel does NOT count as an opener
+    /// (`counts_openers` is false), does NOT increment `lid_openers`, does NOT trigger opening sound/block-events,
+    /// and does NOT leave the container open.
+    #[test]
+    fn spectator_player_does_not_count_as_opener_or_leave_container_open() {
+        let mut tracker = ContainerTracker::new();
+        let pos = (20, 64, 20);
+        let slots = Slots::Block(pos);
+
+        // Spectator opens container
+        assert!(!counts_container_openers(true, &slots));
+        let opened = tracker.open(true, &slots, pos);
+        assert!(
+            !opened,
+            "spectator must never trigger open animation or sound"
+        );
+        assert_eq!(
+            tracker.lid_openers.get(&pos),
+            None,
+            "spectator must never increment opener count"
+        );
+        assert!(
+            tracker.open_events.is_empty(),
+            "no open events for spectator"
+        );
+
+        // Spectator closes container GUI
+        let closed = tracker.close(true, pos);
+        assert!(
+            !closed,
+            "spectator closing container must not trigger close events"
+        );
+        assert_eq!(
+            tracker.lid_openers.get(&pos),
+            None,
+            "container must remain closed and not stuck open"
+        );
+        assert!(tracker.open_events.is_empty(), "still no events fired");
+    }
+
+    /// Double chest and shulker box parity: Tests verify single chest, double chest, shulker box,
+    /// and barrel correctly respect the spectator rule.
+    #[test]
+    fn container_types_parity_respects_spectator_rule() {
+        let pos1 = (30, 64, 30);
+        let pos2 = (31, 64, 30);
+
+        // Single chest / Shulker box / Barrel (Slots::Block)
+        let single_block_slots = Slots::Block(pos1);
+        assert!(counts_container_openers(false, &single_block_slots));
+        assert!(!counts_container_openers(true, &single_block_slots));
+
+        // Double chest (Slots::Double)
+        let double_chest_slots = Slots::Double(pos1, pos2);
+        assert!(counts_container_openers(false, &double_chest_slots));
+        assert!(!counts_container_openers(true, &double_chest_slots));
+
+        // Ender chest (Slots::Ender): spectator cannot count, and ender chest has separate storage
+        let ender_slots = Slots::Ender;
+        assert!(!counts_container_openers(false, &ender_slots));
+        assert!(!counts_container_openers(true, &ender_slots));
+
+        // Native mod menu (Slots::Native)
+        let native_slots = Slots::Native;
+        assert!(!counts_container_openers(false, &native_slots));
+        assert!(!counts_container_openers(true, &native_slots));
+    }
+
+    /// Special/edge cases: Multiple viewers (survival opens -> spectator opens -> spectator closes -> survival closes)
+    /// transitions cleanly through 0 -> 1 -> 1 -> 1 -> 0 without desync or stuck states.
+    #[test]
+    fn multiple_viewers_survival_and_spectator_transitions_without_desync() {
+        let mut tracker = ContainerTracker::new();
+        let pos = (40, 64, 40);
+        let slots = Slots::Block(pos);
+
+        // Initial state: 0 openers
+        assert_eq!(tracker.lid_openers.get(&pos), None);
+
+        // Step 1: Survival player opens (0 -> 1)
+        assert!(
+            tracker.open(false, &slots, pos),
+            "0 -> 1 triggers open edge"
+        );
+        assert_eq!(tracker.lid_openers.get(&pos), Some(&1));
+
+        // Step 2: Spectator player opens while survival viewer is looking (1 -> 1)
+        assert!(
+            !tracker.open(true, &slots, pos),
+            "spectator opening must not trigger extra edge"
+        );
+        assert_eq!(tracker.lid_openers.get(&pos), Some(&1), "count stays 1");
+
+        // Step 3: Spectator player closes GUI (1 -> 1)
+        assert!(
+            !tracker.close(true, pos),
+            "spectator closing must not trigger close edge"
+        );
+        assert_eq!(
+            tracker.lid_openers.get(&pos),
+            Some(&1),
+            "count stays 1 for remaining survival viewer"
+        );
+
+        // Step 4: Survival player closes GUI (1 -> 0)
+        assert!(tracker.close(false, pos), "1 -> 0 triggers close edge");
+        assert_eq!(tracker.lid_openers.get(&pos), None, "count resets to 0");
+
+        // Exactly 1 open event and 1 close event across the whole sequence
+        assert_eq!(tracker.open_events, vec![(pos, true), (pos, false)]);
+
+        // Step 5: Reverse close order test (Survival closes before spectator)
+        // Survival opens (0 -> 1)
+        assert!(tracker.open(false, &slots, pos));
+        assert_eq!(tracker.lid_openers.get(&pos), Some(&1));
+        // Spectator opens (1 -> 1)
+        assert!(!tracker.open(true, &slots, pos));
+        assert_eq!(tracker.lid_openers.get(&pos), Some(&1));
+        // Survival closes while spectator still in GUI (1 -> 0)
+        assert!(tracker.close(false, pos));
+        assert_eq!(tracker.lid_openers.get(&pos), None);
+        // Spectator closes later (0 -> 0)
+        assert!(!tracker.close(true, pos));
+        assert_eq!(
+            tracker.lid_openers.get(&pos),
+            None,
+            "container remains closed"
         );
     }
 }

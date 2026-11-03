@@ -929,4 +929,23 @@ mod tests {
         assert_eq!(openers_at(&open, elsewhere), 1);
         assert_eq!(openers_at(&open, (0, 0, 0)), 0);
     }
+
+    /// In vanilla Java 26.3, spectators viewing containers never count as openers
+    /// (`ChestBlockEntity.startOpen`, `ContainerOpenersCounter`). When only spectators
+    /// have a container open, `open_containers` contains no entries for that position,
+    /// and `recheck_opener_count` reflects 0 openers.
+    #[test]
+    fn spectator_menus_do_not_count_in_recheck_openers() {
+        let mut counts = HashMap::new();
+        let chest = (5, 64, 5);
+
+        // Spectator has the container open: open_containers list is empty
+        let open_containers: [(i32, i32, i32); 0] = [];
+        assert_eq!(openers_at(&open_containers, chest), 0);
+        assert_eq!(
+            recheck_opener_count(&mut counts, &open_containers, chest),
+            (0, 0)
+        );
+        assert_eq!(counts.get(&chest), None);
+    }
 }
