@@ -1188,9 +1188,11 @@ impl Loader<'_> {
                 notes.push(format!("{name}: skipped"));
                 continue;
             }
-            self.post.config.read(&pp);
             match translate_compute(&pp) {
-                Ok(program) => out.push((name, program)),
+                Ok(program) => {
+                    self.post.config.read(&pp);
+                    out.push((name, program));
+                }
                 Err(errors) => {
                     notes.extend(
                         errors

@@ -3677,7 +3677,10 @@ impl PackPost {
         let Some(t) = &mut self.shadow_targets else {
             return;
         };
-        t.begin_frame();
+        // Packs with storage images were cleared before Begin could access them.
+        if t.storage == 0 {
+            t.begin_frame();
+        }
         let size = [t.size; 2];
         self.draw_terrain(
             device,
@@ -3906,6 +3909,12 @@ impl PackPost {
         self.uniforms.eval_custom(&mut self.custom);
         if self.targets.is_none() {
             return;
+        }
+        // Shadow images are accessible even in Begin, before the shadow raster pass.
+        // Clear their main side once now; later shadow geometry must retain those writes.
+        if let Some(shadow) = self.shadow_targets.as_mut().filter(|s| s.storage != 0) {
+            shadow.begin_frame();
+            shadow.clear_rest(encoder);
         }
         // Images start the frame cleared, before the shadow pass writes them.
         if let Some(dump) = &mut self.dump {

@@ -242,6 +242,39 @@ fn shadow_image_integer_format_declared_only_in_compute_reaches_pixels() {
     }));
 }
 
+#[test]
+#[ignore = "requires a host GPU; run with --ignored --nocapture"]
+fn shadow_images_clear_before_begin_and_preserve_uncleared_history() {
+    let gpu = Fixture::new().expect("GPU required");
+    for clear in [true, false] {
+        let compute = format!(
+            "#version 430\nlayout(local_size_x=1,local_size_y=1) in;\nconst ivec3 workGroups=ivec3(16,16,1);\nconst int shadowMapResolution=16;\nconst bool shadowcolor0Clear={clear};\nconst vec4 shadowcolor0ClearColor=vec4(0.125,0.25,0.5,1);\nlayout(rgba8) uniform image2D shadowcolorimg0;\nvoid main(){{ivec2 p=ivec2(gl_GlobalInvocationID.xy);vec4 old=imageLoad(shadowcolorimg0,p);imageStore(shadowcolorimg0,p,vec4(old.r+0.25,0.25,0.5,1));}}\n"
+        );
+        let mut post=gpu.build(original(&[
+            ("begin.csh",&compute),
+            ("final.vsh","#version 120\nvoid main(){gl_Position=ftransform();}\n"),
+            ("final.fsh","#version 430\nlayout(rgba8) readonly uniform image2D shadowcolorimg0;\nvoid main(){gl_FragColor=imageLoad(shadowcolorimg0,ivec2(gl_FragCoord.xy));}\n"),
+        ]));
+        assert!(
+            post.notes.iter().all(|n| n.starts_with("shadow map ")),
+            "{:?}",
+            post.notes
+        );
+        for frame in 0..3 {
+            let red = if clear { 96 } else { [64, 128, 191][frame] };
+            let pixels = gpu.render_with_cache(&mut post, [16, 16], true);
+            assert!(
+                pixels.iter().all(|p| p
+                    .iter()
+                    .zip([red, 64, 128, 255])
+                    .all(|(a, b)| a.abs_diff(b) <= 1)),
+                "clear={clear} frame={frame}: {:?}",
+                pixels[0]
+            );
+        }
+    }
+}
+
 struct Fixture {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -316,6 +349,10 @@ impl Fixture {
     }
 
     fn render(&self, post: &mut PackPost, size: [u32; 2]) -> Vec<[u8; 4]> {
+        self.render_with_cache(post, size, false)
+    }
+
+    fn render_with_cache(&self, post: &mut PackPost, size: [u32; 2], cache: bool) -> Vec<[u8; 4]> {
         let world = self.texture(size, T::Rgba8Unorm);
         let depth = self.texture(size, T::Depth32Float);
         let screen = self.texture(size, T::Rgba8Unorm);
@@ -328,6 +365,8 @@ impl Fixture {
         });
         let hud = HudBatch::new(size);
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut frame = fixture_frame(&hud);
+        frame.shadow_cache = cache;
         post.run(
             &self.device,
             &self.queue,
@@ -335,7 +374,7 @@ impl Fixture {
             &world,
             &depth,
             &screen,
-            &fixture_frame(&hud),
+            &frame,
             &Default::default(),
             size,
             size,
