@@ -368,6 +368,8 @@ impl Game<'_> {
                 }
             });
             if let Err(panic) = loaded {
+                // A panic after classification was prepared must not republish its overrides.
+                shader_layers = Some(Vec::new());
                 self.shader_pack_failed(name, dimension, &panic);
             }
         }
