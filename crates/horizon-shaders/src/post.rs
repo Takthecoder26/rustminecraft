@@ -592,6 +592,7 @@ pub fn load_post(
             match (n.parse(), loaded) {
                 (Ok(n), Some((b, initial))) => {
                     post.buffer_objects.insert(n, b);
+                    post.buffer_initializers.remove(&n);
                     if let Some(data) = initial {
                         post.buffer_initializers.insert(n, data);
                     }
@@ -1403,6 +1404,30 @@ mod tests {
             &GameInputs::default(),
         );
         assert_eq!(post.buffer_initializers.get(&0).unwrap(), b"seed");
+    }
+
+    #[test]
+    fn later_buffer_declarations_replace_the_initialization_state() {
+        let pack = Pack::from_zip_bytes(
+            "t",
+            crate::pack::tests::zip(&[("shaders/seed.bin", "seed")]),
+        )
+        .unwrap();
+        for properties in [
+            "bufferObject.0=32 seed.bin\nbufferObject.0=4\n",
+            "bufferObject.00=32 seed.bin\nbufferObject.0=4\n",
+        ] {
+            let properties = Properties::parse(properties, &Macros::standard());
+            let post = load_post(
+                &pack,
+                "",
+                &properties,
+                &Macros::standard(),
+                &GameInputs::default(),
+            );
+            assert_eq!(post.buffer_objects.get(&0), Some(&BufferObject::Bytes(4)));
+            assert!(post.buffer_initializers.is_empty());
+        }
     }
 
     #[test]
