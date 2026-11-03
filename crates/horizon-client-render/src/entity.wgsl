@@ -333,7 +333,8 @@ fn shadow_color(in: Out) -> vec4<f32> {
 }
 
 @fragment fn fs_outline(in: Out) -> @location(0) vec4<f32> {
-    if textureSample(atlas, atlas_sampler, in.uv).a == 0.0 { discard; }
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    if texel.a == 0.0 { discard; }
     return vec4(in.color.rgb, 1.0);
 }
 
@@ -372,7 +373,8 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
 // The hand in HDR output (gfx.rs "HDR hand marks"): where it drew, what the world kept there
 // no longer shines; fs_hdr_mark then marks the light sources it holds.
 @fragment fn fs_hdr_hand_unmark(in: Out) -> @location(0) vec4<f32> {
-    if textureSample(atlas, atlas_sampler, in.uv).a < 0.1 { discard; }
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    if texel.a < 0.1 { discard; }
     return vec4(0.0, 0.0, 0.0, hdr_scene_alpha(in.scene));
 }
 

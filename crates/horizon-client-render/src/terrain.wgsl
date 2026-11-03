@@ -503,9 +503,8 @@ fn solid_finish(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>) -> vec4<f32>
     if in.emissive_layer != 0xffffffffu {
         // The high bit: an OptiFine overlay, drawn cutout (opaque where alpha >= 0.1).
         var mask = sprite(in.uv, in.emissive_layer & 0x7fffffffu);
-        if (in.emissive_layer & 0x80000000u) != 0u {
-            mask.a = select(0.0, 1.0, mask.a >= 0.1);
-        }
+        let cutout = (in.emissive_layer & 0x80000000u) != 0u;
+        mask.a = select(mask.a, select(0.0, 1.0, mask.a >= 0.1), cutout);
         return apply_fog(vec4(mix(color.rgb, mask.rgb, mask.a), mix(emissive, hdr_mark(3u, 1.0), mask.a)), in.spherical, in.cylindrical);
     }
     return apply_fog(vec4(color.rgb, emissive), in.spherical, in.cylindrical);
