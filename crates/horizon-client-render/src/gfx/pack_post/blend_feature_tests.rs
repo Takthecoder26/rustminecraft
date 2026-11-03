@@ -78,6 +78,7 @@ fn independent_blending_pixels_and_feature_negotiation_match_the_adapter() {
         indices: None,
         gpu: Gpu::of(&adapter, device.features()),
         storable: 0,
+        released: std::cell::Cell::new(("", 0)),
         stand_ins: &stand_ins,
     };
     let draws = DrawUniforms::new(&device);
@@ -94,7 +95,7 @@ fn independent_blending_pixels_and_feature_negotiation_match_the_adapter() {
         &draws.layout,
         &resources,
     )
-    .expect("independent target blends build");
+    .unwrap_or_else(|| panic!("independent target blends build: {notes:?}"));
     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &pass.layout,
