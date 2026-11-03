@@ -537,3 +537,33 @@ fn shader_layer_override_replaces_sprite_translucency() {
         (0, 48)
     );
 }
+
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; layer override and compact tint contract"]
+fn shader_layer_tinted_cube_keeps_compact_layout_metadata() {
+    let mesh = shader_layer_mesh_sequence_for("oak_leaves", &["solid"])
+        .pop()
+        .unwrap();
+    assert!(!mesh.solid.is_empty());
+    assert!(mesh.translucent.is_empty());
+    assert_eq!(mesh.solid_tints.len(), mesh.solid.len() / 4);
+    let mut colored = 0;
+    for (quad, &tint) in mesh.solid.as_chunks::<4>().0.iter().zip(&mesh.solid_tints) {
+        let c = quad[0].color;
+        if c & 255 == c >> 8 & 255 && c >> 8 & 255 == c >> 16 & 255 {
+            continue;
+        }
+        colored += 1;
+        assert_ne!(tint, packed::UNKNOWN_TINT);
+        assert_ne!(tint, packed::WHITE);
+        let record = packed::pack_quad(quad, tint).expect("tinted cube remains compactable");
+        for (corner, expected) in quad.iter().enumerate() {
+            assert_eq!(
+                bytemuck::bytes_of(&packed::packed_vertex(&record, corner)),
+                bytemuck::bytes_of(expected),
+                "tint and override keep every terrain vertex bit"
+            );
+        }
+    }
+    assert!(colored > 0, "fixture must contain biome-tinted leaves");
+}
