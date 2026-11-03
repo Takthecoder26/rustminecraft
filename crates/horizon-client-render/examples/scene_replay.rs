@@ -643,6 +643,7 @@ fn remesh(
                     let mut mesher = Mesher {
                         nether_shading: false,
                         shader_pack_lighting: false,
+                        shader_provenance: false,
                         separate_ao: false,
                         assets,
                         render,
