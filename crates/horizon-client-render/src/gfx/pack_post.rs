@@ -377,11 +377,12 @@ impl Indirect {
         let Some(source) = buffers.buffer(self.source.buffer) else {
             return false;
         };
-        if self
-            .source
-            .offset
-            .checked_add(12)
-            .is_none_or(|end| end > source.size())
+        if !self.source.offset.is_multiple_of(4)
+            || self
+                .source
+                .offset
+                .checked_add(12)
+                .is_none_or(|end| end > source.size())
         {
             return false;
         }
