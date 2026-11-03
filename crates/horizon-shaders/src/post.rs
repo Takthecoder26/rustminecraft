@@ -302,6 +302,25 @@ impl BufferObject {
     }
 }
 
+/// The SSBO and byte offset holding three unsigned workgroup counts for a compute pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndirectDispatch {
+    pub buffer: u32,
+    pub offset: u64,
+}
+
+impl IndirectDispatch {
+    fn parse(value: &str) -> Option<Self> {
+        let mut words = value.split_whitespace();
+        let buffer = words.next()?.parse().ok()?;
+        let offset: u64 = words.next()?.parse().ok()?;
+        if words.next().is_some() || !offset.is_multiple_of(4) || offset.checked_add(12).is_none() {
+            return None;
+        }
+        Some(Self { buffer, offset })
+    }
+}
+
 /// `image.<name>`: an image of the pack's, read and written as `name`, sampled as `sampler`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CustomImage {
@@ -432,6 +451,8 @@ pub struct Post {
     pub sizes: [Option<BufferSize>; crate::BUFFERS],
     /// `bufferObject.*`, by binding.
     pub buffer_objects: std::collections::BTreeMap<u32, BufferObject>,
+    /// `indirect.<compute pass>`, indexed by the complete compute program name.
+    pub indirect: std::collections::BTreeMap<String, IndirectDispatch>,
     /// `image.*`.
     pub images: Vec<CustomImage>,
     /// `shadow.culling`: `false` draws everything within the shadow distance, every face, not
@@ -563,6 +584,7 @@ pub fn load_post(
         textures: Vec::new(),
         sizes: [None; crate::BUFFERS],
         buffer_objects: Default::default(),
+        indirect: Default::default(),
         images: Vec::new(),
         shadow_culling: match properties.get("shadow.culling").map(str::trim) {
             Some("false") => ShadowCulling::Off,
@@ -574,6 +596,18 @@ pub fn load_post(
     };
     let options = crate::with_options(pack, macros);
     for e in &properties.entries {
+        if let Some(name) = e.key.strip_prefix("indirect.") {
+            match IndirectDispatch::parse(&e.value) {
+                Some(dispatch) if !name.is_empty() => {
+                    post.indirect.insert(name.to_owned(), dispatch);
+                }
+                _ => post.notes.push(format!(
+                    "`{}`: invalid indirect buffer and aligned byte offset",
+                    e.key
+                )),
+            }
+            continue;
+        }
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
             match (n.parse(), BufferObject::parse(&e.value)) {
                 (Ok(n), Some(b)) => _ = post.buffer_objects.insert(n, b),
@@ -1168,6 +1202,14 @@ impl Loader<'_> {
             {
                 continue;
             }
+            if self.properties.get(&format!("indirect.{name}")).is_some()
+                && !self.post.indirect.contains_key(&name)
+            {
+                self.post
+                    .notes
+                    .push(format!("{name}: skipped: invalid indirect dispatch"));
+                continue;
+            }
             let pp = self.preprocess(&path);
             let problems = diagnostics(&pp);
             let notes = &mut self.post.notes;
@@ -1320,6 +1362,50 @@ fn flips(properties: &Properties, program: &str) -> Vec<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indirect_compute_descriptors_are_loaded_and_invalid_requests_skip() {
+        let pack = Pack::from_zip_bytes(
+            "original-indirect-loader",
+            crate::pack::tests::zip(&[(
+                "shaders/composite.csh",
+                "#version 430\nlayout(local_size_x=1) in;\nvoid main() {}\n",
+            )]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse("indirect.composite=2 4", &macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(
+            post.indirect.get("composite"),
+            Some(&IndirectDispatch {
+                buffer: 2,
+                offset: 4
+            })
+        );
+        assert_eq!(
+            post.programs.iter().map(|p| p.compute.len()).sum::<usize>(),
+            1
+        );
+        for value in ["2 1", "2 18446744073709551612", "2 4 extra", "-1 0", "2 -1"] {
+            let properties = Properties::parse(&format!("indirect.composite={value}"), &macros);
+            let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+            assert!(post.indirect.is_empty(), "{value}");
+            assert_eq!(
+                post.programs.iter().map(|p| p.compute.len()).sum::<usize>(),
+                0,
+                "{value}"
+            );
+            assert!(
+                post.notes
+                    .iter()
+                    .any(|n| n.contains("skipped: invalid indirect dispatch")),
+                "{:?}",
+                post.notes
+            );
+        }
+    }
 
     #[test]
     fn image_dimensions_expand_default_and_chosen_options() {

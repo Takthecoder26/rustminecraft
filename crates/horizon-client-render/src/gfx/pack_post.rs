@@ -317,6 +317,83 @@ impl Gpu {
     }
 }
 
+/// A separate guarded command avoids binding a writable SSBO as indirect input.
+#[derive(Clone)]
+struct Indirect {
+    source: horizon_shaders::IndirectDispatch,
+    command: wgpu::Buffer,
+    pipeline: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+}
+
+impl Indirect {
+    fn new(device: &wgpu::Device, source: horizon_shaders::IndirectDispatch) -> Self {
+        let command = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pack indirect command"),
+            size: 12,
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        // Release builds can disable wgpu's generic indirect validation. Guard pack counts
+        // here, without CPU readback or relying on instance validation flags.
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Pack indirect limit guard"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "const LIMIT: u32 = {}u;\n{}",
+                    device.limits().max_compute_workgroups_per_dimension,
+                    include_str!("pack_indirect.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Pack indirect limit guard"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: command.as_entire_binding(),
+            }],
+        });
+        Self {
+            source,
+            command,
+            pipeline,
+            group,
+        }
+    }
+
+    fn prepare(&self, encoder: &mut wgpu::CommandEncoder, buffers: &pack_images::Buffers) -> bool {
+        let Some(source) = buffers.buffer(self.source.buffer) else {
+            return false;
+        };
+        if self
+            .source
+            .offset
+            .checked_add(12)
+            .is_none_or(|end| end > source.size())
+        {
+            return false;
+        }
+        encoder.copy_buffer_to_buffer(source, self.source.offset, &self.command, 0, 12);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        true
+    }
+}
+
 /// A pass's pipeline: a draw, or a compute dispatch.
 #[derive(Clone)]
 enum Pipeline {
@@ -327,6 +404,7 @@ enum Pipeline {
         groups: Option<[u32; 3]>,
         render: [f32; 2],
         local: [u32; 3],
+        indirect: Option<Indirect>,
     },
 }
 
@@ -1597,12 +1675,22 @@ fn build_compute(
     name: String,
     group: Group,
     c: horizon_shaders::ComputeProgram,
+    indirect: Option<horizon_shaders::IndirectDispatch>,
     formats: &[wgpu::TextureFormat; BUFFERS],
     shadow: Option<&[wgpu::TextureFormat; 2]>,
     notes: &mut Vec<String>,
     custom: &[String],
     pack: &Resources<'_>,
 ) -> Option<Pass> {
+    if let Some(dispatch) = indirect
+        && !pack.buffers.has(dispatch.buffer)
+    {
+        notes.push(format!(
+            "{name}: skipped: indirect buffer {} is not declared",
+            dispatch.buffer
+        ));
+        return None;
+    }
     let index = |name: &str| {
         pack_uniforms::index(name).or_else(|| {
             let k = custom.iter().position(|c| c == name)?;
@@ -1685,6 +1773,7 @@ fn build_compute(
             groups: c.work_groups,
             render: c.work_groups_render,
             local,
+            indirect: indirect.map(|source| Indirect::new(device, source)),
         },
         layout,
         samplers,
@@ -1835,6 +1924,7 @@ impl PackPost {
             storable,
             stand_ins: &stand_ins,
         };
+        let indirect_dispatches = std::mem::take(&mut post.indirect);
         let mut build = |mut p: horizon_shaders::PostProgram, geometry: Option<&Geometry<'_>>| {
             let in_shadow = p.group.shadow();
             let mut compute = std::mem::take(&mut p.compute);
@@ -1846,11 +1936,13 @@ impl PackPost {
             let mut computes: Vec<Pass> = compute
                 .into_iter()
                 .filter_map(|(name, c)| {
+                    let indirect = indirect_dispatches.get(&name).copied();
                     build_compute(
                         device,
                         name,
                         group,
                         c,
+                        indirect,
                         if in_shadow { &shadow_space } else { &formats },
                         shadow_formats.as_ref(),
                         &mut notes,
@@ -2707,6 +2799,7 @@ impl PackPost {
             groups,
             render,
             local,
+            indirect,
         } = &pass.pipeline
         else {
             return;
@@ -2715,7 +2808,12 @@ impl PackPost {
             let n = |k: usize| (size[k] as f32 * render[k] / local[k] as f32).ceil() as u32;
             [n(0), n(1), 1]
         });
-        let (pipeline, groups) = (pipeline.clone(), groups);
+        let (pipeline, groups, indirect) = (pipeline.clone(), groups, indirect.clone());
+        if let Some(dispatch) = &indirect
+            && !dispatch.prepare(encoder, &self.buffers)
+        {
+            return;
+        }
         for image in (0..self.images.len()).filter(|k| pass.snapshots & 1 << k != 0) {
             pack_images::snapshot(encoder, &self.images[image]);
         }
@@ -2731,7 +2829,11 @@ impl PackPost {
         {
             cp.set_bind_group(4, g, &[]);
         }
-        cp.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        if let Some(dispatch) = &indirect {
+            cp.dispatch_workgroups_indirect(&dispatch.command, 0);
+        } else {
+            cp.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        }
         drop(cp);
         self.mips_valid &= !pass.written;
     }

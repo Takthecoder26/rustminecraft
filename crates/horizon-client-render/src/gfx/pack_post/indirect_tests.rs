@@ -1,25 +1,23 @@
-//! Original, asset-free indirect-dispatch control through the production pack pipeline.
+//! Original, asset-free indirect-dispatch controls through the production pack pipeline.
 use super::*;
 use crate::{gfx::Frame, hud::HudBatch};
 use std::io::{Cursor, Write};
 use wgpu::TextureFormat as T;
 
-fn pack(indirect: bool) -> Post {
+fn pack(property: Option<&str>, groups: u32) -> Post {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let props = format!(
         "bufferObject.0=16\nbufferObject.1=16\n{}",
-        if indirect {
-            "indirect.composite=0 4\n"
-        } else {
-            ""
-        }
+        property
+            .map(|v| format!("indirect.composite={v}\n"))
+            .unwrap_or_default()
+    );
+    let prepare = format!(
+        "#version 430\nlayout(local_size_x=1) in;\nconst ivec3 workGroups=ivec3(1);\nlayout(std430,binding=0) buffer Commands {{ uvec4 args; }};\nlayout(std430,binding=1) buffer Results {{ uint count; }};\nvoid main() {{ args=uvec4(99u,{groups}u,1u,1u); count=0u; }}\n"
     );
     for (name, source) in [
         ("shaders.properties", props.as_str()),
-        (
-            "prepare.csh",
-            "#version 430\nlayout(local_size_x=1) in;\nconst ivec3 workGroups=ivec3(1);\nlayout(std430,binding=0) buffer Commands { uvec4 args; };\nlayout(std430,binding=1) buffer Results { uint count; };\nvoid main() { args=uvec4(99u,2u,1u,1u); count=0u; }\n",
-        ),
+        ("prepare.csh", prepare.as_str()),
         (
             "composite.csh",
             "#version 430\nlayout(local_size_x=1) in;\nconst ivec3 workGroups=ivec3(1);\nlayout(std430,binding=1) buffer Results { uint count; };\nvoid main() { atomicAdd(count,1u); }\n",
@@ -48,29 +46,54 @@ fn pack(indirect: bool) -> Post {
     let mut macros = horizon_shaders::Macros::standard();
     let (properties, notes) = horizon_shaders::read_properties(&pack, &mut macros);
     assert!(notes.is_empty(), "{notes:?}");
-    let post = horizon_shaders::load_post(&pack, "", &properties, &macros, &Default::default());
-    assert!(post.notes.is_empty(), "{:?}", post.notes);
-    post
+    horizon_shaders::load_post(&pack, "", &properties, &macros, &Default::default())
 }
 
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn indirect_dispatch_uses_ssbo_counts_and_byte_offset() {
     let gpu = Fixture::new();
-    for indirect in [false, true] {
-        let mut post = gpu.build(pack(indirect));
+    let over_limit = gpu.device.limits().max_compute_workgroups_per_dimension + 1;
+    for (label, property, groups, expected, invalid) in [
+        ("direct", None, 2, [255, 0, 0, 255], false),
+        ("indirect offset", Some("0 4"), 2, [0, 255, 0, 255], false),
+        ("zero groups", Some("0 4"), 0, [0, 0, 255, 255], false),
+        (
+            "device limit",
+            Some("0 4"),
+            over_limit,
+            [0, 0, 255, 255],
+            false,
+        ),
+        ("out of range", Some("0 8"), 2, [0, 0, 255, 255], false),
+        ("missing buffer", Some("9 0"), 2, [0, 0, 255, 255], true),
+        ("unaligned", Some("0 1"), 2, [0, 0, 255, 255], true),
+        (
+            "overflow",
+            Some("0 18446744073709551612"),
+            2,
+            [0, 0, 255, 255],
+            true,
+        ),
+    ] {
+        let mut post = gpu.build(pack(property, groups));
+        if invalid {
+            assert!(
+                post.notes.iter().any(|n| n.contains("indirect")),
+                "{label}: {:?}",
+                post.notes
+            );
+        } else {
+            assert!(
+                post.notes.iter().all(|n| n.starts_with("shadow map ")),
+                "{label}: {:?}",
+                post.notes
+            );
+        }
         for size in [[2, 1], [4, 2]] {
             let actual = gpu.render(&mut post, size);
-            let expected = if indirect {
-                [0, 255, 0, 255]
-            } else {
-                [255, 0, 0, 255]
-            };
-            eprintln!("indirect={indirect} size={size:?}: {actual:?}");
-            assert!(
-                actual.iter().all(|p| p == &expected),
-                "indirect={indirect}: {actual:?}"
-            );
+            eprintln!("{label} size={size:?}: {actual:?}");
+            assert!(actual.iter().all(|p| p == &expected), "{label}: {actual:?}");
         }
     }
 }
@@ -83,7 +106,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let instance = crate::gfx::test_gpu::instance();
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle().with_env();
+        if cfg!(windows) {
+            descriptor.backends = wgpu::Backends::PRIMARY;
+        }
+        // Exercise our own guard with generic backend indirect validation disabled.
+        descriptor
+            .flags
+            .remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+        let instance = wgpu::Instance::new(descriptor);
         let adapter =
             pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -139,11 +170,6 @@ impl Fixture {
                 weather: false,
                 hand: false,
             },
-        );
-        assert!(
-            post.notes.iter().all(|n| n.starts_with("shadow map ")),
-            "{:?}",
-            post.notes
         );
         post
     }

@@ -443,7 +443,7 @@ impl Buffers {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Shader pack buffer"),
                     size: wanted.min(largest),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 })
             })
@@ -463,6 +463,12 @@ impl Buffers {
             entries: &entries,
         }));
         self.made_for = size;
+    }
+
+    /// The current storage allocation; relative buffers may change on resize.
+    pub(super) fn buffer(&self, binding: u32) -> Option<&wgpu::Buffer> {
+        let index = self.objects.keys().position(|&b| b == binding)?;
+        self.buffers.get(index)
     }
 
     /// Whether the pack declares buffer `binding`.
