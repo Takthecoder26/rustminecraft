@@ -2,7 +2,7 @@
 //! result includes negative space: an earlier entity entering an empty queried
 //! cell invalidates the prediction. No distance/velocity halo is assumed.
 use super::{
-    Seen,
+    Seen, Species,
     seen_grid::{Cell, Columns, SeenGrid, SnapshotGrid, corner},
 };
 use crate::fast_hash::{FxHashMap, FxHashSet};
@@ -13,12 +13,22 @@ use std::{cell::RefCell, ops::Index};
 pub struct ReadSet {
     all: bool,
     slots: FxHashSet<usize>,
-    queries: Vec<(Aabb, Option<Columns>)>,
+    species: FxHashSet<Species>,
+    queries: Vec<(Aabb, Option<Columns>, bool)>,
 }
 impl ReadSet {
     pub fn query(&mut self, area: Aabb, columns: Option<Columns>) {
-        self.queries.push((area, columns));
+        self.queries.push((area, columns, false));
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ReadConflict {
+    FullScan,
+    EntitySlot,
+    GridShape,
+    SpatialCell,
+    Species,
 }
 
 /// Mutations already published in the original global entity order. Owner
@@ -28,6 +38,7 @@ pub struct SnapshotChanges {
     slots: Vec<bool>,
     cells: FxHashMap<Cell, Vec<usize>>,
     owners_ticked: FxHashSet<usize>,
+    species: FxHashMap<Species, Vec<usize>>,
 }
 impl SnapshotChanges {
     pub fn new(owners: Vec<usize>) -> Self {
@@ -36,6 +47,7 @@ impl SnapshotChanges {
             owners,
             cells: Default::default(),
             owners_ticked: Default::default(),
+            species: Default::default(),
         }
     }
     pub fn touch(&mut self, slot: usize, before: Aabb, after: Aabb) {
@@ -49,36 +61,80 @@ impl SnapshotChanges {
             }
         }
     }
+    pub fn species_changed(&mut self, slot: usize, before: Species, after: Species) {
+        let owner = self.owners[slot];
+        for species in [before, after] {
+            let owners = self.species.entry(species).or_default();
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+    }
     pub fn valid(&self, reads: &ReadSet, owner: usize, grid: &SeenGrid) -> bool {
+        self.conflict(reads, owner, grid).is_none()
+    }
+    pub fn conflict(&self, reads: &ReadSet, owner: usize, grid: &SeenGrid) -> Option<ReadConflict> {
+        if reads.species.iter().any(|species| {
+            self.species
+                .get(species)
+                .is_some_and(|owners| owners.iter().any(|&other| other != owner))
+        }) {
+            return Some(ReadConflict::Species);
+        }
         if reads.all && self.owners_ticked.iter().any(|&other| other != owner) {
-            return false;
+            return Some(ReadConflict::FullScan);
         }
         if reads
             .slots
             .iter()
             .any(|&slot| self.slots[slot] && self.owners[slot] != owner)
         {
-            return false;
+            return Some(ReadConflict::EntitySlot);
         }
-        for &(area, expected_columns) in &reads.queries {
+        for &(area, expected_columns, spatial) in &reads.queries {
             // Growing boxes and retained/new grid cells can change both the
             // candidate range and full-scan fallback. Compare the real shape.
-            if grid.columns(area) != expected_columns {
-                return false;
+            let current = if spatial {
+                grid.spatial_columns(area)
+            } else {
+                grid.columns(area)
+            };
+            if current != expected_columns {
+                return Some(ReadConflict::GridShape);
             }
             if let Some(columns) = expected_columns {
-                for cell in columns.cells() {
-                    if self
-                        .cells
-                        .get(&cell)
-                        .is_some_and(|owners| owners.iter().any(|&other| other != owner))
-                    {
-                        return false;
+                let foreign = |owners: &Vec<usize>| owners.iter().any(|&other| other != owner);
+                if columns.count() <= self.cells.len() as u64 {
+                    for cell in columns.cells() {
+                        if self.cells.get(&cell).is_some_and(foreign) {
+                            return Some(ReadConflict::SpatialCell);
+                        }
                     }
+                } else if self
+                    .cells
+                    .iter()
+                    .any(|(&cell, owners)| columns.contains(cell) && foreign(owners))
+                {
+                    return Some(ReadConflict::SpatialCell);
                 }
             }
         }
-        true
+        None
+    }
+}
+
+/// Ordered membership built once from the tick's snapshot. It lends only
+/// slot indexes; changed same-region membership is supplied by the overlay.
+pub struct SpeciesIndex {
+    slots: FxHashMap<Species, Vec<usize>>,
+}
+impl SpeciesIndex {
+    pub fn new(snapshot: &[Seen]) -> Self {
+        let mut slots: FxHashMap<Species, Vec<usize>> = Default::default();
+        for (slot, seen) in snapshot.iter().enumerate() {
+            slots.entry(seen.species).or_default().push(slot);
+        }
+        Self { slots }
     }
 }
 
@@ -100,6 +156,7 @@ impl SnapshotOverlay {
 pub struct SeenView<'a> {
     base: &'a [Seen],
     overlay: Option<&'a SnapshotOverlay>,
+    species: Option<&'a SpeciesIndex>,
     reads: Option<&'a RefCell<ReadSet>>,
 }
 impl<'a> SeenView<'a> {
@@ -111,8 +168,42 @@ impl<'a> SeenView<'a> {
         Self {
             base,
             overlay: Some(overlay),
+            species: None,
             reads: Some(reads),
         }
+    }
+    pub fn with_species(mut self, species: &'a SpeciesIndex) -> Self {
+        self.species = Some(species);
+        self
+    }
+    /// Observe one species, including empty membership and same-tick changes.
+    /// Global insertion order is preserved after additions or removals.
+    pub fn of_species(self, species: Species) -> impl Iterator<Item = &'a Seen> {
+        if let Some(reads) = self.reads {
+            reads.borrow_mut().species.insert(species);
+        }
+        let mut slots = match self.species {
+            Some(index) => index.slots.get(&species).cloned().unwrap_or_default(),
+            None => self
+                .base
+                .iter()
+                .enumerate()
+                .filter(|(_, seen)| seen.species == species)
+                .map(|(slot, _)| slot)
+                .collect(),
+        };
+        if let Some(overlay) = self.overlay {
+            for (&slot, seen) in &overlay.entries {
+                if seen.species == species && self.base[slot].species != species {
+                    slots.push(slot);
+                }
+            }
+        }
+        slots.sort_unstable();
+        slots.into_iter().filter_map(move |slot| {
+            self.get_untracked(slot)
+                .filter(|seen| seen.species == species)
+        })
     }
     pub fn len(self) -> usize {
         self.base.len()
@@ -134,9 +225,14 @@ impl<'a> SeenView<'a> {
             .and_then(|o| o.entries.get(&slot))
             .or_else(|| self.base.get(slot))
     }
-    pub(super) fn record_query(self, area: Aabb, grid: &dyn SnapshotGrid) {
+    pub(super) fn record_query(self, area: Aabb, grid: &dyn SnapshotGrid, spatial: bool) {
         if let Some(reads) = self.reads {
-            reads.borrow_mut().query(area, grid.columns(area));
+            let columns = if spatial {
+                grid.spatial_columns(area)
+            } else {
+                grid.columns(area)
+            };
+            reads.borrow_mut().queries.push((area, columns, spatial));
         }
     }
     pub fn iter(self) -> SeenIter<'a> {
@@ -154,6 +250,7 @@ impl<'a> From<&'a [Seen]> for SeenView<'a> {
         Self {
             base,
             overlay: None,
+            species: None,
             reads: None,
         }
     }
@@ -233,6 +330,80 @@ mod tests {
         changes.touch(101, bounds(808.0, 0.6), bounds(32.2, 0.6));
         grid.update(101, bounds(32.2, 0.6));
         assert!(!changes.valid(&reads, 0, &grid));
+    }
+
+    #[test]
+    fn sparse_spatial_reads_keep_negative_space_without_observing_distant_entities() {
+        let mut grid = grid();
+        let mut changes = SnapshotChanges::new((0..128).collect());
+        let area = bounds(32.0, 64.0);
+        assert!(grid.columns(area).is_none());
+        let mut reads = ReadSet::default();
+        reads.queries.push((area, grid.spatial_columns(area), true));
+        changes.touch(100, bounds(800.0, 0.6), bounds(800.1, 0.6));
+        grid.update(100, bounds(800.1, 0.6));
+        assert!(changes.valid(&reads, 0, &grid));
+        changes.touch(101, bounds(808.0, 0.6), bounds(32.2, 0.6));
+        grid.update(101, bounds(32.2, 0.6));
+        assert!(!changes.valid(&reads, 0, &grid));
+    }
+
+    #[test]
+    fn species_reads_track_changes_and_new_members_without_observing_other_species() {
+        let grid = grid();
+        let mut changes = SnapshotChanges::new((0..128).collect());
+        let mut reads = ReadSet::default();
+        reads.species.insert(Species::Villager);
+        changes.species_changed(100, Species::Zombie, Species::Zombie);
+        assert!(changes.valid(&reads, 0, &grid));
+        changes.species_changed(0, Species::Zombie, Species::Villager);
+        assert!(
+            changes.valid(&reads, 0, &grid),
+            "own membership is supplied by the overlay"
+        );
+        changes.species_changed(101, Species::Zombie, Species::Villager);
+        assert!(
+            !changes.valid(&reads, 0, &grid),
+            "a foreign new member changes an empty query"
+        );
+        let mut existing = SnapshotChanges::new((0..128).collect());
+        existing.species_changed(100, Species::Villager, Species::Villager);
+        assert!(
+            !existing.valid(&reads, 0, &grid),
+            "existing villagers' POI state also matters"
+        );
+    }
+
+    #[test]
+    fn species_overlay_preserves_order_when_entities_enter_and_leave_the_query() {
+        use super::super::{Mob, sensor_scan_tests::kind};
+        let mut base: Vec<_> = (1..=3)
+            .map(|id| Mob::new(id, kind(), horizon_core::geometry::Vec3::ZERO, 0.0).seen(None))
+            .collect();
+        base[1].species = Species::Villager;
+        let index = SpeciesIndex::new(&base);
+        let mut overlay = SnapshotOverlay::default();
+        let mut entered = base[0].clone();
+        entered.species = Species::Villager;
+        overlay.update(0, entered);
+        let mut left = base[1].clone();
+        left.species = Species::Cow;
+        overlay.update(1, left);
+        let reads = RefCell::new(ReadSet::default());
+        let ids = |overlay: &SnapshotOverlay| {
+            SeenView::observed(&base, overlay, &reads)
+                .with_species(&index)
+                .of_species(Species::Villager)
+                .map(|seen| seen.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&overlay), [1]);
+        let mut entered = base[2].clone();
+        entered.species = Species::Villager;
+        overlay.update(2, entered);
+        assert_eq!(ids(&overlay), [1, 3]);
+        assert!(!reads.borrow().all);
+        assert!(reads.borrow().species.contains(&Species::Villager));
     }
 
     #[test]

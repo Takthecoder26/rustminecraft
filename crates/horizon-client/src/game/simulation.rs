@@ -206,13 +206,18 @@ impl ServerCoordination {
         self.stats = stats;
         if self.log_stats {
             log::info!(
-                "region tick: regions={} predicted={} committed={} replayed={} rng_conflicts={} read_conflicts={}",
+                "region tick: regions={} predicted={} committed={} replayed={} rng_conflicts={} read_conflicts={} read_full={} read_slot={} read_shape={} read_cell={} read_species={}",
                 stats.regions,
                 stats.predicted,
                 stats.committed,
                 stats.replayed,
                 stats.rng_conflicts,
-                stats.read_conflicts
+                stats.read_conflicts,
+                stats.read_full,
+                stats.read_slot,
+                stats.read_shape,
+                stats.read_cell,
+                stats.read_species
             );
         }
     }

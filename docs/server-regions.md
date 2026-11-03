@@ -63,6 +63,8 @@ No new cross-region delayed-event queue is used. A replay has no externally
 visible speculative events. The full mutable-mob tests compare every field,
 event sequence and final RNG against the retained serial execution, including
 breeding, overlapping owners and nectar-bearing bees that consume level RNG.
+The serial reference also runs against a complete snapshot without the spatial
+index, checking that indexed execution preserves the filtered results.
 
 `SeenView` prevents untracked raw-slice observations. ID lookups record slots;
 full scans record a complete-snapshot read; spatial queries record exact grid
@@ -70,7 +72,27 @@ columns, including empty columns. An earlier foreign entity entering an empty
 queried column invalidates a prediction. Bounds growth, retained empty cells
 and a change between indexed and full-scan queries also invalidate it. No
 fixed margin or maximum entity speed is assumed. Sparse grid overlays preserve
-the original candidate order and full-scan fallback rules.
+the original candidate order and legacy full-scan fallback rules.
+
+Audited box-filtering callers use `others_intersecting`, which enforces the
+exact intersection predicate at its API. Position-range searches retain their
+inclusive range predicate. For these bounded queries, a sparse lookup scans
+populated cells when that is cheaper than walking empty columns, preserving
+global slot order without declaring the entire snapshot observed. The query
+extent comes from the requested geometry and actual maximum body width, not a
+region margin. Validation likewise scans changed populated cells for very large
+areas, so an enormous query cannot cause an unbounded empty-cell walk. Legacy
+candidate-only callers without an equivalent geometric predicate retain their
+existing scan and conservative dependency rules.
+
+Species-filtered observations have their own ordered index and read set.
+Zombie village searches and villager POI ticket scans can read all villagers
+without falsely depending on unrelated zombies. A foreign member's changed
+state, removal, or a change into/out of the queried species invalidates that
+read, including a query that originally found nobody. Same-region membership
+changes are supplied by the sparse overlay in global slot order. Genuine global
+villager POI dependencies therefore remain coordinated through validation and
+replay; an empty villager population does not serialize every zombie region.
 
 The player directory uses exact distance searches over all players. Local
 players seed the search, but pruning uses distance bounds over the complete
@@ -83,7 +105,7 @@ the original ordered scan.
 | Dependency | Coordination |
 | --- | --- |
 | Level RNG | Each job starts at the same checkpoint. A result that consumed it commits only at that exact authoritative stream state, including cached Gaussian state; otherwise serial replay consumes the original draws. A result with no level draws never overwrites the authoritative stream. No per-region seed is substituted. |
-| Mob observations and collisions | The complete snapshot remains visible. Actual slot, spatial and full-scan reads are validated against earlier foreign writes; local overlays preserve immediate local observations. |
+| Mob observations and collisions | The complete snapshot remains visible. Actual slot, spatial, species and full-scan reads are validated against earlier foreign writes; local overlays preserve immediate local observations. |
 | Pushes and brain memories | Pending pushes retain event order. Known single-recipient writes are applied to later owned inputs; foreign recipients invalidate their owner's prefix. Riding and school-follow changes conservatively invalidate all prefixes and run the remaining conflicting work serially. |
 | EntitySection insertion | A per-level allocator reserves order before jobs run. Rejected work cannot consume a process-global insertion counter or change candidate ordering. |
 | Raider hurt ordering | Raider species and active raid participants stay serial because their hurt sequence remains globally coordinated. A worker stops before that entity; the coordinator runs it normally. |
@@ -122,7 +144,8 @@ The persistent simulation pool performs real mob ticks.
 The focused tests cover topology/bridge merge and split, stable ordering,
 negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
 sparse-grid equivalence, negative-space reads, distant ID/full-scan reads,
-foreign bounds growth, shared RNG/Gaussian consumption, complete mutable-mob
+foreign bounds growth, sparse populated-cell queries, shared RNG/Gaussian
+consumption, complete mutable-mob
 transactions and exact indexed player selection. Broader parity, server/LAN
 checks and the live comparison are recorded here after the current run finishes.
 
@@ -133,7 +156,8 @@ spawning and random block ticks are off; players have resistance, and mobs are
 invulnerable to keep the population stable. Each mode uses a fresh world and
 scratch user directories. The script rejects changed player/mob counts and
 collects whole-tick median/p95/p99 from the server performance report, individual
-mob-phase timings, process-tree CPU and RSS, and prediction/replay counts.
+mob-phase timings, process-tree CPU and RSS, and prediction/replay counts. Setup runs while frozen, and both engines warm
+up for the same fixed number of simulation ticks before timing starts.
 
 ```sh
 cargo build --profile fast -p horizon-client -p horizon-client-lib -p horizon-bots \
@@ -142,7 +166,9 @@ python3 tools/bench_region_ticks.py --bin target/fast
 ```
 
 The retained serial and parallel modes use identical commands, seed, view and
-simulation distance, warmup and measurement windows in the same binary.
-`--before-bin` accepts a separately built pre-change engine directory if needed.
+simulation distance, fixed-tick warmup and measurement windows in the same binary.
+`--before-bin` instead uses a separately built pre-change engine for the baseline;
+the final comparison uses the PR's original base revision rather than attributing
+improvements common to both new execution modes to parallel scheduling.
 This is a quick workload comparison, not a claim about every mob mix: shared
 RNG, native mods, active raids and unbounded observations can require replay.

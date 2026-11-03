@@ -131,12 +131,12 @@ fn _shareable(resources: TickResources<'_>) {
     require(resources);
 }
 
-/// Mutable input owned exclusively by one region until the worker barrier.
-/// The coordinator retains the original mobs for ordered replay. Chunks and
-/// immutable resources are lent, not cloned.
-pub struct RegionInput {
+/// A region's immutable sources, lent until the worker barrier. Each worker
+/// creates its exclusively owned mutable inputs; the coordinator retains the
+/// originals for ordered replay. World/chunks are never cloned.
+pub struct RegionInput<'a> {
     pub owner: usize,
-    pub mobs: Vec<(usize, Mob)>,
+    pub mobs: Vec<(usize, &'a Mob)>,
 }
 
 #[derive(Clone)]
@@ -167,6 +167,7 @@ pub struct RegionTick<'a> {
     pub resources: &'a TickResources<'a>,
     pub snapshot: &'a [Seen],
     pub grid: &'a seen_grid::SeenGrid,
+    pub species: &'a snapshot::SpeciesIndex,
     pub index: &'a crate::fast_hash::FxHashMap<u32, u32>,
     pub contexts: &'a [MobContext],
     pub players: &'a players::PlayerDirectory<'a>,
@@ -176,7 +177,7 @@ pub struct RegionTick<'a> {
     pub tnt_explodes: bool,
 }
 impl RegionTick<'_> {
-    fn predict(&self, input: RegionInput) -> Vec<TickPrediction> {
+    fn predict(&self, input: RegionInput<'_>) -> Vec<TickPrediction> {
         use std::cell::RefCell;
         // This rule was historically thread-local. Set it per level job, not
         // just when a persistent worker starts (different levels may differ).
@@ -193,12 +194,13 @@ impl RegionTick<'_> {
             .collect();
         let mut pending_brains: crate::fast_hash::FxHashMap<u32, Vec<MobEvent>> =
             Default::default();
-        for (slot, mut mob) in input.mobs {
+        for (slot, original) in input.mobs {
             // Active raiders' hurt ordering still uses a global sequence. No
             // speculative execution may consume it, including rejected work.
-            if raider::is_raider(mob.species()) || mob.extra.raider.is_some() {
+            if raider::is_raider(original.species()) || original.extra.raider.is_some() {
                 break;
             }
+            let mut mob = original.clone();
             if let Some(mut events) = pending_brains.remove(&mob.id) {
                 apply_brain_events(std::slice::from_mut(&mut mob), &mut events, 0);
             }
@@ -211,7 +213,8 @@ impl RegionTick<'_> {
             let kept = {
                 let context = &self.contexts[slot];
                 let mut world = self.resources.view(
-                    snapshot::SeenView::observed(self.snapshot, &overlay, &reads),
+                    snapshot::SeenView::observed(self.snapshot, &overlay, &reads)
+                        .with_species(self.species),
                     &grid,
                     self.index,
                 );
@@ -298,7 +301,7 @@ impl RegionExecutor {
     }
     pub fn predict(
         &self,
-        inputs: Vec<RegionInput>,
+        inputs: Vec<RegionInput<'_>>,
         tick: &RegionTick<'_>,
     ) -> Vec<Vec<TickPrediction>> {
         use rayon::prelude::*;
@@ -325,6 +328,11 @@ pub struct RegionStats {
     pub replayed: usize,
     pub rng_conflicts: usize,
     pub read_conflicts: usize,
+    pub read_full: usize,
+    pub read_slot: usize,
+    pub read_shape: usize,
+    pub read_cell: usize,
+    pub read_species: usize,
 }
 
 /// The authoritative ordered commit. A failed region prefix can never provide
@@ -385,8 +393,8 @@ impl TickRound {
             && !self.failed[owner]
         {
             let rng_valid = prediction.rng_valid(random);
-            let reads_valid = self.changes.valid(&prediction.reads, owner, grid);
-            if rng_valid && reads_valid {
+            let read_conflict = self.changes.conflict(&prediction.reads, owner, grid);
+            if rng_valid && read_conflict.is_none() {
                 *mob = prediction.mob;
                 if prediction.random_after.was_used() {
                     *random = prediction.random_after;
@@ -396,7 +404,16 @@ impl TickRound {
                 return prediction.kept;
             }
             self.stats.rng_conflicts += usize::from(!rng_valid);
-            self.stats.read_conflicts += usize::from(!reads_valid);
+            if let Some(conflict) = read_conflict {
+                self.stats.read_conflicts += 1;
+                match conflict {
+                    snapshot::ReadConflict::FullScan => self.stats.read_full += 1,
+                    snapshot::ReadConflict::EntitySlot => self.stats.read_slot += 1,
+                    snapshot::ReadConflict::GridShape => self.stats.read_shape += 1,
+                    snapshot::ReadConflict::SpatialCell => self.stats.read_cell += 1,
+                    snapshot::ReadConflict::Species => self.stats.read_species += 1,
+                }
+            }
         }
         self.failed[owner] = true;
         self.stats.replayed += 1;
@@ -407,14 +424,17 @@ impl TickRound {
             self.section_base.wrapping_add(slot as u64),
         )
     }
-    pub fn snapshot_changed(&mut self, slot: usize, before: Aabb, after: Aabb) {
-        self.changes.touch(slot, before, after);
+    pub fn snapshot_changed(&mut self, slot: usize, before: &Seen, after: &Seen) {
+        self.changes.touch(slot, before.bounds, after.bounds);
+        self.changes
+            .species_changed(slot, before.species, after.species);
     }
-    pub fn despawn_removed(&mut self, slot: usize, bounds: Aabb) {
+    pub fn despawn_removed(&mut self, slot: usize, bounds: Aabb, species: Species) {
         // Non-entity-ticking chunks run their cheap despawn check serially;
         // workers therefore cannot rely on that owner's predicted prefix.
         self.failed[self.owners[slot]] = true;
         self.changes.touch(slot, bounds, bounds);
+        self.changes.species_changed(slot, species, species);
     }
     pub fn events(
         &mut self,
@@ -504,6 +524,7 @@ mod tests {
             .wrapping_add(1);
         let mut snapshot: Vec<_> = mobs.iter().map(|mob| mob.seen(None)).collect();
         let mut grid = seen_grid::SeenGrid::new(snapshot.iter().map(|seen| seen.bounds));
+        let species_index = snapshot::SpeciesIndex::new(&snapshot);
         let index: FxHashMap<_, _> = mobs
             .iter()
             .enumerate()
@@ -538,7 +559,6 @@ mod tests {
                         .iter()
                         .enumerate()
                         .filter(|&(slot, _)| owners[slot] == owner)
-                        .map(|(slot, mob)| (slot, mob.clone()))
                         .collect(),
                 })
                 .collect();
@@ -547,6 +567,7 @@ mod tests {
                 resources: &resources,
                 snapshot: &snapshot,
                 grid: &grid,
+                species: &species_index,
                 index: &index,
                 contexts: &contexts,
                 players: &player_directory,
@@ -562,8 +583,8 @@ mod tests {
         let mut keep = Vec::new();
         for slot in 0..mobs.len() {
             let world = MobWorld {
-                others: (&snapshot).into(),
-                others_grid: Some(&grid),
+                others: snapshot::SeenView::from(&snapshot).with_species(&species_index),
+                others_grid: executor.map(|_| &grid as &dyn seen_grid::SnapshotGrid),
                 others_index: Some(&index),
                 ..base.clone()
             };
@@ -583,12 +604,12 @@ mod tests {
                 round.events(slot, &events[from..], &index);
             }
             take_mob_pushes(&mut events, from, &mut pushes);
-            let before = snapshot[slot].bounds;
-            snapshot[slot] = mob.seen(None);
-            snapshot[slot].alive &= kept;
+            let mut after = mob.seen(None);
+            after.alive &= kept;
+            let before = std::mem::replace(&mut snapshot[slot], after);
             grid.update(slot, snapshot[slot].bounds);
             if let Some(round) = round.as_mut() {
-                round.snapshot_changed(slot, before, snapshot[slot].bounds);
+                round.snapshot_changed(slot, &before, &snapshot[slot]);
             }
             let changed = apply_brain_events(mobs, &mut events, from);
             if let Some(round) = round.as_mut() {
@@ -651,6 +672,8 @@ mod tests {
                 ("cow", true, false),
                 ("cow", false, true),
                 ("cow", true, true),
+                ("zombie", false, false),
+                ("zombie", true, false),
                 ("villager", false, false),
                 ("bee", false, false),
             ] {
@@ -717,7 +740,7 @@ mod tests {
                         "nectar drips must exercise the shared level RNG"
                     );
                 }
-                if species == "cow" && !near {
+                if matches!(species, "cow" | "zombie") && !near {
                     assert_eq!(
                         replayed, 0,
                         "independent real mob ticks should commit without replay"

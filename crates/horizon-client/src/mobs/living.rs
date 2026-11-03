@@ -1472,7 +1472,7 @@ impl Mob {
         if self.horizontal_collision
             && w.no_collision(ahead)
             && !w.contains_any_liquid(ahead)
-            && !w.others_near(wide).any(|s| {
+            && !w.others_intersecting(wide).any(|s| {
                 s.id != self.id
                     && s.alive
                     && s.species == super::Species::Shulker

@@ -1019,6 +1019,7 @@ impl Game<'_> {
                 .project(&self.simulation.mobs, self.simulation.workers, |m| {
                     seen(m, uuid)
                 });
+        let species_index = horizon_client::mobs::snapshot::SpeciesIndex::new(&snapshot);
         let mut events = Vec::new();
         let mut mobs = std::mem::take(&mut self.simulation.mobs);
         let section_base = self.simulation.section_order.reserve(&mobs);
@@ -1151,7 +1152,7 @@ impl Game<'_> {
                                             mobs[slot].species(),
                                         ) && mobs[slot].extra.raider.is_none()
                                     })
-                                    .map(|slot| (slot, mobs[slot].clone()))
+                                    .map(|slot| (slot, &mobs[slot]))
                                     .collect();
                                 RegionInput {
                                     owner,
@@ -1165,6 +1166,7 @@ impl Game<'_> {
                             resources: &resources,
                             snapshot: &snapshot,
                             grid: &grid,
+                            species: &species_index,
                             index: &index,
                             contexts: &contexts,
                             players: &player_directory,
@@ -1180,7 +1182,8 @@ impl Game<'_> {
             };
             for i in 0..mobs.len() {
                 let mut w = MobWorld {
-                    others: (&snapshot).into(),
+                    others: horizon_client::mobs::snapshot::SeenView::from(&snapshot)
+                        .with_species(&species_index),
                     others_grid: Some(&grid),
                     others_index: Some(&index),
                     ..base.clone()
@@ -1230,7 +1233,7 @@ impl Game<'_> {
                         died.remove(&m.id);
                         snapshot[i].alive = false;
                         if let Some(transaction) = region_round.as_mut() {
-                            transaction.despawn_removed(i, snapshot[i].bounds);
+                            transaction.despawn_removed(i, snapshot[i].bounds, snapshot[i].species);
                         }
                     }
                     keep.push(kept);
@@ -1302,12 +1305,12 @@ impl Game<'_> {
                 keep.push(kept);
                 // ServerLevel ticks entities one after another: the ones
                 // after this mob see it as it is now.
-                let before = snapshot[i].bounds;
-                snapshot[i] = seen(m, uuid);
-                snapshot[i].alive &= kept;
+                let mut after = seen(m, uuid);
+                after.alive &= kept;
+                let before = std::mem::replace(&mut snapshot[i], after);
                 grid.update(i, snapshot[i].bounds);
                 if let Some(transaction) = region_round.as_mut() {
-                    transaction.snapshot_changed(i, before, snapshot[i].bounds);
+                    transaction.snapshot_changed(i, &before, &snapshot[i]);
                 }
                 let immediate =
                     horizon_client::mobs::apply_brain_events(&mut mobs, &mut events, from);

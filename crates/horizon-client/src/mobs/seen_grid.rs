@@ -13,6 +13,13 @@ pub struct Columns {
     pub hi: Cell,
 }
 impl Columns {
+    pub fn contains(self, cell: Cell) -> bool {
+        cell.0 >= self.lo.0 && cell.0 <= self.hi.0 && cell.1 >= self.lo.1 && cell.1 <= self.hi.1
+    }
+    pub fn count(self) -> u64 {
+        let span = |lo: i32, hi: i32| (i64::from(hi) - i64::from(lo) + 1) as u64;
+        span(self.lo.0, self.hi.0).saturating_mul(span(self.lo.1, self.hi.1))
+    }
     pub fn cells(self) -> impl Iterator<Item = Cell> {
         (self.lo.0..=self.hi.0).flat_map(move |x| (self.lo.1..=self.hi.1).map(move |z| (x, z)))
     }
@@ -23,6 +30,10 @@ pub trait SnapshotGrid: Sync {
     /// None means the serial grid falls back to the complete snapshot.
     fn columns(&self, area: Aabb) -> Option<Columns>;
     fn candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool;
+    /// For callers that enforce their geometric filter, keep spatial reads
+    /// local even when scanning populated cells is cheaper than empty columns.
+    fn spatial_columns(&self, area: Aabb) -> Option<Columns>;
+    fn spatial_candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool;
 }
 
 #[derive(Default)]
@@ -40,13 +51,14 @@ pub fn corner(b: Aabb) -> Cell {
 fn width(b: Aabb) -> f64 {
     (b.max(Axis::X) - b.min(Axis::X)).max(b.max(Axis::Z) - b.min(Axis::Z))
 }
-fn columns(area: Aabb, reach: f64, count: usize) -> Option<Columns> {
+fn spatial_columns(area: Aabb, reach: f64) -> Option<Columns> {
     let margin = reach + 1.0;
     let lo = column(area.min(Axis::X) - margin, area.min(Axis::Z) - margin);
     let hi = column(area.max(Axis::X), area.max(Axis::Z));
-    let span = |a: i32, b: i32| i64::from(b) - i64::from(a) + 1;
-    let (nx, nz) = (span(lo.0, hi.0), span(lo.1, hi.1));
-    (nx >= 1 && nz >= 1 && nx.saturating_mul(nz) <= count as i64).then_some(Columns { lo, hi })
+    (lo.0 <= hi.0 && lo.1 <= hi.1).then_some(Columns { lo, hi })
+}
+fn columns(area: Aabb, reach: f64, count: usize) -> Option<Columns> {
+    spatial_columns(area, reach).filter(|columns| columns.count() <= count as u64)
 }
 
 impl SeenGrid {
@@ -97,6 +109,30 @@ impl SnapshotGrid for SeenGrid {
     }
     fn candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool {
         self.candidates(area, out)
+    }
+    fn spatial_columns(&self, area: Aabb) -> Option<Columns> {
+        spatial_columns(area, self.reach)
+    }
+    fn spatial_candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool {
+        out.clear();
+        let Some(columns) = self.spatial_columns(area) else {
+            return false;
+        };
+        if columns.count() <= self.cells.len() as u64 {
+            for cell in columns.cells() {
+                if let Some(list) = self.cells.get(&cell) {
+                    out.extend_from_slice(list);
+                }
+            }
+        } else {
+            for (&cell, list) in &self.cells {
+                if columns.contains(cell) {
+                    out.extend_from_slice(list);
+                }
+            }
+        }
+        out.sort_unstable();
+        true
     }
 }
 
@@ -164,6 +200,35 @@ impl SnapshotGrid for GridOverlay<'_> {
         out.sort_unstable();
         true
     }
+    fn spatial_columns(&self, area: Aabb) -> Option<Columns> {
+        spatial_columns(area, self.reach)
+    }
+    fn spatial_candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool {
+        out.clear();
+        let Some(columns) = self.spatial_columns(area) else {
+            return false;
+        };
+        if columns.count() <= (self.base.cells.len() + self.added_cells) as u64 {
+            for cell in columns.cells() {
+                if let Some(list) = self.cells.get(&cell).or_else(|| self.base.cells.get(&cell)) {
+                    out.extend_from_slice(list);
+                }
+            }
+        } else {
+            for (&cell, list) in &self.base.cells {
+                if columns.contains(cell) {
+                    out.extend_from_slice(self.cells.get(&cell).unwrap_or(list));
+                }
+            }
+            for (&cell, list) in &self.cells {
+                if columns.contains(cell) && !self.base.cells.contains_key(&cell) {
+                    out.extend_from_slice(list);
+                }
+            }
+        }
+        out.sort_unstable();
+        true
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +238,46 @@ mod tests {
 
     fn boxed(x: f64, y: f64, z: f64, w: f64) -> Aabb {
         Aabb::new(Vec3::new(x, y, z), Vec3::new(x + w, y + 1.8, z + w))
+    }
+
+    #[test]
+    fn sparse_queries_filter_all_boxes_without_a_global_scan_or_unbounded_walk() {
+        let mut boxes: Vec<_> = (0..100)
+            .flat_map(|owner| {
+                (0..70).map(move |slot| boxed(owner as f64 * 512.0, 0.0, slot as f64 * 0.001, 0.6))
+            })
+            .collect();
+        let mut grid = SeenGrid::new(boxes.iter().copied());
+        let mut overlay = GridOverlay::new(&grid);
+        let area = boxed(512.0 - 32.0, -1.0, -32.0, 64.0);
+        let mut out = Vec::new();
+        assert!(
+            !grid.candidates(area, &mut out),
+            "legacy heuristic uses a full scan here"
+        );
+        assert!(grid.spatial_candidates(area, &mut out));
+        assert_eq!(out, (70..140).collect::<Vec<u32>>());
+        let mut predicted = Vec::new();
+        assert!(overlay.spatial_candidates(area, &mut predicted));
+        assert_eq!(out, predicted);
+        let moved = boxed(513.0, 0.0, 0.0, 2.0);
+        overlay.update(140, moved);
+        assert!(overlay.spatial_candidates(area, &mut predicted));
+        assert_eq!(predicted, (70..=140).collect::<Vec<u32>>());
+        drop(overlay);
+        grid.update(140, moved);
+        boxes[140] = moved;
+        assert!(grid.spatial_candidates(area, &mut out));
+        let expected: Vec<_> = boxes
+            .iter()
+            .enumerate()
+            .filter(|(_, bounds)| bounds.intersects(area))
+            .map(|(slot, _)| slot as u32)
+            .collect();
+        assert_eq!(out, expected);
+        let giant = boxed(-1.0e20, -1.0, -1.0e20, 2.0e20);
+        assert!(grid.spatial_candidates(giant, &mut out));
+        assert_eq!(out, (0..7000).collect::<Vec<u32>>());
     }
 
     #[test]
@@ -206,6 +311,13 @@ mod tests {
             let expected: Vec<u32> = (0..boxes.len() as u32)
                 .filter(|&j| boxes[j as usize].intersects(area))
                 .collect();
+            assert!(grid.spatial_candidates(area, &mut out));
+            let actual: Vec<_> = out
+                .iter()
+                .copied()
+                .filter(|&slot| boxes[slot as usize].intersects(area))
+                .collect();
+            assert_eq!(actual, expected);
             if grid.candidates(area, &mut out) {
                 indexed += 1;
                 assert!(out.windows(2).all(|p| p[0] < p[1]), "ascending, no repeats");
@@ -247,6 +359,10 @@ mod tests {
                     overlay.candidates(area, &mut actual),
                     serial.candidates(area, &mut expected)
                 );
+                assert_eq!(actual, expected);
+                assert_eq!(overlay.spatial_columns(area), serial.spatial_columns(area));
+                assert!(overlay.spatial_candidates(area, &mut actual));
+                assert!(serial.spatial_candidates(area, &mut expected));
                 assert_eq!(actual, expected);
             }
         }

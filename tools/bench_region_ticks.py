@@ -56,6 +56,20 @@ def command_barrier(server, commands):
                'server did not finish setup commands')
 
 
+def game_time(server):
+    start = server.count()
+    server.console('time query gametime')
+    found = []
+    def reply():
+        for line in server.since(start):
+            if match := re.search(r'The (?:game )?time is (\d+)', line):
+                found.append(int(match[1]))
+                return True
+        return False
+    wait_until(reply, 30, 'game-time query did not reply')
+    return found[0]
+
+
 def run(mode, args, out):
     directory = out / mode
     directory.mkdir()  # Never overwrite an existing world's directory.
@@ -78,7 +92,7 @@ def run(mode, args, out):
         'HORIZON_LAUNCHER_TRASH': str(homes / 'trash'),
         'HORIZON_LAUNCHER_CLIPBOARD': str(homes / 'clipboard'),
         'HORIZON_LAUNCHER_DESKTOP': str(homes / 'desktop'),
-        'HORIZON_SIMULATION_MODE': mode,
+        'HORIZON_SIMULATION_MODE': 'legacy' if mode == 'control' else mode,
         'HORIZON_SIMULATION_WORKERS': str(args.workers),
         'HORIZON_REGION_METRICS': '1',
         'HORIZON_SPIKES': '0',
@@ -96,7 +110,7 @@ def run(mode, args, out):
             'gamerule spawn_mobs false', 'gamerule spawn_patrols false',
             'gamerule advance_time false', 'gamerule advance_weather false',
             'gamerule random_tick_speed 0', 'gamerule max_entity_cramming 0',
-            'gamerule respawn_radius 0', 'time set midnight', 'weather clear', 'save-off',
+            'gamerule respawn_radius 0', 'time set midnight', 'weather clear', 'save-off', 'tick freeze',
         ])
         bot_lines = []
         bot_errors = (out / f'{mode}-bots.stderr').open('w')
@@ -133,18 +147,25 @@ def run(mode, args, out):
             commands.append(f'execute as @a at @s run summon {args.species} ~{dx} ~ ~{dz} '
                             '{Tags:["region_bench"],PersistenceRequired:1b,Invulnerable:1b,Silent:1b}')
         command_barrier(server, commands)
-        time.sleep(args.warmup)
+        # Start both engines at the same simulation age even when their TPS
+        # differs. Setup and spawning happened while the world was frozen.
+        first_tick = game_time(server)
+        warmup_ticks = args.warmup * 20
+        server.console(f'tick step {warmup_ticks}')
+        wait_until(lambda: game_time(server) == first_tick + warmup_ticks,
+                   max(120, args.warmup * 20), 'fixed-tick warmup did not finish')
         # Reports contain exact whole-tick samples. The regular span log also
         # exposes each mob phase, instead of using snapshot-only timings.
         start_line = server.count()
         server.console(f'horizon-report {args.seconds}')
+        server.console('tick unfreeze')
         wait_until(lambda: any('Recording a performance report' in line
                               for line in server.since(start_line)), 30, 'report did not start')
         start = time.monotonic()
         last_time = start
         _, last_cpu = bench.tree_usage(server.process.pid)
         cpu, rss = [], []
-        while time.monotonic() - start < args.seconds + 1:
+        while time.monotonic() - start < args.seconds:
             time.sleep(1)
             now = time.monotonic()
             memory, used = bench.tree_usage(server.process.pid)
@@ -160,16 +181,17 @@ def run(mode, args, out):
         if report['players'] != args.players or mob_count != args.players * args.mobs_per_player:
             raise RuntimeError(f'workload changed: {report["players"]} players, {mob_count} mobs')
         lines = server.since(start_line)
-        mob_ms = [float(match[1]) for line in lines
+        timed_lines = [line for line in lines if 'Horizon: slow tick ' in line][:report['ticks']['count']]
+        mob_ms = [float(match[1]) for line in timed_lines
                   if (match := re.search(r'\btick_creature_entities ([0-9.]+)', line))]
         region_samples = [tuple(map(int, match.groups())) for line in lines
-                          if (match := re.search(r'regions=(\d+) predicted=(\d+) committed=(\d+) replayed=(\d+)', line))]
+                          if (match := re.search(r'regions=(\d+) predicted=(\d+) committed=(\d+) replayed=(\d+) rng_conflicts=(\d+) read_conflicts=(\d+)', line))]
         result = {
-            'mode': mode, 'players': args.players, 'mobs': mob_count,
+            'mode': mode, 'players': args.players, 'mobs': mob_count, 'warmup_ticks': warmup_ticks,
             'ticks': report['ticks'], 'mob_ms': summary(mob_ms),
             'cpu_percent': round(statistics.fmean(cpu), 2),
             'rss_mib_mean': round(statistics.fmean(rss), 2), 'rss_mib_max': round(max(rss), 2),
-            'region_mean': dict(zip(('regions', 'predicted', 'committed', 'replayed'),
+            'region_mean': dict(zip(('regions', 'predicted', 'committed', 'replayed', 'rng_conflicts', 'read_conflicts'),
                                     map(lambda values: round(statistics.fmean(values), 2),
                                         zip(*region_samples)))) if region_samples else None,
             'mob_span_samples': len(mob_ms), 'spans': report['spans'],
@@ -203,7 +225,7 @@ def main():
     parser.add_argument('--species', default='zombie')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--settle', type=int, default=20)
-    parser.add_argument('--warmup', type=int, default=15)
+    parser.add_argument('--warmup', type=int, default=15, help='simulation seconds, stepped as exactly N*20 frozen ticks')
     parser.add_argument('--seconds', type=int, default=20)
     parser.add_argument('--modes', default='legacy,parallel')
     parser.add_argument('--out', type=Path)
@@ -214,7 +236,10 @@ def main():
     out = args.out.resolve() if args.out else Path(tempfile.mkdtemp(prefix='horizon-region-bench-'))
     out.mkdir(parents=True, exist_ok=True)
     print(f'Benchmark artifacts: {out}', flush=True)
-    results = [run(mode, args, out) for mode in args.modes.split(',')]
+    modes = args.modes.split(',')
+    if any(mode not in ('legacy', 'control', 'serial', 'parallel') for mode in modes):
+        parser.error('--modes supports legacy,control,serial,parallel')
+    results = [run(mode, args, out) for mode in modes]
     (out / 'results.json').write_text(json.dumps({
         'workload': vars(args) | {'bin': str(args.bin), 'before_bin': str(args.before_bin), 'out': str(out)},
         'results': results,

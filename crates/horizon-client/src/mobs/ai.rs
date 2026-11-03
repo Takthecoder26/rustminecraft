@@ -1512,7 +1512,7 @@ fn push_entities(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         targets.push((Who::Player, p.position, p.passenger, false, false));
     }
     let root = root_vehicle(w, m.id, m.extra.mount);
-    for o in w.others_near(bounds) {
+    for o in w.others_intersecting(bounds) {
         if o.id != m.id && o.alive && o.pushable && o.bounds.intersects(bounds) {
             let same = root_vehicle(w, o.id, o.vehicle) == root;
             targets.push((Who::Mob(o.id), o.position, o.passenger, same, o.is_vehicle));
