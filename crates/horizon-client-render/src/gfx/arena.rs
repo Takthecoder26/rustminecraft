@@ -82,6 +82,7 @@ impl FreeList {
 /// One vertex buffer of the arena; only the newest page grows.
 struct Page {
     buffer: wgpu::Buffer,
+    provenance: Option<wgpu::Buffer>,
     /// Capacity in vertices.
     capacity: u64,
     free: FreeList,
@@ -108,6 +109,7 @@ const SHRINK_MIN_BYTES: u64 = 64 << 20;
 /// buffer sizes): a section's vertices sit in one page.
 pub struct Arena {
     pages: Vec<Option<Page>>,
+    provenance: bool,
     stride: u64,
     page_limit: u64,
     initial_capacity: u64,
@@ -122,6 +124,39 @@ pub struct Arena {
 }
 
 impl Arena {
+    /// Eight bytes per quad, only for packs which read terrain source provenance.
+    pub fn set_provenance(&mut self, device: &wgpu::Device, enabled: bool) -> bool {
+        if enabled == self.provenance {
+            return true;
+        }
+        let mut buffers = Vec::new();
+        if enabled {
+            for p in self.pages.iter().flatten() {
+                let Some(buffer) = Self::new_provenance(device, p.capacity) else {
+                    return false;
+                };
+                buffers.push(buffer);
+            }
+        }
+        let mut buffers = buffers.into_iter();
+        for p in self.pages.iter_mut().flatten() {
+            p.provenance = buffers.next();
+        }
+        self.provenance = enabled;
+        true
+    }
+    fn new_provenance(device: &wgpu::Device, capacity: u64) -> Option<wgpu::Buffer> {
+        try_create(
+            device,
+            capacity * 2,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        )
+    }
+    pub fn provenance(&self, page: u32) -> Option<&wgpu::Buffer> {
+        self.pages.get(page as usize)?.as_ref()?.provenance.as_ref()
+    }
     /// Vertices; `storage` also lets shaders read them as a storage buffer (a shader pack's
     /// terrain program reads the other corners of a vertex's quad for its normal).
     pub fn new(device: &wgpu::Device, stride: u64, capacity: u64, storage: bool) -> Self {
@@ -194,6 +229,7 @@ impl Arena {
         let capacity = capacity.next_multiple_of(GRAIN).min(page_limit);
         Self {
             pages: Vec::new(),
+            provenance: false,
             stride,
             page_limit,
             initial_capacity: capacity,
@@ -337,8 +373,14 @@ impl Arena {
         };
         let mut free = FreeList::new(capacity);
         let start = free.take(len).expect("a new page fits one section");
+        let provenance = if self.provenance {
+            Some(Self::new_provenance(device, capacity)?)
+        } else {
+            None
+        };
         let page = Page {
             buffer,
+            provenance,
             capacity,
             free,
             host,
@@ -452,8 +494,17 @@ impl Arena {
             return false;
         };
         let free = FreeList::new(capacity);
+        let provenance = if self.provenance {
+            let Some(p) = Self::new_provenance(device, capacity) else {
+                return false;
+            };
+            Some(p)
+        } else {
+            None
+        };
         self.pages.push(Some(Page {
             buffer,
+            provenance,
             capacity,
             free,
             host,
@@ -479,6 +530,9 @@ impl Arena {
         vertices: u64,
     ) {
         debug_assert_ne!(from.0, to.0);
+        if let (Some(a), Some(b)) = (self.provenance(from.0), self.provenance(to.0)) {
+            encoder.copy_buffer_to_buffer(a, from.1 * 2, b, to.1 * 2, vertices * 2);
+        }
         encoder.copy_buffer_to_buffer(
             self.buffer(from.0),
             from.1 * self.stride,
@@ -543,7 +597,19 @@ impl Arena {
         let Some((buffer, host)) = self.create(device, capacity, spill) else {
             return false;
         };
+        let provenance = if self.provenance {
+            let Some(p) = Self::new_provenance(device, capacity) else {
+                return false;
+            };
+            Some(p)
+        } else {
+            None
+        };
         let old = self.pages[page].as_mut().expect("live arena page");
+        if let (Some(from), Some(to)) = (&old.provenance, &provenance) {
+            encoder.copy_buffer_to_buffer(from, 0, to, 0, old.capacity * 2);
+        }
+        old.provenance = provenance;
         // Copies recorded for the old buffer run before this one.
         encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * self.stride);
         let previous = old.capacity;
@@ -564,6 +630,7 @@ impl Arena {
                 && let Some(p) = page.take()
             {
                 released.push(p.buffer);
+                released.extend(p.provenance);
             }
         }
         if self.closing.is_some_and(|page| !self.has_page(page)) {
@@ -578,7 +645,11 @@ impl Arena {
     /// Drops every page; gives back their buffers, for a [`Graveyard`].
     pub fn clear(&mut self) -> Vec<wgpu::Buffer> {
         self.closing = None;
-        self.pages.drain(..).flatten().map(|p| p.buffer).collect()
+        self.pages
+            .drain(..)
+            .flatten()
+            .flat_map(|p| std::iter::once(p.buffer).chain(p.provenance))
+            .collect()
     }
 }
 
@@ -670,7 +741,7 @@ mod tests {
         assert_eq!(freed, expected);
     }
 
-    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    pub(super) fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         device_with(wgpu::Features::empty())
     }
 
@@ -708,7 +779,7 @@ mod tests {
     }
 
     /// `Arena::alloc`, with the copies of a grow submitted at once.
-    fn alloc(
+    pub(super) fn alloc(
         arena: &mut Arena,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1395,6 +1466,7 @@ mod tests {
             let buffer = buffer.clone();
             arena.pages = vec![Some(Page {
                 buffer,
+                provenance: None,
                 capacity,
                 free,
                 host,
@@ -1505,7 +1577,12 @@ mod tests {
         assert_eq!(free.take(GRAIN), Some(a));
     }
 
-    fn read(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer, offset: u64) -> u32 {
+    pub(super) fn read(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+    ) -> u32 {
         let (tx, rx) = std::sync::mpsc::channel();
         wgpu::util::DownloadBuffer::read_buffer(
             device,
@@ -1567,3 +1644,7 @@ mod tests {
         assert_eq!(alloc(&mut arena, &device, &queue, GRAIN), Some((0, 0)));
     }
 }
+
+#[cfg(test)]
+#[path = "arena/tests/provenance.rs"]
+mod provenance_tests;

@@ -429,7 +429,8 @@ pub(super) struct World<'a> {
     pub lightmap: wgpu::TextureView,
     /// Terrain's geometry, when the pack draws it.
     pub terrain: Option<Geometry<'a>>,
-    /// Of each block sprite layer, `mc_Entity` (id, then 1 for fluids or -1) and `at_midBlock.w`
+    /// Exact state rows followed by approximate distant sprite rows: state count, then
+    /// `mc_Entity` (id, then 1 for fluids or -1) and `at_midBlock.w`
     /// (its block's light): three values a layer.
     pub block_ids: &'a [i32],
     /// The atlas of the sun and moon's sprites.
@@ -539,7 +540,7 @@ pub struct PackPost {
     /// Set 3 of flat terrain (`mc_Entity`'s table) and its bind group for each arena page,
     /// with the page buffer it was made for.
     block_ids: Option<(wgpu::BindGroupLayout, wgpu::Buffer)>,
-    page_groups: HashMap<u32, (wgpu::Buffer, wgpu::BindGroup)>,
+    page_groups: HashMap<u32, (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup)>,
     gui_size: [u32; 2],
     /// GPU time of each pass, while the renderer asks for it (`pack_timing.rs`).
     pub timing: Option<super::pack_timing::PassTiming>,
@@ -960,11 +961,13 @@ pub(super) struct ShadowView {
     pub unculled: Option<f32>,
 }
 
-/// Set 3 of flat terrain, read by the vertex stage: the sprite layers' table (`mc_Entity`'s id
-/// and fluid, `at_midBlock.w`; -1, -1, 0 when empty) and, per arena page, the page's vertices
-/// (a vertex reads its quad's corners for its normal).
-fn block_ids(device: &wgpu::Device, table: &[i32]) -> (wgpu::BindGroupLayout, wgpu::Buffer) {
-    let empty = [-1, -1, 0];
+/// Set 3 of flat terrain: state count and (id, fluid, emission) state/sprite rows,
+/// compact arena vertices (for face normals/UVs), and optional per-quad provenance.
+pub(super) fn block_ids(
+    device: &wgpu::Device,
+    table: &[i32],
+) -> (wgpu::BindGroupLayout, wgpu::Buffer) {
+    let empty = [0, -1, -1, 0];
     let table = if table.is_empty() { &empty[..] } else { table };
     let buffer = wgpu::util::DeviceExt::create_buffer_init(
         device,
@@ -986,7 +989,7 @@ fn block_ids(device: &wgpu::Device, table: &[i32]) -> (wgpu::BindGroupLayout, wg
     };
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Shader pack terrain"),
-        entries: &[storage(0), storage(1)],
+        entries: &[storage(0), storage(1), storage(2)],
     });
     (layout, buffer)
 }
@@ -1909,7 +1912,7 @@ impl PackPost {
             }
             Some(pass)
         };
-        // Flat terrain reads `mc_Entity` from a table of the sprite layers.
+        // Flat terrain reads state attributes through its optional per-quad provenance.
         let block_ids = world
             .terrain
             .as_ref()
@@ -2824,7 +2827,7 @@ impl PackPost {
             }
             let (groups, ids) = (&self.page_groups, pass.ids);
             let page = |rp: &mut wgpu::RenderPass<'_>, page: u32| {
-                if let Some((_, group)) = groups.get(&page).filter(|_| ids) {
+                if let Some((_, _, group)) = groups.get(&page).filter(|_| ids) {
                     rp.set_bind_group(3, group, &[]);
                 }
             };
@@ -3769,15 +3772,15 @@ impl PackPost {
         inputs: &PackInputs,
         size: [u32; 2],
         window: [u32; 2],
-        pages: &[(u32, wgpu::Buffer)],
+        pages: &[(u32, wgpu::Buffer, wgpu::Buffer)],
         terrain: &mut TerrainDraw<'_>,
     ) {
         self.resize(device, size);
         if let Some((layout, ids)) = &self.block_ids {
             // A page that grew has a new buffer.
             self.page_groups
-                .retain(|p, (b, _)| pages.iter().any(|(q, c)| q == p && c == b));
-            for (page, buffer) in pages {
+                .retain(|p, (b, m, _)| pages.iter().any(|(q, c, n)| q == p && c == b && m == n));
+            for (page, buffer, provenance) in pages {
                 self.page_groups.entry(*page).or_insert_with(|| {
                     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Shader pack terrain"),
@@ -3791,9 +3794,13 @@ impl PackPost {
                                 binding: 1,
                                 resource: buffer.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: provenance.as_entire_binding(),
+                            },
                         ],
                     });
-                    (buffer.clone(), group)
+                    (buffer.clone(), provenance.clone(), group)
                 });
             }
         }

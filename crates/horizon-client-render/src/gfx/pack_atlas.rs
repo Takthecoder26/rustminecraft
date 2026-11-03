@@ -150,6 +150,27 @@ const FACE: &str = "    uint hz_q = (uint(gl_VertexIndex) & ~3u) * 6u;\n    \
         }\n    \
     }\n";
 
+// Attribute-only resource reads stay outside the input body: programs using only
+// position, normal or UV do not acquire a provenance buffer requirement.
+const BLOCK_ATTRIBUTES: &str = r#"
+vec4 hz_block_attribute(uint vertex, uint layer, float w, vec3 position, bool mid) {
+    uvec2 source = hz_provenance[vertex >> 2u];
+    uint states = uint(hz_block_ids[0]);
+    bool exact = (source.y & 4096u) != 0u && source.x < states;
+    float step = w > 0.0 ? uintBitsToFloat(floatBitsToUint(w) & 0xff800000u) : fract(abs(w));
+    uint row = exact ? source.x : states + layer;
+    // Distant merged quads have no single owner: retain their old sprite-based
+    // ID/emission approximation, but never invent an exact block-center offset.
+    bool valid = exact || (step == 0.03125 && row < (uint(hz_block_ids.length()) - 1u) / 3u);
+    if (!valid) { return mid ? vec4(0.0) : vec4(-1.0, -1.0, 0.0, 0.0); }
+    if (mid) {
+        vec3 owner = vec3(source.y & 15u, (source.y >> 4u) & 15u, (source.y >> 8u) & 15u) + 0.5;
+        return vec4(exact ? (owner - position) * 64.0 : vec3(0.0), float(hz_block_ids[3u * row + 3u]));
+    }
+    return vec4(float(hz_block_ids[3u * row + 1u]), float(hz_block_ids[3u * row + 2u]), 0.0, 0.0);
+}
+"#;
+
 impl PackAtlas {
     /// The vertex inputs of a gbuffers program drawing terrain (`TerrainVertex`, terrain.wgsl's
     /// `vs_terrain` or, for `flat` draws, `vs_terrain_flat`), in atlas coordinates.
@@ -164,12 +185,12 @@ impl PackAtlas {
                 "layout(set = 1, binding = 0) readonly buffer HzBlockSlots { uint hz_block_slots[]; };\n\
                  layout(set = 1, binding = 1) readonly buffer HzSlotOrigins { vec4 hz_slot_origins[]; };\n",
             );
-            // Of each sprite layer, `mc_Entity` (id, then 1 for fluids or -1) and
-            // `at_midBlock.w` (its block's light), the game's table; and the arena page's
-            // vertices (`TerrainVertex`, six words each).
+            // State count, then exact state and approximate distant sprite rows;
+            // the compact vertex page (six words each), and source state/owner per quad.
             declarations.push_str(
                 "layout(set = 3, binding = 0) readonly buffer HzBlockIds { int hz_block_ids[]; };\n\
-                 layout(set = 3, binding = 1) readonly buffer HzVertices { uint hz_vertices[]; };\n",
+                 layout(set = 3, binding = 1) readonly buffer HzVertices { uint hz_vertices[]; };\n\
+                 layout(set = 3, binding = 2) readonly buffer HzProvenance { uvec2 hz_provenance[]; };\n",
             );
             "hz_slot_origins[hz_block_slots[uint(gl_VertexIndex) >> 8u]]"
         } else {
@@ -206,18 +227,16 @@ impl PackAtlas {
         let mut body = body;
         if flat {
             body.push_str(FACE);
+            declarations.push_str(BLOCK_ATTRIBUTES);
         }
         declarations.push_str("vec2 hz_cell; vec2 hz_scale; vec4 hz_tangent;\n");
         let entity = if flat {
-            "vec4(float(hz_block_ids[3u * hz_layer]), float(hz_block_ids[3u * hz_layer + 1u]), 0.0, 0.0)"
+            "hz_block_attribute(uint(gl_VertexIndex), hz_layer, hz_origin.w, hz_v_pos, false)"
         } else {
             "vec4(-1.0, -1.0, 0.0, 0.0)"
         };
-        // The block a face belongs to: half a block behind its centre (the quad's diagonal);
-        // w, the light it gives (Iris's `BLOCK_EMISSION_ATTRIBUTE`, 0 to 15).
         let mid_block = if flat {
-            "vec4((floor((hz_p0 + hz_p2) * 0.5 - 0.5 * hz_Normal) + 0.5 - hz_v_pos) * 64.0, \
-             float(hz_block_ids[3u * hz_layer + 2u]))"
+            "hz_block_attribute(uint(gl_VertexIndex), hz_layer, hz_origin.w, hz_v_pos, true)"
         } else {
             "vec4(0.0)"
         };
@@ -371,3 +390,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pack_atlas/tests/provenance.rs"]
+mod provenance_tests;

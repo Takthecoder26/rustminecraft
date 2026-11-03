@@ -4579,10 +4579,13 @@ impl Renderer {
         });
         let stride = std::mem::size_of::<TerrainVertex>() as u64;
         let translucent_arena = self.translucent_arena.as_ref().unwrap_or(&self.arena);
-        for (part, arena, (part_page, first)) in [
+        for (index, (part, arena, (part_page, first))) in [
             (&mesh.solid, &self.arena, (page, start)),
             (&mesh.translucent, translucent_arena, translucent_at),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if !part.is_empty() {
                 let bytes: &[u8] = bytemuck::cast_slice(part);
                 self.uploaded_bytes += bytes.len() as u64;
@@ -4593,6 +4596,22 @@ impl Renderer {
                     first * stride,
                     bytes,
                 );
+                if let Some(buffer) = arena.provenance(part_page) {
+                    let records = mesh.provenance.as_ref().map(|p| &p[index]);
+                    let missing;
+                    let records = match records {
+                        Some(p) if p.len() == part.len() / 4 => p.as_slice(),
+                        _ => {
+                            missing = vec![[0u32; 2]; part.len() / 4];
+                            &missing
+                        }
+                    };
+                    let bytes = bytemuck::cast_slice(records);
+                    self.uploaded_bytes += bytes.len() as u64;
+                    self.section_copy_bytes += bytes.len() as u64;
+                    self.section_uploads
+                        .buffer(encoder, buffer, first * 2, bytes);
+                }
             }
         }
         if self.section_copy_bytes >= SECTION_COPY_LIMIT
@@ -5418,8 +5437,8 @@ impl Renderer {
         self.world_post.upscale = if taa { upscale.clamp(1.0, 4.0) } else { 1.0 };
     }
     /// Runs `post` over the world from now on (`None`: no pack), for the dimension `dimension`;
-    /// `block_ids` gives each block sprite layer's `mc_Entity` (id, fluid) and `at_midBlock.w`
-    /// (its block's light), three values a layer.
+    /// `block_ids` starts with the state count, then (id, fluid, emission) rows for
+    /// exact states and the separate approximate distant-terrain sprite fallback.
     /// Returns the programs that run and the notes of loading them.
     pub fn set_shader_pack(
         &mut self,
@@ -5479,6 +5498,14 @@ impl Renderer {
                 world,
             )
         });
+        let provenance = flat
+            && post
+                .as_ref()
+                .is_some_and(|p| p.has_terrain() || p.has_shadow());
+        if !self.arena.set_provenance(&self.device, provenance) {
+            log::warn!("shader pack terrain provenance allocation failed");
+            return None;
+        }
         let report = post.as_ref().map(|p| {
             let programs = p.programs().into_iter().map(str::to_owned).collect();
             (programs, p.notes.clone())
@@ -5489,8 +5516,18 @@ impl Renderer {
         }
         report
     }
+    /// Whether the running standard pack's terrain/shadow bridge needs source provenance.
+    pub fn shader_provenance(&self) -> bool {
+        self.pack_terrain_flat
+            && self
+                .pack_post
+                .as_ref()
+                .and_then(|p| p.1.as_ref())
+                .is_some_and(|p| p.has_terrain() || p.has_shadow())
+    }
     /// Drops the running shader pack, of either kind.
     pub fn drop_shader_packs(&mut self) {
+        self.arena.set_provenance(&self.device, false);
         self.pack_post = None;
         self.native = None;
         self.pack_atlas = None;
@@ -8694,11 +8731,15 @@ impl Renderer {
             };
             post.set_weather(weather);
             let flat = self.flat.as_ref().filter(|_| flat_frame);
-            let pages: Vec<(u32, wgpu::Buffer)> = match flat {
+            let pages: Vec<(u32, wgpu::Buffer, wgpu::Buffer)> = match flat {
                 Some(_) if pack_draws_terrain || pack_draws_shadow => self
                     .arena
                     .page_buffers()
-                    .map(|(p, b)| (p, b.clone()))
+                    .filter_map(|(p, b)| {
+                        self.arena
+                            .provenance(p)
+                            .map(|meta| (p, b.clone(), meta.clone()))
+                    })
                     .collect(),
                 _ => Vec::new(),
             };

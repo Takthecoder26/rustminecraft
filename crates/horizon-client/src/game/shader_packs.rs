@@ -153,6 +153,14 @@ impl Game<'_> {
         partial: f32,
         sky: &horizon_client::environment::Sky,
     ) -> PackInputs {
+        let provenance = self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.shader_provenance());
+        if self.streaming.shader_provenance != provenance {
+            self.streaming.shader_provenance = provenance;
+            self.all_sections_changed();
+        }
         // A `shaders/` pack lights the faces itself unless `oldLighting=true`: sections mesh
         // without the game's face shading (the pack loaded or dropped below shows next frame).
         let pack_lighting = self.pack_ids.as_ref().is_some_and(|ids| !ids.old_lighting);
@@ -271,12 +279,9 @@ impl Game<'_> {
                             block_states: RefCell::default(),
                         });
                         let started_ids = std::time::Instant::now();
-                        let table = terrain_table(
-                            &block_id_table(&self.pack, &ids),
-                            &block_emission_table(&self.pack),
-                        );
+                        let table = terrain_state_table(&self.pack, &ids);
                         log::info!(
-                            "shader pack {name}: mc_Entity for {} of {} block sprites in {} ms",
+                            "shader pack {name}: mc_Entity for {} of {} block states in {} ms",
                             table.chunks(3).filter(|p| p[0] != -1).count(),
                             table.len() / 3,
                             started_ids.elapsed().as_millis()
@@ -670,7 +675,7 @@ pub(super) fn block_id_table(pack: &super::PackResources, ids: &BlockIds) -> Vec
     table
 }
 
-/// `at_midBlock.w` of each block sprite layer: the light the block drawing it gives (Iris's
+/// Approximate distant-terrain fallback for `at_midBlock.w` of each sprite layer: the light the block drawing it gives (Iris's
 /// `BLOCK_EMISSION_ATTRIBUTE`; 0 to 15, as Iris 1.11.7 passes it). Terrain vertices carry their
 /// sprite layer, not their block, so as for `mc_Entity` a layer takes the light of the block
 /// named like its sprite, else the light most block states drawing it give (ties: the lowest).
@@ -752,46 +757,59 @@ fn layer_lights(
     table
 }
 
-/// The table a `shaders/` pack's terrain reads per sprite layer: `mc_Entity`'s (id, fluid) pair
-/// from `ids` (`block_id_table`), then `at_midBlock.w` from `emission`.
-fn terrain_table(ids: &[i32], emission: &[i32]) -> Vec<i32> {
-    ids.chunks(2)
-        .enumerate()
-        .flat_map(|(layer, pair)| [pair[0], pair[1], emission.get(layer).copied().unwrap_or(0)])
-        .collect()
+/// Exact state-indexed terrain attributes. Sprites, CTM choices and model offsets do not
+/// change a block state's authored ID or its emitted light.
+fn terrain_state_table(pack: &super::PackResources, ids: &BlockIds) -> Vec<i32> {
+    let registry = pack.assets.registry;
+    let mut table = vec![registry.len() as i32];
+    table.extend((0..registry.len()).flat_map(|i| {
+        let state_id = horizon_world::registry::BlockStateId(i as u32);
+        let Some(state) = registry.state(state_id) else {
+            return [-1, -1, 0];
+        };
+        state_attributes(
+            state,
+            ids,
+            pack.context
+                .tables
+                .facts(state_id)
+                .map_or(0, |f| f.emission),
+        )
+    }));
+    // Merged far faces represent many blocks. Preserve their existing approximate
+    // sprite classification, distinct from the exact state rows of near meshes.
+    let legacy_ids = block_id_table(pack, ids);
+    let emission = block_emission_table(pack);
+    table.extend(
+        legacy_ids
+            .chunks_exact(2)
+            .enumerate()
+            .flat_map(|(layer, p)| [p[0], p[1], emission.get(layer).copied().unwrap_or(0)]),
+    );
+    table
+}
+
+fn state_attributes(
+    state: &horizon_world::chunk::BlockState,
+    ids: &BlockIds,
+    emission: u8,
+) -> [i32; 3] {
+    let id = ids
+        .id(&state.name, |key| {
+            state.properties.get(key).map(String::as_str)
+        })
+        .unwrap_or(-1);
+    let fluid = if matches!(state.name.as_str(), "minecraft:water" | "minecraft:lava") {
+        1
+    } else {
+        -1
+    };
+    [id, fluid, i32::from(emission)]
 }
 
 #[cfg(test)]
-mod emission_tests {
-    use super::{layer_lights, terrain_table};
-
-    /// A sprite's light: the block named like it gives its own (a torch, 14, over a wall
-    /// torch's); a shared one takes what most states drawing it give (a furnace's side: as
-    /// many lit states, 13, as unlit, 0: the lowest), and a layer no block draws stays 0.
-    #[test]
-    fn a_sprite_takes_the_light_of_its_block() {
-        let votes = std::collections::BTreeMap::from([
-            ((0, 14), (true, 1)),
-            ((0, 0), (false, 5)),
-            ((1, 13), (false, 4)),
-            ((1, 0), (false, 4)),
-            ((2, 15), (false, 4)),
-            ((2, 0), (false, 5)),
-            ((3, 7), (false, 2)),
-        ]);
-        assert_eq!(layer_lights(&votes, 5), [14, 0, 0, 7, 0]);
-    }
-
-    /// The table `shaders/` packs' terrain reads: three values a layer, `mc_Entity`'s pair
-    /// then the light.
-    #[test]
-    fn the_terrain_table_holds_ids_then_light() {
-        assert_eq!(
-            terrain_table(&[10, -1, 20, 1], &[14, 0]),
-            [10, -1, 14, 20, 1, 0]
-        );
-    }
-}
+#[path = "shader_packs/tests/state_attributes.rs"]
+mod state_attribute_tests;
 
 #[cfg(test)]
 mod native_pack_tests {

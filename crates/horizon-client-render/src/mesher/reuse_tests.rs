@@ -132,6 +132,7 @@ fn a_shader_pack_lights_the_faces_itself() {
         let mut mesher = Mesher {
             nether_shading: false,
             shader_pack_lighting,
+            shader_provenance: false,
             separate_ao: false,
             assets: &assets,
             render: &render,
@@ -184,6 +185,7 @@ fn separate_ao_passes_ao_in_alpha_without_darkening_rgb() {
     let mut mesher = Mesher {
         nether_shading: false,
         shader_pack_lighting: true,
+        shader_provenance: false,
         separate_ao: true,
         assets: &assets,
         render: &render,
@@ -258,6 +260,7 @@ fn reused_mesh_matches_fresh_geometry_across_sections_and_resource_reload() {
         let mut mesher = Mesher {
             nether_shading: false,
             shader_pack_lighting: false,
+            shader_provenance: false,
             separate_ao: false,
             assets: &assets,
             render: &render,

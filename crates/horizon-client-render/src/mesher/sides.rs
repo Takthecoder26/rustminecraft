@@ -209,6 +209,18 @@ pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
     sort_parts(solid, GROUPED.load(Ordering::Relaxed))
 }
 
+pub fn sort_provenance(
+    solid: &mut Vec<TerrainVertex>,
+    provenance: Option<&mut Vec<[u32; 2]>>,
+) -> Sides {
+    if provenance.is_none() {
+        return sort(solid);
+    }
+    SORT_SCRATCH.with_borrow_mut(|scratch| {
+        sort_with_provenance(solid, GROUPED.load(Ordering::Relaxed), scratch, provenance)
+    })
+}
+
 /// `sort`, with all the opaque parts first when `grouped`.
 fn sort_parts(solid: &mut Vec<TerrainVertex>, grouped: bool) -> Sides {
     SORT_SCRATCH.with_borrow_mut(|scratch| sort_with(solid, grouped, scratch))
@@ -222,6 +234,7 @@ struct SortScratch {
     slots: Vec<u8>,
     keys: Vec<u64>,
     sorted: Vec<[TerrainVertex; 4]>,
+    provenance: Vec<[u32; 2]>,
 }
 thread_local! {
     static SORT_SCRATCH: std::cell::RefCell<SortScratch> = Default::default();
@@ -234,6 +247,15 @@ fn total_order_key(v: f32) -> u32 {
 }
 
 fn sort_with(solid: &mut Vec<TerrainVertex>, grouped: bool, scratch: &mut SortScratch) -> Sides {
+    sort_with_provenance(solid, grouped, scratch, None)
+}
+
+fn sort_with_provenance(
+    solid: &mut Vec<TerrainVertex>,
+    grouped: bool,
+    scratch: &mut SortScratch,
+    provenance: Option<&mut Vec<[u32; 2]>>,
+) -> Sides {
     let (quads, rest) = solid.as_chunks::<4>();
     debug_assert!(rest.is_empty(), "solid vertices come in quads");
     let cutout = |q: &[TerrainVertex; 4]| q[0].layer & OPAQUE_LAYER == 0;
@@ -292,6 +314,14 @@ fn sort_with(solid: &mut Vec<TerrainVertex>, grouped: bool, scratch: &mut SortSc
         );
         debug_assert!(quads.len() < 1 << 24);
         keys.sort_unstable();
+        if let Some(p) = provenance {
+            assert_eq!(p.len(), quads.len());
+            let sorted = &mut scratch.provenance;
+            sorted.clear();
+            sorted.extend(keys.iter().map(|k| p[(k & 0xFF_FFFF) as usize]));
+            p.clear();
+            p.extend_from_slice(sorted);
+        }
         let sorted = &mut scratch.sorted;
         sorted.clear();
         sorted.extend(keys.iter().map(|&k| quads[(k & 0xFF_FFFF) as usize]));

@@ -259,6 +259,9 @@ mod section_mesh_tests {
     }
 }
 pub struct SectionMesh {
+    /// Optional source state and owning cell, one record per quad. Normal terrain
+    /// keeps its 24-byte vertices; shader packs alone request these sidecars.
+    pub provenance: Option<[Vec<[u32; 2]>; 2]>,
     pub solid: Vec<TerrainVertex>,
     /// The buckets `solid` is sorted in by the side its quads face: empty
     /// until `sort_solid`, which the meshing workers call; `solid` is in
@@ -287,6 +290,7 @@ pub struct SectionMesh {
 impl Default for SectionMesh {
     fn default() -> Self {
         Self {
+            provenance: None,
             solid: Vec::new(),
             sides: Sides::default(),
             translucent: Vec::new(),
@@ -300,6 +304,25 @@ impl Default for SectionMesh {
     }
 }
 impl SectionMesh {
+    /// Attach provenance to quads emitted since `before`, using a section-local owner.
+    pub(crate) fn record_provenance(
+        &mut self,
+        before: [usize; 2],
+        state: u32,
+        [x, y, z]: [i32; 3],
+    ) {
+        if let Some(provenance) = &mut self.provenance {
+            debug_assert!([x, y, z].iter().all(|n| (0..16).contains(n)));
+            let owner = 0x1000 | x as u32 | (y as u32) << 4 | (z as u32) << 8;
+            for ((p, before), after) in provenance
+                .iter_mut()
+                .zip(before)
+                .zip([self.solid.len(), self.translucent.len()])
+            {
+                p.extend(std::iter::repeat_n([state, owner], (after - before) / 4));
+            }
+        }
+    }
     /// Record a sprite layer used by a quad. Opaque is a vertex-only flag and
     /// is removed here so the renderer can compare the actual atlas layer.
     pub fn note_sprite_layer(&mut self, layer: u16) {
@@ -336,11 +359,16 @@ impl SectionMesh {
             + self.block_entities.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.lights.capacity() * std::mem::size_of::<([i32; 3], u32)>()
             + self.sprite_layers.capacity() * std::mem::size_of::<u16>()
+            + self
+                .provenance
+                .as_ref()
+                .map_or(0, |p| p.iter().map(|v| v.capacity() * 8).sum())
     }
     /// Sorts the solid quads by the side they face, for the renderer to
     /// leave out those facing away from the eye (`sides`).
     pub fn sort_solid(&mut self) {
-        self.sides = sides::sort(&mut self.solid);
+        self.sides =
+            sides::sort_provenance(&mut self.solid, self.provenance.as_mut().map(|p| &mut p[0]));
         self.bounds = self.compute_bounds();
     }
 
@@ -558,6 +586,7 @@ pub struct MeshFacts {
     pub tint_sources: u8,
 }
 pub struct MeshTables {
+    fluid_states: [u32; 2],
     info: Vec<Info>,
     /// `Info::solid` by state, packed apart: the opacity mask of a section
     /// reads 8,000 states, and a few bytes each stay in cache where `Info`
@@ -734,6 +763,8 @@ impl MeshTables {
             });
         }
         Ok(Self {
+            fluid_states: ["minecraft:water", "minecraft:lava"]
+                .map(|name| assets.registry.default_state(name).map_or(0, |id| id.0)),
             solid: info.iter().map(|i| i.solid).collect(),
             full_faces: info
                 .iter()
@@ -1350,6 +1381,8 @@ pub struct Mesher<'a> {
     pub nether_shading: bool,
     /// A shader pack lights the faces (its `oldLighting` off): no face shading in the colours.
     pub shader_pack_lighting: bool,
+    /// Keep exact source-state/owner records for the active standard shader pack.
+    pub shader_provenance: bool,
     /// OptiFine/Iris separate ambient occlusion: vertex RGB does not include AO, and AO factor is passed in vertex alpha.
     pub separate_ao: bool,
     pub assets: &'a Assets,
@@ -1390,6 +1423,13 @@ impl Mesher<'_> {
         scratch: &mut MeshScratch,
     ) -> SectionMesh {
         out.clear();
+        if self.shader_provenance {
+            for p in out.provenance.get_or_insert_with(Default::default) {
+                p.clear();
+            }
+        } else {
+            out.provenance = None;
+        }
         let center = region[1][1].expect("centre chunk");
         let section = &center.sections[sy as usize];
         if section.is_uniform(0) {
@@ -1444,7 +1484,27 @@ impl Mesher<'_> {
                             self.shader_pack_lighting,
                             self.separate_ao,
                         );
+                        let before = [out.solid.len(), out.translucent.len()];
                         fluid::tesselate(self.tables, shade, pad, water, &mut out, [x, y, z]);
+                        if out.provenance.is_some() {
+                            let fluid_block = self
+                                .assets
+                                .registry
+                                .state(BlockStateId(id))
+                                .is_some_and(|s| {
+                                    matches!(s.name.as_str(), "minecraft:water" | "minecraft:lava")
+                                });
+                            let lava = !matches!(
+                                state.fluid.kind(),
+                                FluidKind::Water | FluidKind::FlowingWater
+                            );
+                            let fluid_state = if fluid_block {
+                                id
+                            } else {
+                                self.tables.fluid_states[usize::from(lava)]
+                            };
+                            out.record_provenance(before, fluid_state, [x, y, z]);
+                        }
                     }
                     if !state.model {
                         continue;
@@ -1529,6 +1589,7 @@ impl Mesher<'_> {
                                     continue;
                                 }
                             }
+                            let before = [out.solid.len(), out.translucent.len()];
                             self.face(
                                 pad,
                                 &mut tints,
@@ -1541,6 +1602,7 @@ impl Mesher<'_> {
                                 world,
                                 interior_leaf,
                             );
+                            out.record_provenance(before, id, [x, y, z]);
                         }
                     }
                 }
@@ -2025,3 +2087,7 @@ mod quarter_tests {
         assert_eq!(standard_uv(D::Down, [0.0, 0.0, 1.0]), [0.0, 0.0]);
     }
 }
+
+#[cfg(test)]
+#[path = "mesher/tests/provenance.rs"]
+mod provenance_tests;
