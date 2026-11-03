@@ -63,8 +63,6 @@ jobs:
           else
             python tools/check_public_tree.py --history
           fi
-      - name: Test offline research tooling
-        run: python -m unittest discover -s tests -v
       - name: Install Rust toolchain and the ALSA and udev headers the client links against
         if: steps.rust.outputs.required != 'false'
         env:
@@ -100,6 +98,24 @@ jobs:
           # recompiling the workspace with a different dependency graph.
           cargo +stable test --workspace --lib --bins --tests mod_content::tests:: -- --ignored
           cargo +stable test --workspace --doc
+  # Offline Python tooling tests, sharded across independent jobs so the suite finishes in a fraction of
+  # the single discover run's wall-clock time. Every tests/test_*.py module runs in exactly one shard, so
+  # coverage is unchanged; a shard failure fails the check.
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test offline research tooling (shard ${{ matrix.shard }}/4)
+        run: python tools/ci/run_python_tests.py --shard ${{ matrix.shard }}/4 -v
+
   # The launcher is its own workspace (launcher/Cargo.toml), so verify's cargo runs never build it. A pull request that
   # changes it or a crate it builds is checked here, and so is every push to main: two pull requests can each pass
   # alone and break it together (#2059 and the registry ratings did, 2026-10-26).
