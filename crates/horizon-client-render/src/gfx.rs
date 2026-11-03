@@ -6097,6 +6097,8 @@ impl Renderer {
         )?;
         self.native = pack.draws().then_some(pack);
         if self.native.is_some() {
+            // Native terrain does not use standard-pack source sidecars.
+            self.arena.set_provenance(&self.device, false);
             self.pack_post = None;
             self.pack_atlas = None;
         }
