@@ -47,6 +47,24 @@ fn provenance_follows_quads_through_reordering_and_keeps_full_state_ids() {
     ordinary.record_provenance([0, 0], 1, [0, 0, 0]);
     ordinary.sort_solid();
     assert!(ordinary.provenance.is_none());
+    let capacity = mesh
+        .provenance
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(Vec::capacity)
+        .sum::<usize>();
+    mesh.clear();
+    assert!(mesh.provenance.as_ref().unwrap().iter().all(Vec::is_empty));
+    assert_eq!(
+        mesh.provenance
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(Vec::capacity)
+            .sum::<usize>(),
+        capacity
+    );
 }
 
 #[test]

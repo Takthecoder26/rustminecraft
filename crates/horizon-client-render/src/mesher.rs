@@ -343,6 +343,11 @@ impl SectionMesh {
 
     /// Retain geometry capacity after an upload, but none of its old contents.
     pub fn clear(&mut self) {
+        if let Some(records) = &mut self.provenance {
+            for part in records {
+                part.clear();
+            }
+        }
         self.solid.clear();
         self.translucent.clear();
         self.block_entities.clear();

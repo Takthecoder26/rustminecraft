@@ -227,16 +227,17 @@ impl PackAtlas {
         let mut body = body;
         if flat {
             body.push_str(FACE);
+            body.push_str("    uint hz_source_vertex = uint(gl_VertexIndex);\n");
             declarations.push_str(BLOCK_ATTRIBUTES);
         }
         declarations.push_str("vec2 hz_cell; vec2 hz_scale; vec4 hz_tangent;\n");
         let entity = if flat {
-            "hz_block_attribute(uint(gl_VertexIndex), hz_layer, hz_origin.w, hz_v_pos, false)"
+            "hz_block_attribute(hz_source_vertex, hz_layer, hz_origin.w, hz_v_pos, false)"
         } else {
             "vec4(-1.0, -1.0, 0.0, 0.0)"
         };
         let mid_block = if flat {
-            "hz_block_attribute(uint(gl_VertexIndex), hz_layer, hz_origin.w, hz_v_pos, true)"
+            "hz_block_attribute(hz_source_vertex, hz_layer, hz_origin.w, hz_v_pos, true)"
         } else {
             "vec4(0.0)"
         };
