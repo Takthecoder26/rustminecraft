@@ -1627,8 +1627,20 @@ impl Screen {
             ) => *self = Self::list(saves),
             (Self::Disconnected { retry, .. }, Some(55)) => *retry = None,
             (Self::Direct { address }, Some(52)) => {
+                // directJoinCallback: a new address joins the saved list
+                // before the connection, as addServerCallback's save does.
+                let address = direct_address(address);
+                let file = servers_file(saves);
+                let mut list = servers::load(&file);
+                if !list
+                    .iter()
+                    .any(|s| address_key(&s.ip) == address_key(&address))
+                {
+                    list.push(ServerEntry::new(&address, &address));
+                    let _ = servers::save(&file, &list);
+                }
                 return Outcome::Connect {
-                    address: direct_address(address),
+                    address,
                     lan: false,
                 };
             }
@@ -2387,6 +2399,36 @@ mod tests {
         screen.arrow(true, true, size, &saves);
         assert_eq!(state(&screen).1, Some(0));
         assert_eq!(state(&screen).0[0], "c");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Vanilla's directJoinCallback saves a new address before connecting;
+    /// a listed address is not saved twice (address_key's host+port match).
+    #[test]
+    fn direct_connect_saves_a_new_address_to_the_list() {
+        let dir = std::env::temp_dir().join(format!("horizon-mp-direct-{}", std::process::id()));
+        let saves = dir.join("saves");
+        std::fs::create_dir_all(&saves).unwrap();
+        let file = servers_file(&saves);
+        let mut screen = Screen::Direct {
+            address: "example.org".into(),
+        };
+        let outcome = screen.click(Some(52), 0.0, 0.0, (427.0, 240.0), &saves);
+        assert!(matches!(outcome, Outcome::Connect { lan: false, .. }));
+        let ips = || {
+            servers::load(&file)
+                .into_iter()
+                .map(|s| s.ip)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ips(), ["example.org"]);
+        // The same address through "EXAMPLE.org:25565"-style spellings does
+        // not duplicate (the default port is already implied).
+        let mut again = Screen::Direct {
+            address: "EXAMPLE.org".into(),
+        };
+        let _ = again.click(Some(52), 0.0, 0.0, (427.0, 240.0), &saves);
+        assert_eq!(ips(), ["example.org"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
