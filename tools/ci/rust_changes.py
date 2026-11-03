@@ -19,16 +19,33 @@ ROOT_RUST = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", 
 LAUNCHER_CHECK = {".github/workflows/ci.yml", "tools/ci/rust_changes.py", "tools/release_train.py"}
 
 
+def _is_gated(path):
+    # Documentation and Markdown never require Rust/launcher checks; neither do
+    # machine-generated, root-level JSON data/translation files that are not
+    # embedded in any Rust crate or launcher.
+    return path.startswith("docs/") or path.endswith(".md") or (
+        "/" not in path and path.endswith(".json")
+    )
+
+
 def needs_rust(paths):
-    return any(not (path.startswith("docs/") or path.endswith(".md")) for path in paths)
+    return any(not _is_gated(path) for path in paths)
 
 
 def needs_launcher(paths):
-    return any(path in ROOT_RUST or path in LAUNCHER_CHECK or (
-        path.startswith(tuple(release_train.LAUNCHER_PATHS))
-        and not path.startswith(tuple(release_train.LAUNCHER_IGNORED))
-        and not path.endswith(".md")
-    ) for path in paths)
+    return any(
+        not _is_gated(path)
+        and (
+            path in ROOT_RUST
+            or path in LAUNCHER_CHECK
+            or (
+                path.startswith(tuple(release_train.LAUNCHER_PATHS))
+                and not path.startswith(tuple(release_train.LAUNCHER_IGNORED))
+                and not path.endswith(".md")
+            )
+        )
+        for path in paths
+    )
 
 
 def changed_paths(base, head):

@@ -11,19 +11,25 @@ class RustChangesTests(unittest.TestCase):
     def test_only_content_changes_skip_rust(self):
         self.assertFalse(needs_rust([]))
         self.assertFalse(needs_rust([
-            "docs/setup.md", "docs/media/banner.webp", "README.md",
+            "docs/setup.md", "docs/media/banner.webp", "README.md", "ar.json", "research-lock.json",
         ]))
         for path in [
             "crates/horizon-client/src/game.rs", "xtask/src/main.rs", "Cargo.lock",
             ".cargo/config.toml", ".github/workflows/ci.yml", "tools/ci/rust_changes.py",
-            "research-lock.json", "crates/horizon-theme/tokens.css", "unknown-file",
+            "crates/horizon-theme/tokens.css", "unknown-file", "config/foo.json",
         ]:
             with self.subTest(path=path):
                 self.assertTrue(needs_rust(["README.md", path]))
+        for path in [
+            "research-lock.json", "ar.json", "fr.json", "native-hooks.json", "some-data.json",
+        ]:
+            with self.subTest(path=path):
+                self.assertFalse(needs_rust(["README.md", path]))
 
     def test_launcher_checks_follow_the_crates_it_builds(self):
         for path in ["crates/horizon-client/src/game.rs", "launcher/links.json", "launcher/docs/a.md",
-                     "launcher/README.md", "website/src/index.html", "tools/pr_ready.py"]:
+                     "launcher/README.md", "website/src/index.html", "tools/pr_ready.py",
+                     "ar.json", "research-lock.json", "native-hooks.json"]:
             with self.subTest(path=path):
                 self.assertFalse(needs_launcher([path]))
         for path in ["launcher/src/main.rs", "launcher/Cargo.lock", "crates/horizon-port-pack/src/net.rs",
