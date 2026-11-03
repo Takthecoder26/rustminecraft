@@ -93,28 +93,7 @@ def launcher_rust(path):
     return rust_changes.needs_launcher([path])
 
 
-def touched_crates(paths, packages):
-    """Workspace packages to test for these paths ({name: directory}), or None for the whole workspace."""
-    if any(path in ROOT_RUST or path.startswith(".cargo/") for path in paths):
-        return None
-    crates = set()
-    for path in paths:
-        if is_doc(path):
-            continue
-        if path.startswith(MOD_API_INPUTS):
-            crates.update({"horizon-client", "horizon-client-render", "horizon-mod-api-gen"})
-            continue
-        if "horizon-client-lib" in packages and path.startswith("crates/horizon-client/"):
-            relative = path.removeprefix("crates/horizon-client/")
-            gameplay = relative in {"Cargo.toml", "build.rs", "windows-segment-heap.manifest",
-                                    "src/lib.rs", "src/main.rs", "src/entry.rs", "src/game.rs", "tests/launch_api.rs"} \
-                or relative.startswith("src/game/")
-            crates.add("horizon-client" if gameplay else "horizon-client-lib")
-            continue
-        owners = [name for name, directory in packages.items() if path.startswith(directory.rstrip("/") + "/")]
-        if owners:
-            crates.add(max(owners, key=lambda name: len(packages[name])))
-    return sorted(crates)
+touched_crates = rust_changes.touched_crates
 
 
 def area(path):
