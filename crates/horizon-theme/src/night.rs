@@ -74,7 +74,14 @@ pub struct Night {
 }
 
 pub const NIGHT: Night = Night {
-    sky: [0x0007_061a, 0x0014_0f38, 0x002a_1656, 0x005b_2a78, 0x00b0_477d, 0x00f0_8a5d],
+    sky: [
+        0x0007_061a,
+        0x0014_0f38,
+        0x002a_1656,
+        0x005b_2a78,
+        0x00b0_477d,
+        0x00f0_8a5d,
+    ],
     page: 0x000e_0b26,
     side: 0x000a_0820,
     card: 0x0015_112e,
@@ -98,7 +105,14 @@ pub const NIGHT: Night = Night {
 
 /// The light appearance: the same sky at dawn, pale blue to peach, with the night's violet.
 pub const DAWN: Night = Night {
-    sky: [0x00c9_d3f2, 0x00dc_d8f3, 0x00ea_d5ec, 0x00f5_d3d8, 0x00f9_d6bd, 0x00fb_e4c6],
+    sky: [
+        0x00c9_d3f2,
+        0x00dc_d8f3,
+        0x00ea_d5ec,
+        0x00f5_d3d8,
+        0x00f9_d6bd,
+        0x00fb_e4c6,
+    ],
     page: 0x00e9_e6f6,
     side: 0x00e1_ddf1,
     card: 0x00fd_fcff,

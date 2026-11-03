@@ -278,7 +278,14 @@ mod tests {
 
     #[test]
     fn oklab_round_trips() {
-        for c in [0x0000_0000, 0x00ff_ffff, 0x006b_4bff, 0x0014_111d, 0x0058_65f2, 0x00f8_9d62] {
+        for c in [
+            0x0000_0000,
+            0x00ff_ffff,
+            0x006b_4bff,
+            0x0014_111d,
+            0x0058_65f2,
+            0x00f8_9d62,
+        ] {
             assert!(close(from_oklab(oklab(c)), c), "{c:06x}");
         }
     }
