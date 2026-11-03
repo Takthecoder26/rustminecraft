@@ -2269,11 +2269,46 @@ fn strip_launcher_render_env(cmd: &mut Command) {
     }
 }
 
+/// Whether the game should play through X11: a Wayland session, with an X server to fall back
+/// to, whose driver is NVIDIA's.
+///
+/// winit's Wayland backend loses the whole connection when the window goes fullscreen under
+/// NVIDIA's driver: the game exits with `EventLoopError::ExitFailure(1)` and writes no crash
+/// report, while the same window fullscreens through XWayland. Starting the game without
+/// `WAYLAND_DISPLAY` is how winit is told to use X11, which it does when `DISPLAY` is set. HDR
+/// output needs Wayland's colour management, so every other driver keeps it.
+fn play_through_x11(wayland: bool, x11: bool, nvidia: bool) -> bool {
+    wayland && x11 && nvidia
+}
+
+/// [`play_through_x11`], applied to the game's command.
+fn play_through_x11_on(cmd: &mut Command, wayland: bool, x11: bool, nvidia: bool) {
+    if play_through_x11(wayland, x11, nvidia) {
+        cmd.env_remove("WAYLAND_DISPLAY");
+    }
+}
+
+/// Whether NVIDIA's driver is loaded: the module it installs is there (`/proc/driver/nvidia` and
+/// `/sys/module/nvidia` on Linux). Known before the game runs, so it is not always the adapter the
+/// game picks; a hybrid laptop's NVIDIA is loaded even when the integrated GPU renders, and playing
+/// through X11 there costs only HDR output.
+fn nvidia_driver_loaded() -> bool {
+    ["/proc/driver/nvidia/version", "/sys/module/nvidia"]
+        .iter()
+        .any(|path| Path::new(path).exists())
+}
+
 pub fn client_command(tag: &str) -> Command {
     let home = game_home();
     let _ = fs::create_dir_all(&home);
     let mut cmd = Command::new(client_program(tag));
     strip_launcher_render_env(&mut cmd);
+    play_through_x11_on(
+        &mut cmd,
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+        nvidia_driver_loaded(),
+    );
     cmd.current_dir(home).arg("--resources").arg(resources(tag));
     // How the game asks for a renewed session (`account session`) while it runs.
     if let Ok(exe) = std::env::current_exe() {
@@ -3895,6 +3930,31 @@ pub fn {f}("
         assert!(props.is_some_and(|v| v
             .to_string_lossy()
             .contains("application.name = \"Horizon\"")));
+    }
+
+    #[test]
+    fn an_nvidia_game_on_wayland_starts_on_x11() {
+        let mut cmd = Command::new("horizon-client");
+        play_through_x11_on(&mut cmd, true, true, true);
+        assert!(
+            cmd.get_envs().any(
+                |(key, value)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY") && value.is_none()
+            )
+        );
+        // No X server to play through, another driver, or a plain X11 session: the game keeps the
+        // session it would have had.
+        for (wayland, x11, nvidia) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let mut cmd = Command::new("horizon-client");
+            play_through_x11_on(&mut cmd, wayland, x11, nvidia);
+            assert!(
+                !cmd.get_envs()
+                    .any(|(key, _)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY"))
+            );
+        }
     }
 
     #[test]
