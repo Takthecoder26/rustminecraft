@@ -32,7 +32,9 @@ jobs:
   # playhorizon's checks runners (label playhorizon-ci); a fork's pull request never does (and the runners refuse it
   # themselves). There the build folder persists (CARGO_TARGET_DIR, outside the checkout), so the apt packages,
   # Python and the Rust cache steps are GitHub's only.
-  verify:
+  # Formatting is the cheapest check: fail the run here before clippy or the tests start. Each job below
+  # keeps the same runner routing and the same pull-request gating as the old verify job (fork safety).
+  fmt:
     runs-on: ${{ vars.SELF_HOSTED_CI == 'all' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "linux", "playhorizon-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
@@ -73,24 +75,81 @@ jobs:
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
           fi
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-      # Dependencies and the workspace's own build, saved from main's runs (pull requests read main's cache).
+          rustup toolchain install stable --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
         if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:
           shared-key: verify
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Check formatting and lint
+      - name: Check formatting
+        if: steps.rust.outputs.required != 'false'
+        run: cargo +stable fmt --all -- --check
+
+  clippy:
+    needs: fmt
+    runs-on: ${{ vars.SELF_HOSTED_CI == 'all' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "linux", "playhorizon-ci"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this pull request need Rust checks?
+        if: github.event_name == 'pull_request'
+        id: rust
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/ci/rust_changes.py "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain and the ALSA and udev headers the client links against
+        if: steps.rust.outputs.required != 'false'
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$HOSTED" = true ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+          fi
+          rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        with:
+          shared-key: verify
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check lint
         if: steps.rust.outputs.required != 'false'
         run: |
-          cargo +stable fmt --all -- --check
           cargo +stable clippy --workspace --all-targets -- -D warnings
           # The server build (released as horizon-engine): the game without sound or controllers.
           cargo +stable clippy -p horizon-client --all-targets --no-default-features -- -D warnings
-      # Libraries, binaries and integration tests, then doc tests: not the ~275 examples, which clippy above already
-      # type-checks and the parity job builds and runs (they were most of this step's build and link time).
-      # cargo test, not nextest: nextest's process per test reloads each binary's shared tables for every test, and on
-      # these 4-core runners it was no faster (#4978).
+
+  tests:
+    needs: fmt
+    runs-on: ${{ vars.SELF_HOSTED_CI == 'all' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "linux", "playhorizon-ci"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this pull request need Rust checks?
+        if: github.event_name == 'pull_request'
+        id: rust
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 tools/ci/rust_changes.py "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain and the ALSA and udev headers the client links against
+        if: steps.rust.outputs.required != 'false'
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$HOSTED" = true ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+          fi
+          rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
+        with:
+          shared-key: verify
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test Rust core and voxel kernel correctness
         if: steps.rust.outputs.required != 'false'
         run: |
@@ -100,6 +159,7 @@ jobs:
           # recompiling the workspace with a different dependency graph.
           cargo +stable test --workspace --lib --bins --tests mod_content::tests:: -- --ignored
           cargo +stable test --workspace --doc
+
   # The launcher is its own workspace (launcher/Cargo.toml), so verify's cargo runs never build it. A pull request that
   # changes it or a crate it builds is checked here, and so is every push to main: two pull requests can each pass
   # alone and break it together (#2059 and the registry ratings did, 2026-10-26).
