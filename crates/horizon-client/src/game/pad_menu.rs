@@ -1074,6 +1074,16 @@ impl Game<'_> {
         if !self.pad_in_menu() || self.key_focus_blocked() {
             return false;
         }
+        // Vanilla's `AbstractContainerScreen.keyPressed` hears the
+        // container's own close key (the inventory key) before the base
+        // `Screen.keyPressed` moves the focus: bound to Tab, it closes the
+        // open container instead of cycling the focus. The close itself
+        // happens on the mapped game key (`key_pressed`).
+        if matches!(self.screen, Screen::Inventory | Screen::Creative)
+            && self.settings.keys.container_inventory_key(key)
+        {
+            return false;
+        }
         let targets = self.key_targets();
         if targets.is_empty() {
             return false;

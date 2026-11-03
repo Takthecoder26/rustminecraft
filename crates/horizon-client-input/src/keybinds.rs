@@ -498,6 +498,14 @@ impl KeyBinds {
             .find(|m| self.get(m.0) == name)
             .and_then(|m| key_code(Self::default_of(m.0)))
     }
+    /// Whether the key is the one `key.inventory` is bound to now: the
+    /// open container's own close key. Vanilla hears it in
+    /// `AbstractContainerScreen.keyPressed` before the base
+    /// `Screen.keyPressed` moves the focus, so a key bound to Tab closes
+    /// the container instead of cycling the focus.
+    pub fn container_inventory_key(&self, key: KeyCode) -> bool {
+        key_name(key).is_some_and(|name| self.get("key.inventory") == name)
+    }
 }
 
 #[cfg(test)]
@@ -555,6 +563,18 @@ mod tests {
             keys.container_hotbar_key(KeyCode::KeyT),
             Some(KeyCode::Digit3)
         );
+    }
+
+    #[test]
+    fn container_inventory_key_follows_the_bound_key() {
+        let mut keys = KeyBinds::default();
+        // The default: the inventory key is E.
+        assert!(keys.container_inventory_key(KeyCode::KeyE));
+        assert!(!keys.container_inventory_key(KeyCode::Tab));
+        // The report's key: inventory on Tab, so Tab is the close key.
+        keys.set("key.inventory", "key.keyboard.tab");
+        assert!(keys.container_inventory_key(KeyCode::Tab));
+        assert!(!keys.container_inventory_key(KeyCode::KeyE));
     }
 
     #[test]
