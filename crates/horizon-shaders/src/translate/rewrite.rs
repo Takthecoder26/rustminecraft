@@ -419,8 +419,8 @@ impl Stage<'_> {
                 "gl_FogFragCoord" => Some("hz_FogFragCoord".into()),
                 "gl_Fog" => Some("hz_Fog".into()),
                 // Before the compatibility inputs, of which `gl_Vertex` is a prefix.
-                "gl_VertexID" => Some("gl_VertexIndex".into()),
-                "gl_InstanceID" => Some("gl_InstanceIndex".into()),
+                "gl_VertexID" => Some("int(gl_VertexIndex)".into()),
+                "gl_InstanceID" => Some("int(gl_InstanceIndex)".into()),
                 "gl_VertexIndex" | "gl_InstanceIndex" => None,
                 _ if UNIFORM_STATE.iter().any(|b| t.starts_with(b)) => {
                     Some(format!("hz_{}", &t[3..]))
