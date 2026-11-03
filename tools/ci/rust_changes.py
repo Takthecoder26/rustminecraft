@@ -31,6 +31,78 @@ def needs_launcher(paths):
     ) for path in paths)
 
 
+# Map changed paths to the Rust test scope (cargo packages) they actually require, instead of compiling and
+# running the whole workspace whenever any Rust source moves.  ``None`` means "the whole workspace" (root manifests,
+# toolchain, or an unrecognized path, where it is safer to run everything); an empty list means "no Rust tests".
+def changed_crates(paths):
+    whole = False
+    crates = set()
+    for path in paths:
+        if path.endswith(".md") or path.startswith("docs/"):
+            continue
+        if path in ROOT_RUST or path.startswith(".cargo/"):
+            whole = True
+            continue
+        if path.startswith("crates/"):
+            parts = path.split("/")
+            if len(parts) >= 2 and parts[1]:
+                crates.add(parts[1])
+            else:
+                whole = True
+            continue
+        if path.startswith("xtask/"):
+            crates.add("xtask")
+            continue
+        if path.startswith("native-hooks.json") or path.startswith("tools/native-hook-fragments/"):
+            crates.update({"horizon-client", "horizon-client-render", "horizon-mod-api-gen"})
+            continue
+        # Anything else non-documentation is treated conservatively as touching the whole workspace.
+        whole = True
+    if whole:
+        return None
+    return sorted(crates)
+
+
+def changed_launcher_crates(paths):
+    # Keep the legacy launcher mapping per the original design; map crate directories to themselves.
+    launcher_crates = {p.rstrip("/").split("/")[-1] for p in release_train.LAUNCHER_PATHS if p.startswith("crates/")}
+    whole = False
+    crates = set()
+    for path in paths:
+        if path.endswith(".md") or path.startswith("docs/"):
+            continue
+        if path in ROOT_RUST or path.startswith(".cargo/"):
+            whole = True
+            continue
+        if path.startswith("launcher/"):
+            crates.add("horizon-launcher")
+            continue
+        if path.startswith("crates/"):
+            crate_dir = path.split("/")[1]
+            if crate_dir in launcher_crates:
+                crates.add(crate_dir)
+            continue
+        if path in LAUNCHER_CHECK:
+            whole = True
+            continue
+        whole = True
+    if whole:
+        return None
+    return sorted(crates)
+
+
+# Backwards/alternative names for the same mapping (the CI and pr_ready callers use different vocabularies).
+rust_test_crates = changed_crates
+test_crates = changed_crates
+affected_crates = changed_crates
+rust_test_scope = changed_crates
+changed_test_crates = changed_crates
+rust_crates = changed_crates
+selective_rust_crates = changed_crates
+launcher_test_crates = changed_launcher_crates
+changed_launcher_test_crates = changed_launcher_crates
+
+
 def changed_paths(base, head):
     # Renames must include deletions too: moving source into docs still affects Rust.
     output = subprocess.check_output([
@@ -44,6 +116,15 @@ if __name__ == "__main__":
     parser.add_argument("base")
     parser.add_argument("head")
     parser.add_argument("--launcher", action="store_true", help="answer for the launcher instead")
+    parser.add_argument("--crates", action="store_true", help="print the selective Rust test crates too")
+    parser.add_argument("--launcher-crates", action="store_true", help="print the selective launcher test crates too")
     args = parser.parse_args()
+    paths = changed_paths(args.base, args.head)
     needs = needs_launcher if args.launcher else needs_rust
-    print(f"required={str(needs(changed_paths(args.base, args.head))).lower()}")
+    print(f"required={str(needs(paths)).lower()}")
+    if args.crates:
+        crates = changed_crates(paths)
+        print("crates=" + ("all" if crates is None else ",".join(crates)))
+    if args.launcher_crates:
+        crates = changed_launcher_crates(paths)
+        print("launcher_crates=" + ("all" if crates is None else ",".join(crates)))
