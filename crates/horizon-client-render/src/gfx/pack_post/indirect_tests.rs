@@ -153,7 +153,7 @@ impl Fixture {
 
     fn build(&self, post: Post) -> PackPost {
         let lightmap = self.texture([1, 1], T::Rgba8Unorm);
-        let post = PackPost::new(
+        PackPost::new(
             &self.device,
             &self.queue,
             &self.adapter,
@@ -170,8 +170,7 @@ impl Fixture {
                 weather: false,
                 hand: false,
             },
-        );
-        post
+        )
     }
 
     fn render(&self, post: &mut PackPost, size: [u32; 2]) -> Vec<[u8; 4]> {
