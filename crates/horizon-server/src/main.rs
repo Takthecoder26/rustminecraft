@@ -69,9 +69,9 @@ Usage: horizon-server [--dir DIR] <command>
               Zip the world and the settings into backups/ (a running server saves first and stays up)
   backups [--json]
               List the backups
-  restore BACKUP [--yes]
-              Put a backup's world in place (the current one is kept in backups/); a running
-              server restarts with it
+  restore BACKUP [--dimension ID] [--yes]
+              Put a backup's world, or one dimension, in place (what it replaces is kept in
+              backups/); a running server restarts with it
   service install|uninstall|print [--system]
               Start the server at boot or login: a systemd unit on Linux (--system: for every user,
               with sudo), a launchd agent on macOS, a task at logon on Windows
@@ -137,10 +137,7 @@ fn main() -> ExitCode {
         Some("backup") => cli::backup(&dir, args.get(1).map(String::as_str)),
         Some("backups") => cli::backups(&dir, args[1..].iter().any(|a| a == "--json")),
         Some("service") => service::command(&dir, &args[1..]),
-        Some("restore") => match args.get(1) {
-            Some(name) => cli::restore(&dir, name, args[2..].iter().any(|a| a == "--yes")),
-            None => Err("restore needs a backup (`horizon-server backups` lists them)".into()),
-        },
+        Some("restore") => restore(&dir, &args[1..]),
         Some("import") => import(&dir, &args[1..]),
         Some("config") => settings::command(&dir, &args[1..]),
         Some("update") => update::command(&dir, &args[1..]),
@@ -180,6 +177,29 @@ fn logs(dir: &std::path::Path, args: &[String]) -> Result<(), String> {
         }
     }
     cli::logs(dir, follow, count)
+}
+
+fn restore(dir: &std::path::Path, args: &[String]) -> Result<(), String> {
+    let Some(name) = args.first() else {
+        return Err("restore needs a backup (`horizon-server backups` lists them)".into());
+    };
+    let mut dimension = None;
+    let mut yes = false;
+    let mut it = args[1..].iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dimension" => {
+                dimension = Some(
+                    it.next()
+                        .map(String::as_str)
+                        .ok_or("--dimension needs a resource location")?,
+                );
+            }
+            "--yes" | "-y" => yes = true,
+            other => return Err(format!("restore: unknown option {other}")),
+        }
+    }
+    cli::restore(dir, name, dimension, yes)
 }
 
 fn init_answers(args: &[String]) -> Result<init::Answers, String> {

@@ -224,18 +224,16 @@ pub fn run(dir: &Path) -> Result<(), String> {
             Exit::NotUp => continue,
             Exit::Restart => {
                 let restore = shared.restore.lock().unwrap().take();
-                if let Some(name) = restore {
-                    match backup::restore(dir, &config, &name) {
+                if let Some(restore) = restore {
+                    let what = restore.what();
+                    match restore.apply(dir, &config) {
                         Ok(Some(old)) => note(
                             &shared,
                             "INFO",
-                            &format!(
-                                "Restored {name}; the world it replaced is in {}",
-                                old.display()
-                            ),
+                            &format!("Restored {what}; what it replaced is in {}", old.display()),
                         ),
-                        Ok(None) => note(&shared, "INFO", &format!("Restored {name}")),
-                        Err(e) => note(&shared, "ERROR", &format!("Could not restore {name}: {e}")),
+                        Ok(None) => note(&shared, "INFO", &format!("Restored {what}")),
+                        Err(e) => note(&shared, "ERROR", &format!("Could not restore {what}: {e}")),
                     }
                 }
                 let pending = shared.update.lock().unwrap().pending.take();

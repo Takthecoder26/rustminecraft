@@ -514,16 +514,24 @@ fn size(bytes: u64) -> String {
     }
 }
 
-/// `restore NAME [--yes]`: the backup's world in place of the current one (moved aside, not deleted). A
-/// running server restarts with it.
-pub fn restore(dir: &Path, name: &str, yes: bool) -> Result<(), String> {
+/// `restore NAME [--dimension ID] [--yes]`: the backup's world, or one dimension, in place of the
+/// current one (moved aside, not deleted). A running server restarts with it.
+pub fn restore(dir: &Path, name: &str, dimension: Option<&str>, yes: bool) -> Result<(), String> {
     let name = backup::find(dir, name)?;
+    if let Some(dimension) = dimension {
+        backup::validate_dimension(dimension)?;
+    }
+    let restore = backup::Restore {
+        name: name.clone(),
+        dimension: dimension.map(str::to_owned),
+    };
+    let what = restore.what();
     if !yes {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            return Err("restore replaces the world: pass --yes to confirm".into());
+            return Err("restore replaces world data: pass --yes to confirm".into());
         }
         print!(
-            "Replace the world with {name}? The current world is kept in {}/. [y/N] ",
+            "Restore {what}? What it replaces is kept in {}/. [y/N] ",
             backup::DIR
         );
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -535,23 +543,24 @@ pub fn restore(dir: &Path, name: &str, yes: bool) -> Result<(), String> {
         }
     }
     if let Some(client) = Client::open(dir)? {
+        let mut body = json!({ "name": name });
+        if let Some(dimension) = dimension {
+            body["dimension"] = json!(dimension);
+        }
         let before = client.call("GET", "/api/v1/status", None)?["engine_pid"].as_u64();
-        client.call("POST", "/api/v1/restore", Some(&json!({ "name": name })))?;
-        print!("Restoring {name}: restarting the game with it");
+        client.call("POST", "/api/v1/restore", Some(&body))?;
+        print!("Restoring {what}: restarting the game with it");
         wait_running(&client, before)?;
         println!(
-            "\nThe game is running on the restored world; `horizon-server logs` has the details."
+            "\nThe game is running with the restored data; `horizon-server logs` has the details."
         );
         return Ok(());
     }
     let _lock = supervisor::lock(dir)?;
     let config = crate::config::Config::load(dir)?;
-    match backup::restore(dir, &config, &name)? {
-        Some(old) => println!(
-            "Restored {name}; the world it replaced is in {}",
-            old.display()
-        ),
-        None => println!("Restored {name}"),
+    match restore.apply(dir, &config)? {
+        Some(old) => println!("Restored {what}; what it replaced is in {}", old.display()),
+        None => println!("Restored {what}"),
     }
     Ok(())
 }

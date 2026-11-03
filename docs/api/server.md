@@ -64,6 +64,7 @@ curl -sN -H "Authorization: Bearer $token" -H "Accept: text/event-stream" "http:
 curl -s -H "Authorization: Bearer $token" -X PATCH -d '{"changes": {"world.difficulty": "hard"}}' "http://$address/api/v1/config"
 # {"applied":["world.difficulty"],"restart":[],"running":true,"saved":["world.difficulty"]}
 curl -s -H "Authorization: Bearer $token" -o world.zip "http://$address/api/v1/backups/download?name=2026-10-31T12-00-00Z-manual.zip"
+curl -s -H "Authorization: Bearer $token" -d '{"name":"manual","dimension":"minecraft:the_end"}' "http://$address/api/v1/restore"
 ```
 
 ## Stability
@@ -76,7 +77,6 @@ addition; a change to one starts `/api/v2`, served beside `/api/v1`.
 - **Players**: positions in `players`; editing the lists while the game is stopped through the API (the CLI's
   `op`, `deop` and `whitelist` already do).
 - **Metrics**: entities and per-dimension counts in the Prometheus text.
-- **Backups**: restore a single dimension.
 - **Mods on a dedicated server**: list, turn on and off, and their settings, once native mods can be built for the
   server ([mods.md](../mods.md), [native-mods.md](../native-mods.md#multiplayer)).
 - **Vanilla's management protocol**: `serversettings/*` (the live settings not yet done) and the world
@@ -92,6 +92,7 @@ addition; a change to one starts `/api/v2`, served beside `/api/v1`.
 - `/api/v1` additions: `players`, `players/{kick,ban,pardon,ban-ip,pardon-ip,op,deop}`, `whitelist`,
   `whitelist/{add,remove}`, `metrics/prometheus`, `GET`/`PATCH config`, `DELETE backups`, `GET backups/download`;
   `server.toml` gets `[api]` (`bind`, `token`, `allow_public`); `GET events` (server-sent events, or JSON).
+- Backup restore accepts an optional dimension resource location and replaces only that dimension's folder.
 - RCON (`enable-rcon`, `rcon.port`, `rcon.password`): vanilla's remote console, served by the supervisor.
 - GS4 query (`enable-query`, `query.port`): vanilla's UDP query (handshake, basic and full stat), served by the
   supervisor.

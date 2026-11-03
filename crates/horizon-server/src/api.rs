@@ -129,9 +129,9 @@ pub const ROUTES: [Route; 28] = [
     Route {
         method: "POST",
         path: "/api/v1/restore",
-        takes: "`{\"name\": \"<backup>\"}`",
-        answers: "`{\"name\": \"<backup>\"}`",
-        what: "Restart the game with that backup's world (the current one is kept in backups/)",
+        takes: "`{\"name\": \"<backup>\", \"dimension\": \"<resource location>\"}` (`dimension` optional)",
+        answers: "`{\"name\": \"<backup>\", \"dimension\": \"<resource location>\"}` (`dimension` only when requested)",
+        what: "Restart the game with that backup's world or one dimension (what it replaces is kept in backups/)",
     },
     Route {
         method: "POST",
@@ -327,8 +327,8 @@ pub struct Shared {
     pub log: Mutex<Log>,
     pub stop: AtomicBool,
     pub restart: AtomicBool,
-    /// The backup to put in place before the game starts again (`restore`).
-    pub restore: Mutex<Option<String>>,
+    /// The backup (and optional dimension) to put in place before the game starts again (`restore`).
+    pub restore: Mutex<Option<backup::Restore>>,
     /// Held while a backup is written: one at a time.
     pub backing_up: Mutex<()>,
     pub started: Instant,
@@ -691,11 +691,40 @@ pub fn route(shared: &Arc<Shared>, request: &Request) -> Response {
         }
         ("POST", "/api/v1/restore") => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let dimension = match body.get("dimension") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(dimension)) => {
+                    if let Err(e) = backup::validate_dimension(dimension) {
+                        return Response::error(400, &e);
+                    }
+                    Some(dimension.clone())
+                }
+                Some(_) => return Response::error(400, "dimension must be a string"),
+            };
             match backup::find(&shared.dir, body["name"].as_str().unwrap_or_default()) {
                 Ok(name) => {
-                    *shared.restore.lock().unwrap() = Some(name.clone());
+                    if let Some(dimension) = &dimension {
+                        let config = match Config::load(&shared.dir) {
+                            Ok(config) => config,
+                            Err(e) => return Response::error(409, &e),
+                        };
+                        if let Err(e) =
+                            backup::check_dimension(&shared.dir, &config, &name, dimension)
+                        {
+                            return Response::error(404, &e);
+                        }
+                    }
+                    *shared.restore.lock().unwrap() = Some(backup::Restore {
+                        name: name.clone(),
+                        dimension: dimension.clone(),
+                    });
                     shared.restart.store(true, Ordering::SeqCst);
-                    Response::json(200, &json!({ "name": name }))
+                    match dimension {
+                        Some(dimension) => {
+                            Response::json(200, &json!({ "name": name, "dimension": dimension }))
+                        }
+                        None => Response::json(200, &json!({ "name": name })),
+                    }
                 }
                 Err(e) => Response::error(404, &e),
             }

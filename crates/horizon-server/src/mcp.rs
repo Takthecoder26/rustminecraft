@@ -161,13 +161,19 @@ const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "restore",
-        what: "Restart the server with a backup's world (the current one is kept in backups/)",
+        what: "Restart the server with a backup's world or one dimension (what it replaces is kept in backups/)",
         args: &[
             (
                 "name",
                 "string",
                 "The backup: file name, unique prefix or label",
                 true,
+            ),
+            (
+                "dimension",
+                "string",
+                "Only restore this dimension resource location (optional)",
+                false,
             ),
             CONFIRM,
         ],
@@ -333,11 +339,11 @@ fn request(name: &str, args: &Value) -> Result<(&'static str, String, Option<Val
         }
         "restore" => {
             confirmed()?;
-            (
-                "POST",
-                "/api/v1/restore".into(),
-                Some(json!({ "name": need("name")? })),
-            )
+            let mut body = json!({ "name": need("name")? });
+            if let Some(dimension) = args["dimension"].as_str() {
+                body["dimension"] = json!(dimension);
+            }
+            ("POST", "/api/v1/restore".into(), Some(body))
         }
         "get_config" => ("GET", "/api/v1/config".into(), None),
         "set_config" => (
@@ -460,6 +466,20 @@ mod tests {
         let (_, path, _) =
             request("events", &json!({ "since": 41, "types": "chat,death" })).unwrap();
         assert_eq!(path, "/api/v1/events?since=41&types=chat,death");
+        let (method, path, body) = request(
+            "restore",
+            &json!({
+                "name": "manual",
+                "dimension": "minecraft:the_end",
+                "confirm": true
+            }),
+        )
+        .unwrap();
+        assert_eq!((method, path.as_str()), ("POST", "/api/v1/restore"));
+        assert_eq!(
+            body,
+            Some(json!({ "name": "manual", "dimension": "minecraft:the_end" }))
+        );
         // What can't be undone needs confirm: true; nothing reaches the query unchecked.
         assert!(request("stop", &json!({})).is_err());
         assert!(request("restore", &json!({ "name": "x", "confirm": false })).is_err());

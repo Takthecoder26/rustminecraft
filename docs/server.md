@@ -401,7 +401,10 @@ runtime or new dependency. Server-sent events can replace the polling later if a
 - **Restore.** `restore NAME` takes a file name, a unique prefix, or the name given to `backup` (the newest
   with it). The server stops. The current world is moved to `backups/replaced-<time>/` (never deleted), the
   backup is unpacked into a temporary folder and checked (`level.dat` is there), then moved in, and the server
-  starts again if it was running. One command, or one click with confirmation in the panel.
+  starts again if it was running. `restore NAME --dimension minecraft:the_end` instead replaces only that
+  dimension's `dimensions/<namespace>/<path>` folder and leaves the world metadata, players and every other
+  dimension untouched. Custom dimension resource locations work too. One command, or one click with
+  confirmation in the panel.
 - **Crash restart.** If the engine exits without being asked to stop, the supervisor keeps the last 200 log
   lines and the engine's crash report (`crash-reports/`), restarts it after 5 s, and doubles the wait up to
   5 minutes. It gives up after 5 crashes in 10 minutes, so it doesn't loop on a broken world, and shows the
@@ -444,7 +447,7 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   `.horizon/api.json`. It's plain HTTP/1.1 on `std::net` (`crates/horizon-server/src/http.rs`), no runtime.
   - built (PR 2b, 2c): `GET status` (phase, uptime, crashes, RSS, CPU, and the engine's TPS, MSPT
     average/P50/P95/P99, players, chunks), `GET logs?since=`, `POST command {line}` (returns the output),
-    `POST stop`, `POST restart`, `GET backups`, `POST backups {name}`, `POST restore {name}`, `POST update
+    `POST stop`, `POST restart`, `GET backups`, `POST backups {name}`, `POST restore {name, dimension?}`, `POST update
     {tag, timeout}` (without a tag: the newest release, downloaded first; `status` has an `update` object
     that says how it went), `GET metrics?since=`;
   - built (server-admin): `GET players` (online with address, ping and op level; ops, whitelist, bans, IP
@@ -465,7 +468,8 @@ runtime or new dependency. Server-sent events can replace the polling later if a
 - **MCP** (built, `mcp.rs`). `horizon-server mcp` is an MCP server on stdio, for Claude Code or any MCP client
   run as the same OS user. It reads the token itself, and its tools map one to one onto the API: `status`,
   `players`, `run_command`, `logs`, `events`, `kick`, `ban`, `pardon`, `ban_ip`, `pardon_ip`, `op`, `deop`,
-  `whitelist`, `list_backups`, `backup`, `delete_backup` and `restore` (both need `confirm: true`), `get_config`,
+  `whitelist`, `list_backups`, `backup`, `delete_backup` and `restore` (both need `confirm: true`; `restore`
+  optionally takes a dimension), `get_config`,
   `set_config`, `start`, `restart` and `stop` (needs `confirm: true`). Tools that send someone away or can't be
   undone carry MCP's `destructiveHint`. It's the same idea as the game's `horizon-ctl`
   (docs/agent-control.md): an AI can run and diagnose a server, and every action it takes shows in the log.
