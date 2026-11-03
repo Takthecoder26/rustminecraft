@@ -3914,7 +3914,7 @@ impl PackPost {
         // Clear their main side once now; later shadow geometry must retain those writes.
         if let Some(shadow) = self.shadow_targets.as_mut().filter(|s| s.storage != 0) {
             shadow.begin_frame();
-            shadow.clear_rest(encoder);
+            shadow.clear_colors(encoder);
         }
         // Images start the frame cleared, before the shadow pass writes them.
         if let Some(dump) = &mut self.dump {

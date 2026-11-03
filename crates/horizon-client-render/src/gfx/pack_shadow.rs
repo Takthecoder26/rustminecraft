@@ -175,7 +175,9 @@ impl ShadowTargets {
         }
         let mut colors = [load(); 2];
         for n in writes.filter(|&n| n < 2) {
-            if let Some(c) = self.clears[n] {
+            if self.cleared & 1 << n == 0
+                && let Some(c) = self.clears[n]
+            {
                 colors[n] = clear(c);
                 self.cleared |= 1 << n;
             }
@@ -191,6 +193,16 @@ impl ShadowTargets {
     /// cleared shadowcolor buffers the first one did not write.
     pub fn clear_rest(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let depth = std::mem::take(&mut self.fresh);
+        self.clear_pending(encoder, depth);
+    }
+
+    /// Image access in Begin needs current-frame colors, while the depth clear stays at the
+    /// beginning of the shadow raster pass. Already-cleared colors are subsequently loaded.
+    pub fn clear_colors(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.clear_pending(encoder, false);
+    }
+
+    fn clear_pending(&mut self, encoder: &mut wgpu::CommandEncoder, depth: bool) {
         let cleared = std::mem::replace(&mut self.cleared, 0b11);
         let attachments: Vec<_> = (0..2)
             .filter(|n| cleared & 1 << n == 0)

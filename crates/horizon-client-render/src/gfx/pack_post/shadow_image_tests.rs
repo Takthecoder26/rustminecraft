@@ -275,6 +275,89 @@ fn shadow_images_clear_before_begin_and_preserve_uncleared_history() {
     }
 }
 
+#[test]
+#[ignore = "requires a host GPU; run with --ignored --nocapture"]
+fn shadow_image_early_color_clear_keeps_depth_until_shadow_draw() {
+    let gpu = Fixture::new().expect("GPU required");
+    let config = horizon_shaders::Shadow {
+        resolution: 1,
+        ..Default::default()
+    };
+    let mut targets = super::super::pack_shadow::ShadowTargets::new(
+        &gpu.device,
+        &config,
+        [T::Rgba8Unorm; 2],
+        1,
+        1,
+        0,
+        false,
+    );
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth.1,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(0.25),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    targets.begin_frame();
+    targets.clear_colors(&mut encoder);
+    let read = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 8,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &targets.depth.0,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &read,
+            layout: Default::default(),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    encoder.copy_texture_to_buffer(
+        targets.color(0, false).unwrap().texture().as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &read,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 4,
+                ..Default::default()
+            },
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    read.slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    let values = read.slice(..).get_mapped_range().unwrap();
+    assert_eq!(f32::from_le_bytes(values[..4].try_into().unwrap()), 0.25);
+    assert_eq!(&values[4..], &[255; 4]);
+    let (depth, colors) = targets.clear_ops(std::iter::once(0));
+    assert!(matches!(depth.load, wgpu::LoadOp::Clear(1.0)));
+    assert!(matches!(colors[0].load, wgpu::LoadOp::Load));
+}
+
 struct Fixture {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
