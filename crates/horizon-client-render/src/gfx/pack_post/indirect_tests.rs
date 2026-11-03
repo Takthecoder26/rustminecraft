@@ -117,8 +117,11 @@ impl Fixture {
         let instance = wgpu::Instance::new(descriptor);
         let adapter =
             pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
+        // Prove the guard uses device specialization, rather than its portable WGSL default.
+        let mut limits = adapter.limits();
+        limits.max_compute_workgroups_per_dimension = 4;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_limits: adapter.limits(),
+            required_limits: limits,
             ..Default::default()
         }))
         .expect("GPU device for destination contract");

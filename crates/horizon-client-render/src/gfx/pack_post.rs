@@ -340,21 +340,20 @@ impl Indirect {
         // here, without CPU readback or relying on instance validation flags.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Pack indirect limit guard"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "const LIMIT: u32 = {}u;\n{}",
-                    device.limits().max_compute_workgroups_per_dimension,
-                    include_str!("pack_indirect.wgsl")
-                )
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("pack_indirect.wgsl").into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Pack indirect limit guard"),
             layout: None,
             module: &shader,
             entry_point: Some("main"),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[(
+                    "LIMIT",
+                    f64::from(device.limits().max_compute_workgroups_per_dimension),
+                )],
+                ..Default::default()
+            },
             cache: None,
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
