@@ -1529,7 +1529,7 @@ impl MotionWorld<'_, '_, '_> {
             }
         }
         let mut visited = std::collections::HashSet::new();
-        let mut entered = Vec::new();
+        let mut entered = Vec::with_capacity(16);
         for movement in &movements {
             let mut from = movement.from;
             let delta = movement.to.subtract(movement.from);
@@ -1629,7 +1629,7 @@ impl MotionWorld<'_, '_, '_> {
         // crosses as precise.
         let far = 0.999_990_000_000_252_6_f64;
         let moved_far = from.distance_squared(to) > far * far;
-        let mut hits = Vec::new();
+        let mut hits = Vec::with_capacity(16);
         let mut iterations = 0;
         let alive = !self.player.health.dead_or_dying();
         horizon_core::geometry::sweep_intersected_blocks(

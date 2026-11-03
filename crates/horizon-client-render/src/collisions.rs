@@ -137,6 +137,8 @@ impl<W: EntityMovementWorld<Error = io::Error>> EntityMovementWorld for EntityCo
         bounds: Aabb,
     ) -> io::Result<Vec<VoxelShape>> {
         let mut shapes = self.blocks.entity_collisions(entity, bounds)?;
+        // Entity boxes land one shape each; reserve up front to avoid reallocations.
+        shapes.reserve(self.entities.len());
         for &aabb in self.entities {
             // EntityGetter.getEntityCollisions expands its entity query by 1e-7.
             if aabb.intersects(bounds.inflate(Vec3::new(1.0e-7, 1.0e-7, 1.0e-7))) {
