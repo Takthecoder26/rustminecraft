@@ -118,7 +118,8 @@ use std::{collections::HashMap, fs, path::Path, sync::Arc};
 pub struct Polygon {
     pub normal: [f32; 3],
     pub vertices: [[f32; 5]; 4],
-    /// The model's render type culls back faces (`entityCutoutCull`: the bat).
+    /// The model's render type culls back faces (`entityCutoutCull`: the bat,
+    /// the baby turtle).
     pub cull_back: bool,
 }
 impl Polygon {
@@ -253,7 +254,7 @@ impl Part {
         for (i, x) in pose.iter().enumerate().take(9) {
             p[i] = *x;
         }
-        let polygons = v["polygons"]
+        let polygons: Vec<Polygon> = v["polygons"]
             .as_array()
             .into_iter()
             .flatten()
@@ -430,6 +431,12 @@ pub(crate) fn exact_attributes(bytes: &[u8]) -> HashMap<String, HashMap<String, 
         })
         .collect()
 }
+
+/// The models that draw with `RenderTypes::entityCutoutCull`.
+fn culls_back_faces(key: &str) -> bool {
+    matches!(key, "minecraft:bat#main" | "minecraft:turtle_baby#main")
+}
+
 pub struct MobTypes {
     pub types: HashMap<String, MobType>,
 }
@@ -490,9 +497,13 @@ impl MobTypes {
                 for prefix in def.layer_prefixes() {
                     let start = format!("minecraft:{prefix}#");
                     for (k, v) in all.iter().filter(|(k, _)| k.starts_with(&start)) {
+                        let mut part = Part::parse("root", v);
+                        if culls_back_faces(k) {
+                            part.set_cull_back();
+                        }
                         layers.insert(
                             k.trim_start_matches("minecraft:").to_owned(),
-                            Arc::new(Part::parse("root", v)),
+                            Arc::new(part),
                         );
                     }
                 }
@@ -536,8 +547,7 @@ impl MobTypes {
                         |model| {
                             Arc::new({
                                 let mut part = Part::parse("root", model);
-                                // BatModel: `RenderTypes::entityCutoutCull`.
-                                if def.name == "bat" {
+                                if culls_back_faces(&model_key) {
                                     part.set_cull_back();
                                 }
                                 part
@@ -2782,6 +2792,11 @@ impl Mob {
                 | Species::Fox
                 | Species::Panda
         );
+        // Salmon.defineSynchedData: DATA_TYPE starts at Variant.DEFAULT (MEDIUM,
+        // id 1), so a salmon finalizeSpawn never sized keeps the type's box.
+        if mob.species() == Species::Salmon {
+            mob.extra.variant = 1;
+        }
         // The PathNavigation constructor: the base follow range.
         mob.ai.nav.max_visited_nodes = (mob.kind.follow_range * 16.0).floor() as i32;
         ai::register(&mut mob);
