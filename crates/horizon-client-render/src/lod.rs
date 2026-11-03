@@ -1909,7 +1909,7 @@ impl Lod {
     }
     fn apply_detail(&mut self, (cx, cz): (i32, i32), columns: &ReducedColumns) {
         self.apply_fine((cx, cz), &columns.columns);
-        let mut modified = Vec::new();
+        let mut modified = Vec::with_capacity(4);
         // A single generated chunk cannot describe a larger cell's area
         // (strides over 16 blocks, levels over 4); at each level up to that,
         // only the tile holding the chunk overlaps it.

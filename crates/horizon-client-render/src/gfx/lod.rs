@@ -34,6 +34,7 @@ impl Pending {
         removed: Vec<TileKey>,
         cutout: Option<FxHashSet<(i32, i32)>>,
     ) {
+        self.order.reserve(meshes.len());
         for (key, mesh) in meshes {
             self.removed.remove(&key);
             if self.meshes.insert(key, mesh).is_none() {
