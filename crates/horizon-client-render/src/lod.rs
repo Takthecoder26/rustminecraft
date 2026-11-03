@@ -1094,8 +1094,7 @@ impl Lod {
             }
             // Whether the store kept a sampled tile with its detail applied.
             let detailed = |store: &Option<Arc<store::FarStore>>, key: TileKey| {
-                key.level <= DETAIL_LEVEL
-                    && store.as_ref().is_some_and(|store| store.detailed(key))
+                key.level <= DETAIL_LEVEL && store.as_ref().is_some_and(|store| store.detailed(key))
             };
             let sample_store = store.clone();
             handle = Some(
@@ -1772,8 +1771,8 @@ impl Lod {
             };
             // The same columns again (a chunk the store already gave the
             // tile, or the finest tile `apply_fine` just set) remesh nothing.
-            let same = (z0..z1)
-                .all(|z| (x0..x1).all(|x| samples[(z * 16 + x) as usize] == *detail(x, z)));
+            let same =
+                (z0..z1).all(|z| (x0..x1).all(|x| samples[(z * 16 + x) as usize] == *detail(x, z)));
             let mask = self.detail_masks.entry(key).or_default();
             let was_complete = *mask == [u64::MAX; 4];
             for z in z0..z1 {
@@ -3700,9 +3699,7 @@ mod tests {
             .plan
             .nodes
             .iter()
-            .filter(|key| {
-                !lod.plan.split.contains(key) || !lod.plan.nodes.contains(&key.parent())
-            })
+            .filter(|key| !lod.plan.split.contains(key) || !lod.plan.nodes.contains(&key.parent()))
             .count();
         assert_eq!(
             keys.len(),
