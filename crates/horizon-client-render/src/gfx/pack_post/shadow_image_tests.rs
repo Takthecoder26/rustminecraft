@@ -286,7 +286,7 @@ fn shadow_image_early_color_clear_keeps_depth_until_shadow_draw() {
     let mut targets = super::super::pack_shadow::ShadowTargets::new(
         &gpu.device,
         &config,
-        [T::Rgba8Unorm; 2],
+        [T::Rgba8Unorm; horizon_shaders::SHADOW_COLORS],
         super::super::pack_shadow::Usage {
             colors: 1,
             storage: 1,
@@ -392,6 +392,93 @@ fn shadow_image_only_fragment_pass_uses_shadow_resolution_sink() {
                 .all(|(a, b)| a.abs_diff(b) <= 1)
         }));
     }
+}
+
+#[test]
+#[ignore = "requires a host GPU; run with --ignored --nocapture"]
+fn shadow_image_early_clear_preserves_higher_sampler_history() {
+    let gpu = Fixture::new().expect("GPU required");
+    let mut config = horizon_shaders::Shadow {
+        resolution: 1,
+        ..Default::default()
+    };
+    config.colors[5].clear = true;
+    config.colors[5].clear_color = Some([1.0; 4]);
+    let mut targets = super::super::pack_shadow::ShadowTargets::new(
+        &gpu.device,
+        &config,
+        [T::Rgba8Unorm; horizon_shaders::SHADOW_COLORS],
+        super::super::pack_shadow::Usage {
+            colors: 1 | (1 << 5),
+            storage: 1,
+            // Give the sampler-only buffer COPY_SRC for this readback, not image access.
+            copied: 1 << 5,
+            ..Default::default()
+        },
+    );
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: targets.color(5, false).unwrap(),
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    targets.begin_frame();
+    targets.clear_colors(&mut encoder);
+    let read = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Original shadow sampler history control"),
+        size: 8,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    for (offset, finish_shadow) in [(0, false), (4, true)] {
+        if finish_shadow {
+            targets.clear_rest(&mut encoder);
+        }
+        encoder.copy_texture_to_buffer(
+            targets.color(5, false).unwrap().texture().as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset,
+                    ..Default::default()
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    gpu.queue.submit([encoder.finish()]);
+    read.slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    let values = read.slice(..).get_mapped_range().unwrap();
+    assert_eq!(
+        &values[..4],
+        &[0, 255, 0, 255],
+        "Begin retains higher sampler history"
+    );
+    assert_eq!(
+        &values[4..],
+        &[255; 4],
+        "normal shadow clear still reaches that buffer"
+    );
 }
 
 struct Fixture {

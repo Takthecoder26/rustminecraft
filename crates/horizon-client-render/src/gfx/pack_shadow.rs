@@ -1,7 +1,9 @@
 //! A shader pack's shadow buffers (spec 6.3): the shadow map's depth (`shadowtex0`, and
-//! `shadowtex1` without translucent geometry), and the colour buffers `shadowcolor0/1`, each
+//! `shadowtex1` without translucent geometry), and the colour buffers `shadowcolor0` to `7`, each
 //! with two sides that `shadowcomp` programs flip as composite programs flip colortex (6.1.6).
 //! Square, `shadowMapResolution` pixels.
+
+use horizon_shaders::SHADOW_COLORS;
 
 type Ops<T> = wgpu::Operations<T>;
 type Color = wgpu::Color;
@@ -44,7 +46,7 @@ pub(super) struct ShadowTargets {
     /// `shadowtex1`: a copy of `shadowtex0` taken before translucent terrain, when read.
     pub depth1: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Both sides of each shadowcolor buffer used.
-    pub color: [Option<[wgpu::TextureView; 2]>; 2],
+    pub color: [Option<[wgpu::TextureView; 2]>; SHADOW_COLORS],
     /// Pre-write main contents for sampler/image feedback or compute snapshot loads.
     pub scratch: [Option<wgpu::TextureView>; 2],
     /// Buffers used as images; these need frame clearing even with the shadow cache enabled.
@@ -52,7 +54,7 @@ pub(super) struct ShadowTargets {
     /// Shadow-resolution invocation coverage for fragment programs writing only images.
     pub sink: Option<wgpu::TextureView>,
     /// The clear colour of each buffer cleared every frame.
-    pub clears: [Option<[f32; 4]>; 2],
+    pub clears: [Option<[f32; 4]>; SHADOW_COLORS],
     /// Bit n set: B is shadowcolor n's "main".
     pub main: u16,
     /// Nothing cleared yet this frame: the first pass into the shadow buffers clears them as it
@@ -95,7 +97,7 @@ impl ShadowTargets {
     pub fn new(
         device: &wgpu::Device,
         shadow: &horizon_shaders::Shadow,
-        formats: [wgpu::TextureFormat; 2],
+        formats: [wgpu::TextureFormat; SHADOW_COLORS],
         usage: Usage,
     ) -> Self {
         let Usage {
@@ -202,12 +204,12 @@ impl ShadowTargets {
     pub fn clear_ops(
         &mut self,
         writes: impl Iterator<Item = usize>,
-    ) -> (Ops<f32>, [Ops<Color>; 2]) {
+    ) -> (Ops<f32>, [Ops<Color>; SHADOW_COLORS]) {
         if !std::mem::take(&mut self.fresh) {
-            return (load(), [load(); 2]);
+            return (load(), [load(); SHADOW_COLORS]);
         }
-        let mut colors = [load(); 2];
-        for n in writes.filter(|&n| n < 2) {
+        let mut colors = [load(); SHADOW_COLORS];
+        for n in writes.filter(|&n| n < SHADOW_COLORS) {
             if self.cleared & 1 << n == 0
                 && let Some(c) = self.clears[n]
             {
@@ -223,21 +225,24 @@ impl ShadowTargets {
     }
 
     /// Clears what no pass has cleared this frame: all of it when no shadow program drew, the
-    /// cleared shadowcolor buffers the first one did not write.
+    /// cleared shadowcolor buffers the first one did not write. One buffer a pass: eight wide
+    /// formats together would pass the device's bytes-per-sample limit.
     pub fn clear_rest(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let depth = std::mem::take(&mut self.fresh);
-        self.clear_pending(encoder, depth);
+        self.clear_pending(encoder, depth, u8::MAX);
     }
 
-    /// Image access in Begin needs current-frame colors, while the depth clear stays at the
-    /// beginning of the shadow raster pass. Already-cleared colors are subsequently loaded.
+    /// Begin can access the first two storage-image buffers. Higher sampler buffers retain
+    /// their history until the normal shadow pass clears them.
     pub fn clear_colors(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        self.clear_pending(encoder, false);
+        self.clear_pending(encoder, false, 0b11);
     }
 
-    fn clear_pending(&mut self, encoder: &mut wgpu::CommandEncoder, depth: bool) {
-        let cleared = std::mem::replace(&mut self.cleared, 0b11);
-        let attachments: Vec<_> = (0..2)
+    fn clear_pending(&mut self, encoder: &mut wgpu::CommandEncoder, mut depth: bool, mask: u8) {
+        let cleared = self.cleared;
+        self.cleared |= mask;
+        let attachments = (0..SHADOW_COLORS)
+            .filter(|n| mask & 1 << n != 0)
             .filter(|n| cleared & 1 << n == 0)
             .filter_map(|n| {
                 Some(Some(wgpu::RenderPassColorAttachment {
@@ -246,24 +251,30 @@ impl ShadowTargets {
                     resolve_target: None,
                     ops: clear(self.clears[n]?),
                 }))
-            })
-            .collect();
-        if !depth && attachments.is_empty() {
-            return;
+            });
+        let passes: Vec<Vec<_>> = attachments.map(|a| vec![a]).collect();
+        let passes = if passes.is_empty() && depth {
+            vec![Vec::new()]
+        } else {
+            passes
+        };
+        for attachments in &passes {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shader pack shadow clear"),
+                color_attachments: attachments,
+                depth_stencil_attachment: std::mem::take(&mut depth).then_some(
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth.1,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    },
+                ),
+                ..Default::default()
+            });
         }
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Shader pack shadow clear"),
-            color_attachments: &attachments,
-            depth_stencil_attachment: depth.then_some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.depth.1,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
     }
 
     /// A pass samples the pre-write contents when it also binds the main side as an image.

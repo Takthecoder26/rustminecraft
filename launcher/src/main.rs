@@ -19,6 +19,7 @@ mod frame;
 mod game_tools;
 mod github_mods_page;
 mod glass;
+mod glass_account;
 mod glass_home;
 mod glass_home_lists;
 mod glass_home_mods;
@@ -26,6 +27,9 @@ mod glass_home_packs;
 mod glass_home_tabs;
 mod glass_instance;
 mod glass_instance_java;
+mod glass_notes;
+mod glass_palette;
+mod glass_settings;
 mod glass_ui;
 mod glass_versions;
 mod home;
@@ -199,6 +203,8 @@ struct Launcher {
     /// How many times the page changed, for the page transition.
     switches: usize,
     content_scroll: Scrollbar,
+    /// The glass Settings page's own scroll: its sections beside their list.
+    settings_pane: gpui::ScrollHandle,
     /// The rows of the page's long list (Versions, Patch notes) last drawn.
     long_list: cull::Cull,
     opening: Option<Opening>,
@@ -252,6 +258,10 @@ struct Launcher {
     native_log: native_log_page::NativeLog,
     confirm_remove: Option<String>,
     picker_open: bool,
+    /// Settings' any-colour swatch shows the hue strip (the glass look).
+    accent_strip: bool,
+    /// Settings' Glass and Blur sliders (the glass look).
+    look_sliders: themes_page::LookSliders,
     /// Where the accent picker's hue strip is on screen (`themes_page.rs`), to map a click to a
     /// hue.
     hue_area: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
@@ -298,6 +308,8 @@ struct Launcher {
     /// Its Friends over the internet panel (`internet.rs`).
     internet: internet::Internet,
     /// The window's own focus, so Tab reaches the controls when nothing else has the keyboard.
+    /// The palette (⌘K), while open (`glass_palette`).
+    palette: Option<glass_palette::Palette>,
     root_focus: FocusHandle,
     /// Microsoft accounts (accounts.json), the sign-in under way and what it last showed.
     accounts: Accounts,
@@ -509,10 +521,12 @@ impl Launcher {
         // `window.appearance()`, so both draw the same look.
         titlebar::apply_appearance(window, settings.appearance);
         let mut this = Self {
-            theme: Theme::for_appearance(settings.appearance, settings.accent, window.appearance()),
+            theme: Theme::for_appearance(settings.appearance, settings.accent, window.appearance())
+                .with_glass(settings.glass_tint(), settings.glass_blur()),
             page: Page::from_env(),
             switches: 0,
             content_scroll: Scrollbar::default(),
+            settings_pane: gpui::ScrollHandle::new(),
             long_list: cull::Cull::default(),
             opening: (!settings.skip_opening).then(|| {
                 let focus = cx.focus_handle();
@@ -550,6 +564,8 @@ impl Launcher {
             native_log: Default::default(),
             confirm_remove: None,
             picker_open: false,
+            accent_strip: false,
+            look_sliders: Default::default(),
             hue_area: std::rc::Rc::new(std::cell::Cell::new(None)),
             hue_dragging: false,
             language_menu: false,
@@ -586,6 +602,7 @@ impl Launcher {
             servers: servers_page::Servers::new(),
             internet: internet::Internet::new(),
             root_focus: cx.focus_handle(),
+            palette: None,
             accounts: Accounts::load(),
             auth_status: HashMap::new(),
             auth_progress: HashMap::new(),
@@ -2145,6 +2162,9 @@ fn switch(id: impl Into<SharedString>, on: bool, t: &Theme) -> Stateful<Div> {
 
 /// A section's title inside a page: a pixel icon in the accent and the name in the pixel face.
 fn section_title(label: &'static str, icon: &'static str, t: &Theme) -> Div {
+    if glass_ui::flat() {
+        return glass_ui::card_heading(tr(label)).px(px(16.)).pt(px(12.));
+    }
     div()
         .flex()
         .items_center()
@@ -2344,6 +2364,9 @@ fn index_row(
     right: Option<AnyElement>,
     t: &Theme,
 ) -> Div {
+    if glass_ui::flat() {
+        return glass_ui::setting_row(name, detail, right);
+    }
     slot_row(None, name, detail, right, t)
 }
 
@@ -2355,6 +2378,16 @@ fn slot_row(
     right: Option<AnyElement>,
     t: &Theme,
 ) -> Div {
+    if glass_ui::flat() {
+        return div()
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .px(px(16.))
+            .py(px(12.))
+            .children(slot.map(|s| s.rounded(px(8.)).overflow_hidden()))
+            .child(glass_ui::setting_row(name, detail, right).p_0().flex_1());
+    }
     blocks::panel(t)
         .flex()
         .items_center()
@@ -3550,18 +3583,22 @@ impl Launcher {
             ),
             SelfUpdate::Downloading(..) => None,
             _ => Some(
-                button("check", "Check now", Kind::Ghost, &t)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.check_updates();
-                        cx.notify();
-                    }))
-                    .into_any_element(),
+                // The glass look's About tile has the mockup's filled button.
+                button(
+                    "check",
+                    "Check now",
+                    if t.dark { Kind::Secondary } else { Kind::Ghost },
+                    &t,
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.check_updates();
+                    cx.notify();
+                }))
+                .into_any_element(),
             ),
         };
         let mono = |s: String| div().font_family(theme::MONO).child(s).into_any_element();
         let plain = |s: &str| div().child(tr(s).to_string()).into_any_element();
-        let (accounts, n) = self.account_rows(cx);
-        let (offline, n) = self.offline_rows(n, cx);
         let appearance = segments(
             "appearance",
             &[
@@ -3584,6 +3621,24 @@ impl Launcher {
                 }
             },
         );
+        if t.dark {
+            return self.glass_settings(
+                glass_settings::Built {
+                    install: toggle,
+                    prune,
+                    opening,
+                    menu_entry,
+                    appearance: appearance.into_any_element(),
+                    horizon,
+                    horizon_action,
+                    launcher,
+                    launcher_action,
+                },
+                cx,
+            );
+        }
+        let (accounts, n) = self.account_rows(cx);
+        let (offline, n) = self.offline_rows(n, cx);
         let group = |label: &'static str, icon: &'static str| {
             section_title(label, icon, &t).mt(px(20.)).mb(px(12.))
         };
@@ -3849,6 +3904,17 @@ impl Launcher {
                 cx.notify();
             }));
         let field = line_edit::mouse(field, cx, |this| &mut this.args_input);
+        if glass_ui::flat() {
+            return glass_ui::setting_row_stacked(
+                tr("Game arguments"),
+                Some(
+                    div()
+                        .child(tr("Extra arguments for the game, passed through as-is (quotes group a word with spaces). Applies the next time the game starts."))
+                        .into_any_element(),
+                ),
+                glass_ui::wide_field(field, focused).into_any_element(),
+            );
+        }
         index_row(
             n,
             tr("Game arguments"),
@@ -3919,6 +3985,13 @@ impl Launcher {
                 ))
                 .into_any_element(),
         };
+        if glass_ui::flat() {
+            return glass_ui::setting_row_stacked(
+                tr("Proxy"),
+                Some(detail),
+                glass_ui::wide_field(field, focused).into_any_element(),
+            );
+        }
         index_row(
             n,
             tr("Proxy"),
@@ -3940,6 +4013,23 @@ impl Launcher {
     /// Settings' Microsoft accounts: who is signed in and plays, the sign-in with its code. The
     /// rows are numbered from 01; returns them and how many there are.
     fn account_rows(&mut self, cx: &mut Context<Self>) -> (Div, usize) {
+        let t = self.theme;
+        let (mut rows, mut n) = self.microsoft_rows(cx);
+        n += 1;
+        let (title, detail, action) = self.sign_in_parts(cx);
+        rows = rows.child(index_row(
+            n,
+            title,
+            Some(detail.into_any_element()),
+            action,
+            &t,
+        ));
+        (rows, n)
+    }
+
+    /// The Microsoft accounts signed in here: each one's head, name and state, Play as,
+    /// Refresh and Sign out.
+    fn microsoft_rows(&mut self, cx: &mut Context<Self>) -> (Div, usize) {
         let t = self.theme;
         let mut rows = div().flex().flex_col();
         let mut n = 0;
@@ -4061,6 +4151,13 @@ impl Launcher {
                 &t,
             ));
         }
+        (rows, n)
+    }
+
+    /// Adding a Microsoft account, or signing one in again: what the row is called, what is
+    /// happening (the code to enter, a problem), and its buttons.
+    fn sign_in_parts(&self, cx: &mut Context<Self>) -> (String, Div, Option<AnyElement>) {
+        let t = self.theme;
         let configured = account::client_id().is_some();
         let busy = matches!(
             self.sign_in_state,
@@ -4187,20 +4284,12 @@ impl Launcher {
             }
             Some(actions.into_any_element())
         };
-        n += 1;
         let title = match &self.sign_in_target {
             Some(target) => trf("Sign in again as {name}", &[("name", &target.name)]),
             None if self.accounts.accounts.is_empty() => tr("Microsoft account").to_owned(),
             None => tr("Another account").to_owned(),
         };
-        rows = rows.child(index_row(
-            n,
-            title,
-            Some(detail.into_any_element()),
-            action,
-            &t,
-        ));
-        (rows, n)
+        (title, detail, action)
     }
 
     /// Join a friend: a code field and Join, which starts the game straight
@@ -4637,6 +4726,9 @@ impl Launcher {
 
     fn notes_page(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
+        if t.dark {
+            return self.glass_notes(cx);
+        }
         let sponsor = (!self.links.sponsor.is_empty()).then(|| {
             plate(&t)
                 .flex()
@@ -4820,6 +4912,15 @@ impl Render for Launcher {
             self.theme = self.settings_theme(window);
         }
         glass_ui::set_on(self.theme.dark);
+        self.look = self.theme.look;
+        glass_ui::set_look(self.look);
+        glass::set_look(self.look);
+        // The mockup tints the scene with any accent but its violet.
+        let tint = (self.theme.dark && self.look.accent != horizon_theme::glass::ACCENT)
+            .then(|| horizon_theme::glass::mix_oklab(self.look.accent, 0x767676, 0.58));
+        let blur = self.look.blur;
+        self.scene
+            .update(cx, |scene, cx| scene.set_look(tint, blur, cx));
         self.scale = window.scale_factor();
         self.perf.frame();
         if self.bench.as_ref().is_some_and(perf::Bench::scrolling) {
@@ -4917,6 +5018,20 @@ impl Render for Launcher {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            // ⌘K (Ctrl+K elsewhere) wherever the focus is, even in a field: the palette.
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                let k = &ev.keystroke;
+                let command = if cfg!(target_os = "macos") {
+                    k.modifiers.platform
+                } else {
+                    k.modifiers.control
+                };
+                if this.theme.dark && command && !k.modifiers.shift && k.key == "k" {
+                    this.palette_toggle(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .capture_any_mouse_down(|_, _, _| KEYBOARD.store(false, Ordering::Relaxed))
             .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, cx| {
                 let size = window.viewport_size();
@@ -4968,6 +5083,12 @@ impl Render for Launcher {
                                                         28.
                                                     }))
                                                     .pb(px(48.))
+                                                    // The glass Settings page scrolls its own
+                                                    // pane under a still title.
+                                                    .when(
+                                                        t.dark && self.page == Page::Settings,
+                                                        |d| d.h_full().pb(px(14.)),
+                                                    )
                                                     .child(content),
                                             ),
                                         &t,
@@ -4995,6 +5116,9 @@ impl Render for Launcher {
             if let Some(viewer) = self.screenshot_viewer(cx) {
                 root = root.child(viewer);
             }
+        }
+        if let Some(palette) = self.palette_overlay(window, cx) {
+            root = root.child(palette);
         }
         if self.asking_consent() {
             root = root.child(self.consent_screen(cx));
