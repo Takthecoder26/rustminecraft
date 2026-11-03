@@ -366,6 +366,39 @@ impl CustomImage {
     }
 }
 
+/// Independent vanilla sky geometry switches from `shaders.properties`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SkyOptions {
+    /// Sky disc, sunset fan and void disc (`sky`).
+    pub sky: bool,
+    pub stars: bool,
+    pub sun: bool,
+    pub moon: bool,
+}
+
+impl Default for SkyOptions {
+    fn default() -> Self {
+        Self {
+            sky: true,
+            stars: true,
+            sun: true,
+            moon: true,
+        }
+    }
+}
+
+impl SkyOptions {
+    fn parse(properties: &Properties) -> Self {
+        let keep = |key| properties.get(key).is_none_or(|v| v.trim() != "false");
+        Self {
+            sky: keep("sky"),
+            stars: keep("stars"),
+            sun: keep("sun"),
+            moon: keep("moon"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShadowCulling {
     On,
@@ -388,6 +421,8 @@ pub struct Post {
     pub sky: Option<PostProgram>,
     /// What draws the sun and moon, between the sunset and the stars.
     pub sky_textured: Option<PostProgram>,
+    /// Geometry switches apply to both pack programs and vanilla fallback draws.
+    pub sky_options: SkyOptions,
     /// What draws entities, after terrain.
     pub entities: Option<PostProgram>,
     /// What draws block entities, after terrain.
@@ -541,6 +576,7 @@ pub fn load_post(
         water: None,
         sky: None,
         sky_textured: None,
+        sky_options: SkyOptions::parse(properties),
         entities: None,
         block: None,
         entities_translucent: None,
@@ -1917,5 +1953,61 @@ mod buffer_blend_tests {
                 (2, None)
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod sky_switch_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_sky_geometry_keeps_programs_and_their_blend_contracts() {
+        let pack = Pack::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/terrain-test"),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let input = GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;".into(),
+            body: "hz_Vertex = vec4(hz_v_pos, 1.0); hz_Color = vec4(1.0);".into(),
+            ..Default::default()
+        };
+        let inputs = GameInputs {
+            sky: Some(input.clone()),
+            celestial: Some(input),
+            ..Default::default()
+        };
+        for (properties, expected) in [
+            ("", SkyOptions::default()),
+            (
+                "sky = false\nstars = false\nsun = false\nmoon = false",
+                SkyOptions {
+                    sky: false,
+                    stars: false,
+                    sun: false,
+                    moon: false,
+                },
+            ),
+            (
+                "sky=true\nstars=false\nsun=true\nmoon=false",
+                SkyOptions {
+                    sky: true,
+                    stars: false,
+                    sun: true,
+                    moon: false,
+                },
+            ),
+        ] {
+            let post = load_post(
+                &pack,
+                "",
+                &Properties::parse(properties, &macros),
+                &macros,
+                &inputs,
+            );
+            assert_eq!(post.sky_options, expected);
+            assert_eq!(post.sky.unwrap().blend, Some(TRANSLUCENT_BLEND));
+            assert_eq!(post.sky_textured.unwrap().blend, Some(CELESTIAL_BLEND));
+        }
     }
 }

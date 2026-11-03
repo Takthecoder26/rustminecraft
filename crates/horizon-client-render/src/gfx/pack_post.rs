@@ -507,6 +507,7 @@ pub struct PackPost {
     /// The pack has a sky (`gbuffers_skybasic`) or sun and moon (`gbuffers_skytextured`)
     /// program: vanilla's stays hidden even when the program writes nothing.
     hides_sky: bool,
+    sky_options: horizon_shaders::SkyOptions,
     hides_celestial: bool,
     /// `colortex0ClearColor`, when the pack sets it.
     sky_clear: Option<[f32; 4]>,
@@ -2336,6 +2337,7 @@ impl PackPost {
             cloud_draw: None,
             hides_clouds,
             hides_sky,
+            sky_options: post.sky_options,
             hides_celestial,
             sky_clear,
             weather,
@@ -2859,9 +2861,12 @@ impl PackPost {
         let Some(mut sky) = self.sky.take() else {
             return;
         };
-        let parts = sky
-            .geometry
-            .prepare(queue, frame, self.uniforms.shadow.sun_path_rotation);
+        let parts = sky.geometry.prepare(
+            queue,
+            frame,
+            self.uniforms.shadow.sun_path_rotation,
+            self.sky_options,
+        );
         let mut groups = [None, None];
         for (i, pass) in [&mut sky.basic, &mut sky.textured].into_iter().enumerate() {
             if let Some(pass) = pass {
@@ -3329,6 +3334,11 @@ impl PackPost {
     /// (`None`: the fog colour, its default).
     pub fn sky_clear(&self) -> Option<[f32; 4]> {
         self.sky_clear.filter(|_| self.has_sky())
+    }
+
+    /// Geometry switches also used while vanilla draws a missing sky program.
+    pub fn sky_options(&self) -> horizon_shaders::SkyOptions {
+        self.sky_options
     }
 
     /// Whether the pack has a sky program, drawing or not: vanilla's sky is then not drawn.
@@ -4383,3 +4393,7 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_post/sky_switch_tests.rs"]
+mod sky_switch_tests;

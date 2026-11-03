@@ -257,7 +257,13 @@ impl PackSky {
     /// fan while the sun is near the horizon, the sun and the moon, the stars and, with the
     /// camera low, the void. `tilt` is the pack's `sunPathRotation` (degrees): the sun, moon
     /// and stars turn with it (7.1).
-    pub fn prepare(&self, queue: &wgpu::Queue, frame: &super::Frame, tilt: f32) -> Vec<Part> {
+    pub fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        frame: &super::Frame,
+        tilt: f32,
+        options: horizon_shaders::SkyOptions,
+    ) -> Vec<Part> {
         let turn = super::pack_uniforms::tilt_matrix(tilt);
         let sun_angle = frame.sky.sun_angle.to_radians();
         // The fan turns to the other horizon in the afternoon (terrain.wgsl's sunrise_weight).
@@ -308,6 +314,12 @@ impl PackSky {
         if frame.dark_disc {
             parts.push(part("VOID", false, void));
         }
+        parts.retain(|part| match part.stage {
+            "SUN" => options.sun,
+            "MOON" => options.moon,
+            "STARS" => options.stars,
+            _ => options.sky,
+        });
         parts
     }
 
@@ -318,6 +330,46 @@ impl PackSky {
         } else {
             pass.set_bind_group(1, &self.group, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
+        }
+    }
+}
+
+/// Vanilla celestial indices: keep the usual single draw when both bodies are enabled.
+/// Extra quads are not sun/moon geometry and remain untouched.
+pub(super) fn celestial_ranges(vertices: usize, sun: bool, moon: bool) -> [Range<u32>; 2] {
+    let end = (vertices / 4) as u32 * 6;
+    let start = if sun { 0 } else { end.min(6) };
+    if moon {
+        [start..end, 0..0]
+    } else {
+        [start..end.min(6), end.min(12)..end]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn celestial_switches_preserve_body_slots_and_extra_quads() {
+        for (vertices, sun, moon, expected) in [
+            (8, true, true, vec![0, 1]),
+            (8, false, true, vec![1]),
+            (8, true, false, vec![0]),
+            (8, false, false, vec![]),
+            (4, false, true, vec![]),
+            (3, true, true, vec![]),
+            (16, true, false, vec![0, 2, 3]),
+            (16, false, false, vec![2, 3]),
+        ] {
+            let actual: Vec<_> = celestial_ranges(vertices, sun, moon)
+                .into_iter()
+                .flat_map(|r| r.step_by(6).map(|i| i / 6))
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "vertices={vertices}, sun={sun}, moon={moon}"
+            );
         }
     }
 }

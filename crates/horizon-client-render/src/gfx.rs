@@ -7450,6 +7450,13 @@ impl Renderer {
         let pack_draws_terrain = pack_terrain && flat_frame == self.pack_terrain_flat;
         // The shadow camera's lists, drawn by the pack's shadow programs.
         let pack_draws_shadow = shadow_view.is_some() && flat_frame == self.pack_terrain_flat;
+        let sky_options = self
+            .pack_post
+            .as_ref()
+            .and_then(|p| p.1.as_ref())
+            .filter(|_| pack_post)
+            .map(|p| p.sky_options())
+            .unwrap_or_default();
         let pack_draws_sky = pack_post
             && self
                 .pack_post
@@ -7921,7 +7928,12 @@ impl Renderer {
             pass.set_bind_group(0, &self.group, &[]);
             pack_frame(&mut pass);
             if frame.title || (sky_visible && (frame.skybox || frame.end_sky)) {
-                if !frame.title && frame.skybox && !pack_draws_sky && !native_sky_pass {
+                if !frame.title
+                    && frame.skybox
+                    && !pack_draws_sky
+                    && !native_sky_pass
+                    && sky_options.sky
+                {
                     match self
                         .native
                         .as_ref()
@@ -7957,9 +7969,15 @@ impl Renderer {
                                 .native
                                 .as_ref()
                                 .is_some_and(|n| n.sky.is_some() && !n.vanilla_sun);
-                        let first = if own_sun { 6 } else { 0 };
+                        // End sky/flash quads are not the Overworld's sun and moon.
+                        let sun = frame.end_sky || (sky_options.sun && !own_sun);
+                        let moon = frame.end_sky || sky_options.moon;
                         pass.set_vertex_buffer(0, self.celestial_buffer.slice(..));
-                        pass.draw_indexed(first..(celestial_vertices as u32 / 4) * 6, 0, 0..1);
+                        for range in pack_sky::celestial_ranges(celestial_vertices, sun, moon) {
+                            if !range.is_empty() {
+                                pass.draw_indexed(range, 0, 0..1);
+                            }
+                        }
                     }
                     pass.set_bind_group(0, &self.group, &[]);
                 }
@@ -7967,11 +7985,16 @@ impl Renderer {
                     .native
                     .as_ref()
                     .is_some_and(|n| n.sky.is_some() && !n.vanilla_stars);
-                if !frame.title && frame.stars.is_some() && !pack_draws_sky && !own_stars {
+                if !frame.title
+                    && frame.stars.is_some()
+                    && !pack_draws_sky
+                    && !own_stars
+                    && sky_options.stars
+                {
                     self.stars.draw(&mut pass);
                     pass.set_bind_group(0, &self.group, &[]);
                 }
-                if !frame.title && frame.dark_disc && !pack_draws_sky {
+                if !frame.title && frame.dark_disc && !pack_draws_sky && sky_options.sky {
                     pass.set_pipeline(&self.dark_disc);
                     pass.draw(0..3, 0..1);
                 }
