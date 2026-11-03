@@ -83,6 +83,7 @@ fn mesh(
         smooth_lighting: false,
         cutout_leaves: true,
         translucent_layers: &[],
+        shader_layers: &[],
         leaf_culling: mode,
     };
     mesher.mesh(&region, sy)

@@ -21,6 +21,7 @@ use horizon_core::{
     biome::BiomeZoom, geometry::Direction, position::BlockPos, random::position_seed,
 };
 use horizon_optifine::ctm::connect::{Axes as CtmAxes, Face as CtmFace};
+use horizon_shaders::{BlockLayers, BlockRenderLayer};
 use horizon_world::{
     block_render::FaceVisibility,
     fluid::{FluidKind, FluidState},
@@ -1345,6 +1346,38 @@ fn pack_rgb([r, g, b]: [u32; 3]) -> u32 {
 fn pack_coords(coords: u32) -> u16 {
     ((coords >> 16 & 0xFF) | (coords & 0xFF) << 8) as u16
 }
+/// Resolve authored layer rules once per pack/tag reload, rather than voting by sprite.
+pub fn shader_layer_table(
+    registry: &horizon_world::registry::BlockRegistry,
+    rules: &BlockLayers,
+) -> Vec<Option<BlockRenderLayer>> {
+    let table: Vec<_> = (0..registry.len())
+        .map(|i| {
+            registry.state(BlockStateId(i as u32)).and_then(|state| {
+                rules.layer(&state.name, |key| {
+                    state.properties.get(key).map(String::as_str)
+                })
+            })
+        })
+        .collect();
+    if table.iter().all(Option::is_none) {
+        Vec::new()
+    } else {
+        table
+    }
+}
+
+fn shader_tile(tile: TileLayer, override_layer: Option<BlockRenderLayer>) -> TileLayer {
+    match (tile, override_layer) {
+        (TileLayer::Layer { layer, .. }, Some(kind)) => TileLayer::Layer {
+            layer,
+            translucent: kind == BlockRenderLayer::Translucent,
+            opaque: kind == BlockRenderLayer::Solid,
+        },
+        _ => tile,
+    }
+}
+
 pub struct Mesher<'a> {
     /// CardinalLighting.NETHER: brighter up/down faces.
     pub nether_shading: bool,
@@ -1367,6 +1400,8 @@ pub struct Mesher<'a> {
     pub cutout_leaves: bool,
     /// Sprite layers a shader pack moves into the translucent pass, by layer.
     pub translucent_layers: &'a [bool],
+    /// Optional shader-pack override by block state, independent of shared sprites.
+    pub shader_layers: &'a [Option<BlockRenderLayer>],
     /// What the worker does with leaf faces inside a canopy.
     pub leaf_culling: LeafCullingMode,
 }
@@ -1703,28 +1738,50 @@ impl Mesher<'_> {
         );
         // Opaque leaves (forceOpaque) and leaves a leaf-culling mode proved internal draw in the
         // solid layer whatever their sprite.
-        let solid_leaves = !self.cutout_leaves && state.leaves || interior_leaf;
-        let own = TileLayer::Layer {
-            layer: face.layer as u16,
-            translucent: face.translucent,
-            opaque: face.opaque,
-        };
-        // A tile keeps the quad's forced translucency; `<skip>` and `<default>` are its own.
-        let tile = |t: TileLayer| match t {
+        let shader_layer = self.shader_layers.get(id as usize).copied().flatten();
+        let solid_leaves =
+            shader_layer.is_none() && (!self.cutout_leaves && state.leaves || interior_leaf);
+        let own = shader_tile(
             TileLayer::Layer {
-                layer,
-                translucent,
-                opaque,
-            } => TileLayer::Layer {
-                layer,
-                translucent: translucent || q.material.force_translucent,
-                opaque,
+                layer: face.layer as u16,
+                translucent: face.translucent,
+                opaque: face.opaque,
             },
-            TileLayer::Skip | TileLayer::Default => own,
+            shader_layer,
+        );
+        // A tile keeps the quad's forced translucency; `<skip>` and `<default>` are its own.
+        let tile = |t: TileLayer| {
+            shader_tile(
+                match t {
+                    TileLayer::Layer {
+                        layer,
+                        translucent,
+                        opaque,
+                    } => TileLayer::Layer {
+                        layer,
+                        translucent: translucent || q.material.force_translucent,
+                        opaque,
+                    },
+                    TileLayer::Skip | TileLayer::Default => own,
+                },
+                shader_layer,
+            )
         };
         match pick {
-            Pick::Keep => self.quad(out, solid_leaves, own, corners.map(|c| c.0)),
-            Pick::Tile(t) => self.quad(out, solid_leaves, tile(t), corners.map(|c| c.0)),
+            Pick::Keep => self.quad_as(
+                out,
+                solid_leaves,
+                own,
+                corners.map(|c| c.0),
+                shader_layer.is_none(),
+            ),
+            Pick::Tile(t) => self.quad_as(
+                out,
+                solid_leaves,
+                tile(t),
+                corners.map(|c| c.0),
+                shader_layer.is_none(),
+            ),
             Pick::Quarters(tiles) => {
                 let cuts = cuts(&corners);
                 for s in cuts.windows(2) {
@@ -1732,7 +1789,13 @@ impl Mesher<'_> {
                         let piece = [(s[0], t[0]), (s[1], t[0]), (s[1], t[1]), (s[0], t[1])]
                             .map(|(s, t)| bilinear(&corners, s, t));
                         let quarter = quarter_of(&piece);
-                        self.quad(out, solid_leaves, tile(tiles[quarter]), piece.map(|c| c.0));
+                        self.quad_as(
+                            out,
+                            solid_leaves,
+                            tile(tiles[quarter]),
+                            piece.map(|c| c.0),
+                            shader_layer.is_none(),
+                        );
                     }
                 }
             }
@@ -1745,12 +1808,15 @@ impl Mesher<'_> {
         if count == 0 {
             return;
         }
-        let face_translucent = match pick {
-            Pick::Keep => self.translucent(own),
-            Pick::Tile(t) => self.translucent(tile(t)),
-            Pick::Quarters(tiles) => tiles.into_iter().any(|t| self.translucent(tile(t))),
-            Pick::Nothing => false,
-        };
+        let face_translucent = shader_layer.map_or_else(
+            || match pick {
+                Pick::Keep => self.translucent(own),
+                Pick::Tile(t) => self.translucent(tile(t)),
+                Pick::Quarters(tiles) => tiles.into_iter().any(|t| self.translucent(tile(t))),
+                Pick::Nothing => false,
+            },
+            |layer| layer == BlockRenderLayer::Translucent,
+        );
         // Overlay tiles face the standard way too (Continuity: "overlay textures always have the
         // standard orientation"), whatever turns the model's own UVs (dirt's and sand's random
         // rotations).
@@ -1766,11 +1832,14 @@ impl Mesher<'_> {
                     .unwrap_or(state);
                 Self::tint(info, index, tints, pos)
             });
-            let tile = TileLayer::Layer {
-                layer: overlay.layer,
-                translucent: overlay.translucent || face_translucent,
-                opaque: false,
-            };
+            let tile = shader_tile(
+                TileLayer::Layer {
+                    layer: overlay.layer,
+                    translucent: overlay.translucent || face_translucent,
+                    opaque: false,
+                },
+                shader_layer,
+            );
             let whole = vertices(tint, standard());
             for s in cuts.windows(2) {
                 for t in cuts.windows(2) {
@@ -1781,18 +1850,7 @@ impl Mesher<'_> {
             }
         }
     }
-    /// One terrain quad with sprite `tile`, in the pass its alpha needs (`solid_leaves`: no
-    /// alpha cutout whatever the sprite).
-    fn quad(
-        &self,
-        out: &mut SectionMesh,
-        solid_leaves: bool,
-        tile: TileLayer,
-        v: [TerrainVertex; 4],
-    ) {
-        self.quad_as(out, solid_leaves, tile, v, true);
-    }
-    /// Whether [`Mesher::quad`] draws `tile` in the translucent pass.
+    /// Whether [`Mesher::quad_as`] draws `tile` in the translucent pass.
     fn translucent(&self, tile: TileLayer) -> bool {
         match tile {
             TileLayer::Layer {
@@ -1808,7 +1866,7 @@ impl Mesher<'_> {
             TileLayer::Skip | TileLayer::Default => false,
         }
     }
-    /// [`Mesher::quad`], with the sprite's own translucency (`translucent_layers`) counted only
+    /// [`Mesher::quad_as`], with the sprite's own translucency (`translucent_layers`) counted only
     /// when `by_sprite`: an overlay's pass is its rule's.
     fn quad_as(
         &self,

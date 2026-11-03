@@ -143,6 +143,7 @@ fn a_shader_pack_lights_the_faces_itself() {
             smooth_lighting: false,
             cutout_leaves: true,
             translucent_layers: &[],
+            shader_layers: &[],
             leaf_culling: LeafCullingMode::Off,
         };
         let mut colours: Vec<u32> = mesher
@@ -195,6 +196,7 @@ fn separate_ao_passes_ao_in_alpha_without_darkening_rgb() {
         smooth_lighting: true,
         cutout_leaves: true,
         translucent_layers: &[],
+        shader_layers: &[],
         leaf_culling: LeafCullingMode::Off,
     };
     let mesh = mesher.mesh(&region, 0);
@@ -269,6 +271,7 @@ fn reused_mesh_matches_fresh_geometry_across_sections_and_resource_reload() {
             smooth_lighting: reload == 0,
             cutout_leaves: reload == 0,
             translucent_layers: &[],
+            shader_layers: &[],
             leaf_culling: LeafCullingMode::Off,
         };
         for (case, (center, east)) in [
@@ -370,4 +373,167 @@ fn benchmark_padded_reuse() {
             );
         }
     }
+}
+
+/// Original parser -> state table -> production Mesher contract; no sprite voting.
+/// This is a CPU mesh oracle, not a live Game or GPU rendering test.
+fn shader_layer_mesh_sequence_for(block: &str, requests: &[&str]) -> Vec<SectionMesh> {
+    let root = std::path::PathBuf::from(std::env::var_os("HORIZON_MESH_TEST_RESOURCES").unwrap());
+    let assets = Assets::load(&root).unwrap();
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let biomes = Biomes::load(&root).unwrap();
+    let render = assets.reload(&root).unwrap();
+    let visibility = crate::models::load_visibility(&root, assets.registry).unwrap();
+    let tables = MeshTables::new(&assets, &render, &facts, visibility.clone()).unwrap();
+    let name = format!("minecraft:{block}");
+    let y = assets.registry.default_state(&name).unwrap();
+    let mut state = assets.registry.state(y).unwrap().clone();
+    let filter = if state.properties.contains_key("axis") {
+        state.properties.insert("axis".into(), "x".into());
+        ":axis=x"
+    } else {
+        ""
+    };
+    let x = assets.registry.id(&state).unwrap();
+    let mut chunk = Chunk::empty(0, 0);
+    chunk.set(4, MIN_Y + 8, 8, x.0);
+    chunk.set(10, MIN_Y + 8, 8, y.0);
+    let mut region = [[None; 3]; 3];
+    region[1][1] = Some(&chunk);
+    requests
+        .iter()
+        .map(|request| {
+            let properties = horizon_shaders::Properties::parse(
+                &format!("layer.{request}={name}{filter}\n"),
+                &horizon_shaders::Macros::standard(),
+            );
+            let rules = horizon_shaders::BlockLayers::parse(&properties);
+            let shader_layers = shader_layer_table(assets.registry, &rules);
+            let mut mesher = Mesher {
+                nether_shading: false,
+                shader_pack_lighting: true,
+                separate_ao: false,
+                assets: &assets,
+                render: &render,
+                tables: &tables,
+                biomes: &biomes,
+                visibility,
+                zoom: BiomeZoom::new(0),
+                blend_radius: 0,
+                smooth_lighting: false,
+                cutout_leaves: true,
+                translucent_layers: &[],
+                shader_layers: &shader_layers,
+                leaf_culling: LeafCullingMode::Off,
+            };
+            let mesh = mesher.mesh(&region, 0);
+            let sprites = |left| {
+                let mut layers: Vec<_> = mesh
+                    .solid
+                    .iter()
+                    .chain(&mesh.translucent)
+                    .filter(|v| (v.pos[0] < 8.0) == left)
+                    .map(|v| v.layer & !OPAQUE_LAYER)
+                    .collect();
+                layers.sort_unstable();
+                layers
+            };
+            assert_eq!(
+                sprites(true),
+                sprites(false),
+                "distinct states must share the exact sprite multiset"
+            );
+            mesh
+        })
+        .collect()
+}
+
+fn shader_layer_mesh_sequence(requests: &[&str]) -> Vec<SectionMesh> {
+    shader_layer_mesh_sequence_for("oak_log", requests)
+}
+
+fn original_shader_layer_mesh(request: &str) -> SectionMesh {
+    shader_layer_mesh_sequence(&[request]).pop().unwrap()
+}
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; original production mesh contract"]
+fn shader_layer_translucent_separates_states_sharing_sprites() {
+    let mesh = original_shader_layer_mesh("translucent");
+    assert_eq!(
+        mesh.translucent.len(),
+        24,
+        "only the authored axis=x state moves to water"
+    );
+    assert_eq!(mesh.solid.len(), 24);
+}
+
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; original production mesh contract"]
+fn shader_layer_cutout_separates_states_sharing_sprites() {
+    let mesh = original_shader_layer_mesh("cutout");
+    assert_eq!(mesh.solid.len(), 48);
+    assert!(mesh.translucent.is_empty());
+    assert!(
+        mesh.solid
+            .iter()
+            .filter(|v| v.pos[0] < 8.0)
+            .all(|v| v.layer & OPAQUE_LAYER == 0)
+    );
+    assert!(
+        mesh.solid
+            .iter()
+            .filter(|v| v.pos[0] > 8.0)
+            .all(|v| v.layer & OPAQUE_LAYER != 0)
+    );
+}
+
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; original production mesh contract"]
+fn shader_layer_solid_and_unmentioned_state_keep_opaque_route() {
+    let mesh = original_shader_layer_mesh("solid");
+    assert_eq!(mesh.solid.len(), 48);
+    assert!(mesh.translucent.is_empty());
+    assert!(mesh.solid.iter().all(|v| v.layer & OPAQUE_LAYER != 0));
+}
+
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; production classification reload"]
+fn shader_layer_reload_removes_old_overrides_with_shared_mesh_context() {
+    let meshes = shader_layer_mesh_sequence(&["translucent", "none", "cutout", "solid"]);
+    assert_eq!(
+        (meshes[0].solid.len(), meshes[0].translucent.len()),
+        (24, 24)
+    );
+    assert_eq!(
+        (meshes[1].solid.len(), meshes[1].translucent.len()),
+        (48, 0)
+    );
+    assert!(meshes[1].solid.iter().all(|v| v.layer & OPAQUE_LAYER != 0));
+    assert!(
+        meshes[2]
+            .solid
+            .iter()
+            .filter(|v| v.pos[0] < 8.0)
+            .all(|v| v.layer & OPAQUE_LAYER == 0)
+    );
+    assert!(meshes[3].solid.iter().all(|v| v.layer & OPAQUE_LAYER != 0));
+}
+
+#[test]
+#[ignore = "requires HORIZON_MESH_TEST_RESOURCES; production layer override over sprite defaults"]
+fn shader_layer_override_replaces_sprite_translucency() {
+    let meshes = shader_layer_mesh_sequence_for("ice", &["none", "solid", "cutout", "translucent"]);
+    assert_eq!(
+        (meshes[0].solid.len(), meshes[0].translucent.len()),
+        (0, 48)
+    );
+    for mesh in &meshes[1..3] {
+        assert_eq!((mesh.solid.len(), mesh.translucent.len()), (48, 0));
+    }
+    assert!(meshes[1].solid.iter().all(|v| v.layer & OPAQUE_LAYER != 0));
+    assert!(meshes[2].solid.iter().all(|v| v.layer & OPAQUE_LAYER == 0));
+    assert_eq!(
+        (meshes[3].solid.len(), meshes[3].translucent.len()),
+        (0, 48)
+    );
 }

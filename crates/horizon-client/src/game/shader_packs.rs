@@ -8,7 +8,9 @@ use horizon_client::camera::CameraFluid;
 use horizon_client::gfx::pack_uniforms::{PackInputs, PlayerStatus};
 use horizon_client::shader_options::ShaderOptions;
 use horizon_client::text::Text;
-use horizon_shaders::{BlockIds, Macros, Pack, Properties, dimension_folder, load_post};
+use horizon_shaders::{
+    BlockIds, BlockLayers, BlockRenderLayer, Macros, Pack, Properties, dimension_folder, load_post,
+};
 
 use super::{Dim, Game};
 use horizon_client::gfx::pack_draw::EntitySpan;
@@ -207,6 +209,7 @@ impl Game<'_> {
             // Another pack, or none: drop what ran.
             self.native_shaders = super::native_shaders::NativeShaders::picking(&picked);
             self.set_translucent_layers(Vec::new());
+            self.set_shader_layers(Vec::new());
             self.pack_ids = None;
             if let Some(renderer) = &mut self.renderer {
                 renderer.drop_shader_packs();
@@ -222,12 +225,14 @@ impl Game<'_> {
             Dim::End => 1,
         };
         let path = Self::shader_packs_dir().join(&name);
+        let mut shader_layers = None;
         if horizon_shader_api::package::is_pack(&path) {
             // One of Horizon's own packs (game/native_shaders.rs).
             self.tick_native_shader_pack(&path);
         } else if let Some(renderer) = &mut self.renderer
             && renderer.shader_pack_dimension() != Some(dimension)
         {
+            shader_layers = Some(Vec::new());
             let name = name.as_str();
             let started = std::time::Instant::now();
             // A pack is not the game's own code: one that makes the shader compiler (or our
@@ -271,11 +276,12 @@ impl Game<'_> {
                             biomes.list.iter().map(|b| b.name.as_str()).collect();
                         post.custom.set_biomes(&names);
                         let text = pack.read_text("block.properties").unwrap_or_default();
+                        let block_properties = Properties::parse(&text, &macros);
                         let world_items = world_items!(self);
                         let remote_tags =
                             self.remote.as_ref().map(|r| (&*r.registries, &*r.builtin));
                         let tags = |registry, local| shader_tags(local, registry, remote_tags);
-                        let ids = BlockIds::parse(&Properties::parse(&text, &macros))
+                        let ids = BlockIds::parse(&block_properties)
                             .resolve_tags(&tags("minecraft:block", &world_items.block_tags));
                         for note in &ids.notes {
                             log::warn!("shader pack {name}: block.properties: {note}");
@@ -294,8 +300,20 @@ impl Game<'_> {
                             &tags("minecraft:item", &world_items.item_tags),
                             -1,
                         );
+                        let layers = BlockLayers::parse(&block_properties)
+                            .resolve_tags(&tags("minecraft:block", &world_items.block_tags));
+                        for note in layers.notes() {
+                            log::warn!("shader pack {name}: block.properties: {note}");
+                        }
+                        shader_layers = Some(horizon_client::mesher::shader_layer_table(
+                            self.pack.assets.registry,
+                            &layers,
+                        ));
                         self.pack_ids = Some(PackIds {
-                            uses_tags: ids.uses_tags() || items.uses_tags() || entities.uses_tags(),
+                            uses_tags: ids.uses_tags()
+                                || items.uses_tags()
+                                || entities.uses_tags()
+                                || layers.uses_tags(),
                             items: items.plain(),
                             missing_item,
                             // OQ-21: on unless the pack turns it off.
@@ -352,6 +370,9 @@ impl Game<'_> {
             if let Err(panic) = loaded {
                 self.shader_pack_failed(name, dimension, &panic);
             }
+        }
+        if let Some(layers) = shader_layers {
+            self.set_shader_layers(layers);
         }
         let lerp = |(old, new): (f32, f32)| old + (new - old) * partial;
         let at = camera.floor().as_ivec3();
@@ -463,6 +484,7 @@ impl Game<'_> {
         };
         write_shader_options(&options);
         self.pack_ids = None;
+        self.set_shader_layers(Vec::new());
         if let Some(renderer) = &mut self.renderer {
             renderer.drop_shader_packs();
         }
@@ -473,6 +495,7 @@ impl Game<'_> {
     fn shader_pack_failed(&mut self, name: &str, dimension: i32, error: &str) {
         log::error!("shader pack {name}: turned off: {error}");
         self.pack_ids = None;
+        self.set_shader_layers(Vec::new());
         if let Some(renderer) = &mut self.renderer {
             // Marks this dimension as loaded, without a pack, so it is not tried again.
             renderer.set_shader_pack(dimension, None, &[]);
@@ -487,13 +510,22 @@ impl Game<'_> {
         ));
     }
 
-    /// Tag synchronization changes shader IDs even when the chosen pack and dimension stay
+    /// Publish state overrides to mesh-job snapshots and rebuild affected resident terrain.
+    fn set_shader_layers(&mut self, layers: Vec<Option<BlockRenderLayer>>) {
+        if *layers != *self.streaming.shader_layers {
+            self.streaming.shader_layers = layers.into();
+            self.all_sections_changed();
+        }
+    }
+
+    /// Tag synchronization changes IDs/layers even when the chosen pack and dimension stay
     /// the same. Re-read the original rules and rebuild terrain on the next frame.
     pub(super) fn shader_pack_tags_changed(&mut self) {
         if self.pack_ids.as_ref().is_none_or(|ids| !ids.uses_tags) {
             return;
         }
         self.pack_ids = None;
+        self.streaming.shader_layers = Vec::new().into();
         if let Some(renderer) = &mut self.renderer {
             renderer.drop_shader_packs();
         }

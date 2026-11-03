@@ -18,6 +18,7 @@
 
 mod biomes;
 mod block_ids;
+mod block_layers;
 mod condition;
 mod config;
 mod core_shader;
@@ -36,6 +37,7 @@ mod translate;
 
 pub use biomes::{category as biome_category, precipitation as biome_precipitation};
 pub use block_ids::BlockIds;
+pub use block_layers::{BlockLayers, BlockRenderLayer};
 pub use condition::eval_condition;
 pub use config::{BUFFERS, Buffer, Config, Format, Kind, Shadow, buffer_index, draw_buffers};
 pub use core_shader::{BLOCKS, CoreProgram, Glue, SAMPLERS, translate_core};

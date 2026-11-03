@@ -268,6 +268,7 @@ struct MeshSettings {
     smooth_lighting: bool,
     cutout_leaves: bool,
     translucent_layers: Arc<[bool]>,
+    shader_layers: Arc<[Option<horizon_shaders::BlockRenderLayer>]>,
     leaf_culling: LeafCullingMode,
 }
 enum Job {
@@ -521,6 +522,8 @@ pub struct Streaming {
     /// Sprite layers a shader pack draws in the translucent pass (`[[materials]]
     /// translucent`), by layer; empty without one.
     pub translucent_layers: Arc<[bool]>,
+    /// Shader render-layer override by state; empty keeps model/sprite defaults.
+    pub shader_layers: Arc<[Option<horizon_shaders::BlockRenderLayer>]>,
     /// What the mesher does with leaf faces inside a canopy (`LeafCullingMode`).
     pub leaf_culling: LeafCullingMode,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
@@ -940,6 +943,7 @@ impl<G: ChunkGenerator> Jobs<G> {
                     smooth_lighting: settings.smooth_lighting,
                     cutout_leaves: settings.cutout_leaves,
                     translucent_layers: &settings.translucent_layers,
+                    shader_layers: &settings.shader_layers,
                     leaf_culling: settings.leaf_culling,
                     assets: &context.assets,
                     render: &context.render,
@@ -1051,6 +1055,7 @@ impl Streaming {
             smooth_lighting: true,
             cutout_leaves: true,
             translucent_layers: Arc::from([]),
+            shader_layers: Arc::from([]),
             leaf_culling: LeafCullingMode::Off,
             light_tables,
             light_log: Vec::new(),
@@ -2032,6 +2037,7 @@ impl Streaming {
                             smooth_lighting: self.smooth_lighting,
                             cutout_leaves: self.cutout_leaves,
                             translucent_layers: self.translucent_layers.clone(),
+                            shader_layers: self.shader_layers.clone(),
                             leaf_culling: self.leaf_culling,
                         },
                     ),
