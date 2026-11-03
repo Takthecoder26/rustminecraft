@@ -8,6 +8,9 @@ use std::num::NonZeroU64;
 /// Large enough for a tick of animated sprites at 16x16 with every mip level.
 const CHUNK: u64 = 1 << 20;
 
+const ROW_ALIGNMENT: u64 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64;
+const BUFFER_ALIGNMENT: u64 = wgpu::COPY_BUFFER_ALIGNMENT;
+
 pub struct Uploads {
     belt: wgpu::util::StagingBelt,
     chunk: u64,
@@ -52,20 +55,23 @@ impl Uploads {
     ) {
         let row = width as usize * 4;
         debug_assert_eq!(pixels.len(), row * height as usize);
-        let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+        let padded = row.next_multiple_of(ROW_ALIGNMENT as usize);
         let Some(size) = NonZeroU64::new((padded * height as usize) as u64) else {
             return;
         };
-        let alignment = NonZeroU64::new(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT))
-            .expect("non-zero alignment");
+        let alignment =
+            NonZeroU64::new(ROW_ALIGNMENT).expect("non-zero alignment");
         let slice = self.allocate(size, alignment);
         {
             let mut view = slice
                 .get_mapped_range_mut()
                 .expect("staging belt slices are mapped");
-            for (i, src) in pixels.chunks(row).enumerate() {
-                view.slice(i * padded..i * padded + row)
-                    .copy_from_slice(src);
+            if padded == row {
+                view.copy_from_slice(pixels);
+            } else {
+                for (i, src) in pixels.chunks(row).enumerate() {
+                    view.slice(i * padded..i * padded + row).copy_from_slice(src);
+                }
             }
         }
         encoder.copy_buffer_to_texture(
@@ -100,18 +106,20 @@ impl Uploads {
         // The belt's own `write_buffer` checks, kept now that a large write's
         // slice is rounded up past them.
         assert!(
-            offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
-                && size.get().is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT),
+            offset.is_multiple_of(BUFFER_ALIGNMENT)
+                && size.get().is_multiple_of(BUFFER_ALIGNMENT),
             "buffer upload at {offset} of {size} bytes must be 4-byte aligned"
         );
-        let alignment = NonZeroU64::new(wgpu::COPY_BUFFER_ALIGNMENT).expect("non-zero alignment");
-        let slice = self.allocate(size, alignment).slice(..size.get());
-        encoder.copy_buffer_to_buffer(slice.buffer(), slice.offset(), target, offset, size.get());
+        let alignment = NonZeroU64::new(BUFFER_ALIGNMENT).expect("non-zero alignment");
+        let slice = self.allocate(size, alignment);
+        // Fill the staging memory before recording the copy so the CPU work
+        // happens as soon as the allocation is in hand.
         slice
             .get_mapped_range_mut()
             .expect("staging belt slices are mapped")
-            .slice(..)
+            .slice(..bytes.len())
             .copy_from_slice(bytes);
+        encoder.copy_buffer_to_buffer(slice.buffer(), slice.offset(), target, offset, size.get());
     }
     /// Close this frame's staging buffers: they come back for reuse once the
     /// encoder's submission finishes on the GPU.
