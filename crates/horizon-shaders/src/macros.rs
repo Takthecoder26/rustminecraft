@@ -44,7 +44,7 @@ struct Macro {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Macros(BTreeMap<String, Macro>);
+pub struct Macros(BTreeMap<String, Macro>, BTreeMap<String, bool>);
 
 /// `MC_RENDER_STAGE_*` in the order the stages draw (spec 5.4); each is its index (OQ-7).
 pub const RENDER_STAGES: [&str; 24] = [
@@ -135,6 +135,23 @@ impl Macros {
         self.define("MC_MIPMAP_LEVEL", mipmap_levels.to_string());
     }
 
+    /// Sets a feature's availability from the host, before reading a pack's properties.
+    /// GPU-dependent contracts override the static defaults without exposing host state as
+    /// a shader macro. A supported optional feature is still defined only when requested.
+    pub fn define_supported_feature(&mut self, name: &str, supported: bool) {
+        self.1.insert(name.to_owned(), supported);
+        if !supported {
+            self.undef(&format!("IRIS_FEATURE_{name}"));
+        }
+    }
+
+    fn supports_feature(&self, name: &str) -> bool {
+        self.1
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| FEATURES.contains(&name))
+    }
+
     /// `iris.features.optional`'s features Horizon has, as `IRIS_FEATURE_<name>`; a note for
     /// each feature `iris.features.required` names that it lacks.
     pub fn define_features(&mut self, properties: &crate::Properties) -> Vec<String> {
@@ -145,13 +162,13 @@ impl Macros {
                 .unwrap_or_default()
         };
         for feature in words("iris.features.optional") {
-            if FEATURES.contains(&feature.as_str()) {
+            if self.supports_feature(&feature) {
                 self.define(format!("IRIS_FEATURE_{feature}"), "");
             }
         }
         words("iris.features.required")
             .into_iter()
-            .filter(|f| !FEATURES.contains(&f.as_str()))
+            .filter(|f| !self.supports_feature(f))
             .map(|f| format!("the pack requires `{f}`, which is not supported yet"))
             .collect()
     }
