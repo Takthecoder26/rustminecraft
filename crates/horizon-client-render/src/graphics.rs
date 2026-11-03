@@ -445,6 +445,33 @@ pub fn reduced_far_detail_suggested() -> bool {
     REDUCED_SUGGESTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static LOW_SPEC_GPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether this GPU counts as low-spec: integrated (other than Apple's) or
+/// an older/virtual adapter. Set when the renderer starts; used to take the
+/// cheaper paths (fewer dynamic lights, reduced far detail, less fog) without
+/// changing vanilla's look on capable hardware.
+pub fn suggest_low_spec_gpu(on: bool) {
+    LOW_SPEC_GPU.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn low_spec_gpu_suggested() -> bool {
+    LOW_SPEC_GPU.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Whether `info` describes a low-spec GPU, for the render optimizations
+/// that fall back to cheaper variants on such hardware.
+pub fn low_spec_gpu(info: &wgpu::AdapterInfo) -> bool {
+    if lod_capped(info) {
+        return true;
+    }
+    let name = info.name.to_ascii_lowercase();
+    info.device_type == wgpu::DeviceType::Cpu
+        || info.device_type == wgpu::DeviceType::VirtualGpu
+        || name.contains("hd graphics")
+        || name.contains("uhd graphics")
+        || name.contains("vega")
+        || name.contains("mali")
+        || name.contains("adreno")
+}
+
 /// The name the options screen waits on to bind `Graphics::hdr_key`.
 pub const HDR_KEY: &str = "horizon.hdrSettings";
 /// The Screenshot Quality choices, times the game's resolution.

@@ -2029,6 +2029,7 @@ impl Renderer {
         }
         let info = adapter.get_info();
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
+        crate::graphics::suggest_low_spec_gpu(crate::graphics::low_spec_gpu(&info));
         let size = window.inner_size();
         let max_side = device.limits().max_texture_dimension_2d;
         let (config, present_modes, hdr_output) = if let Some(surface) = &surface {
