@@ -71,10 +71,8 @@ pub(super) fn resolve_pending_leash(
                 Some((Holder::Player, Some(player)))
             } else if let Some(id) = mob_by_uuid(u) {
                 Some((Holder::Mob(id), None))
-            } else if let Some(id) = boat_by_uuid(u) {
-                Some((Holder::Boat(id), None))
             } else {
-                None
+                boat_by_uuid(u).map(|id| (Holder::Boat(id), None))
             }
         }
     }
@@ -117,9 +115,7 @@ pub(super) fn player_matches_leash_holder(
     }
     if is_singleplayer {
         let is_owner = |u: [i32; 4]| {
-            u == [0, 0, 0, 1]
-                || singleplayer_owner == Some(u)
-                || level_player == Some(u)
+            u == [0, 0, 0, 1] || singleplayer_owner == Some(u) || level_player == Some(u)
         };
         if is_owner(p) && is_owner(acting) {
             return true;
@@ -254,7 +250,9 @@ impl Game<'_> {
             .filter(|&i| {
                 let m = &self.mobs[i];
                 m.extra.leash == Some(Holder::Player)
-                    && m.extra.leash_player.is_none_or(|p| self.is_same_player(p, acting))
+                    && m.extra
+                        .leash_player
+                        .is_none_or(|p| self.is_same_player(p, acting))
                     && (m.position.x - around.x).abs() <= 16.0
                     && (m.position.y - around.y).abs() <= 16.0
                     && (m.position.z - around.z).abs() <= 16.0
@@ -372,12 +370,9 @@ impl Game<'_> {
         map.remove(&"leash".into());
         let m = &self.mobs[index];
         let player = self.mob_leash_player(m);
-        let value = serialize_leash_data(
-            m.extra.leash,
-            m.extra.leash_pending,
-            player,
-            |id| self.mob_uuid(id),
-        );
+        let value = serialize_leash_data(m.extra.leash, m.extra.leash_pending, player, |id| {
+            self.mob_uuid(id)
+        });
         if let Some(v) = value {
             map.insert("leash".into(), v);
         }
@@ -818,12 +813,7 @@ mod tests {
 
     #[test]
     fn serialize_leash_preserves_player_uuid() {
-        let tag = serialize_leash_data(
-            Some(Holder::Player),
-            None,
-            Some(PLAYER_UUID),
-            |_| [0; 4],
-        );
+        let tag = serialize_leash_data(Some(Holder::Player), None, Some(PLAYER_UUID), |_| [0; 4]);
         let Some(Tag::Compound(map)) = tag else {
             panic!("expected compound tag for player leash");
         };
@@ -836,12 +826,7 @@ mod tests {
 
     #[test]
     fn serialize_leash_preserves_pending_uuid() {
-        let tag = serialize_leash_data(
-            None,
-            Some(Pending::Uuid(PLAYER_UUID)),
-            None,
-            |_| [0; 4],
-        );
+        let tag = serialize_leash_data(None, Some(Pending::Uuid(PLAYER_UUID)), None, |_| [0; 4]);
         let Some(Tag::Compound(map)) = tag else {
             panic!("expected compound tag for pending leash");
         };
@@ -920,13 +905,8 @@ mod tests {
     #[test]
     fn resolve_pending_leash_resolves_knots_mobs_and_boats() {
         let knot = [10, 64, -20];
-        let knot_resolved = resolve_pending_leash(
-            Pending::Knot(knot),
-            |_| false,
-            || None,
-            |_| None,
-            |_| None,
-        );
+        let knot_resolved =
+            resolve_pending_leash(Pending::Knot(knot), |_| false, || None, |_| None, |_| None);
         assert_eq!(knot_resolved, Some((Holder::Knot(knot), None)));
 
         let mob_resolved = resolve_pending_leash(
