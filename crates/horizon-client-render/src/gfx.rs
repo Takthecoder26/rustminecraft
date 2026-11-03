@@ -7715,21 +7715,31 @@ impl Renderer {
             translucent_item_quads,
             oit_entity_quads,
         ] = self.entity_batch.update(
-            entities,
-            frame.additive,
-            frame.hand,
-            frame.see_through,
+            if frame.title { &[] } else { entities },
+            if frame.title { &[] } else { frame.additive },
+            if frame.title { &[] } else { frame.hand },
+            if frame.title { &[] } else { frame.see_through },
             oit_on,
         );
-        self.entity_batch.append_shadow_only(frame.shadow_only);
+        if !frame.title {
+            self.entity_batch.append_shadow_only(frame.shadow_only);
+        }
         // The posed models' vertices come first: the ordinary entities' draw takes them in.
-        let posed = if pack_skin {
+        let posed = if pack_skin || frame.title {
             0
         } else {
             skin.map_or(0, |s| s.vertices)
         };
-        let entity_quads = entity_quads + posed / 4;
-        let weather_quads = frame.weather.len() as u32 / 4;
+        let entity_quads = if frame.title {
+            0
+        } else {
+            entity_quads + posed / 4
+        };
+        let weather_quads = if frame.title {
+            0
+        } else {
+            frame.weather.len() as u32 / 4
+        };
         let world_quads = entity_quads
             + text_quads
             + crumbling_quads
@@ -7797,14 +7807,38 @@ impl Renderer {
             );
         }
         let all_entities = &self.entity_batch.combined;
-        let hand_quads = (frame.hand.len() / 4) as u32;
-        let additive_quads = (frame.additive.len() / 4) as u32 - self.entity_batch.moved_additive;
-        let see_through_quads = (frame.see_through.len() / 4) as u32;
-        let shadow_only_quads = (frame.shadow_only.len() / 4) as u32;
+        let hand_quads = if frame.title {
+            0
+        } else {
+            (frame.hand.len() / 4) as u32
+        };
+        let additive_quads = if frame.title {
+            0
+        } else {
+            (frame.additive.len() / 4) as u32 - self.entity_batch.moved_additive
+        };
+        let see_through_quads = if frame.title {
+            0
+        } else {
+            (frame.see_through.len() / 4) as u32
+        };
+        let shadow_only_quads = if frame.title {
+            0
+        } else {
+            (frame.shadow_only.len() / 4) as u32
+        };
         // Glowing entities' silhouettes posed on the GPU go last, past every
         // material (the outline pass draws them from there).
-        let outline_base = posed + all_entities.len() as u32;
-        let outlined = skin.map_or(0, |s| s.outline_vertices);
+        let outline_base = if frame.title {
+            0
+        } else {
+            posed + all_entities.len() as u32
+        };
+        let outlined = if frame.title {
+            0
+        } else {
+            skin.map_or(0, |s| s.outline_vertices)
+        };
         let entity_vertices = u64::from(outline_base) + u64::from(outlined);
         if entity_vertices > self.entity_capacity {
             self.entity_capacity = entity_vertices.next_power_of_two();
@@ -7823,7 +7857,9 @@ impl Renderer {
                 bytemuck::cast_slice(all_entities),
             );
         }
-        if let (Some(skinner), Some(skin)) = (&mut self.entity_skin, skin) {
+        if !frame.title
+            && let (Some(skinner), Some(skin)) = (&mut self.entity_skin, skin)
+        {
             if pack_skin {
                 let target = self
                     .pack_post
@@ -7975,8 +8011,12 @@ impl Renderer {
             &self.device,
             &mut self.uploads,
             &mut encoder,
-            frame.glowing,
-            (outline_base, outlined / 4),
+            if frame.title { &[] } else { frame.glowing },
+            if frame.title {
+                (0, 0)
+            } else {
+                (outline_base, outlined / 4)
+            },
             [self.config.width, self.config.height],
         );
         if let Some((rotation, brightness)) = frame.stars {
@@ -8430,7 +8470,7 @@ impl Renderer {
                 );
             }
             drop(pass);
-            if entity_quads > 0 || shadow_only_quads > 0 {
+            if !frame.title && (entity_quads > 0 || shadow_only_quads > 0) {
                 let mut pass = native
                     .frame
                     .shadow_map
@@ -9040,7 +9080,7 @@ impl Renderer {
                 pass.set_bind_group(0, &self.group, &[]);
             }
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
-            if entity_quads > 0 {
+            if !frame.title && entity_quads > 0 {
                 pass.set_pipeline(&self.entity_pipeline);
                 pass.set_bind_group(0, &self.entity_group, &[]);
                 pass.set_vertex_buffer(0, self.entity_buffer.slice(..));
@@ -10085,14 +10125,16 @@ impl Renderer {
             });
         }
         // GameRenderer.render: LevelRenderer.blitEntityOutline after the level and the hand.
-        self.entity_outline.draw(
-            encoder,
-            view_target,
-            &self.entity_group,
-            &self.indices,
-            &self.entity_buffer,
-            timing.as_mut(),
-        );
+        if !frame.title {
+            self.entity_outline.draw(
+                encoder,
+                view_target,
+                &self.entity_group,
+                &self.indices,
+                &self.entity_buffer,
+                timing.as_mut(),
+            );
+        }
         // The world icon grabs here: after the level and the hand, before
         // the effects and the HUD draw over them (`tryTakeScreenshotIfNeeded`
         // runs right after `renderLevel`).

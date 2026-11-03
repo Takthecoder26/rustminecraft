@@ -1186,6 +1186,7 @@ impl Game<'_> {
         // Out of the server's bed: InBedChatScreen goes with the level.
         self.sleeping = None;
         self.sleep_timer = 0;
+        self.clear_entities();
         self.mobs.clear();
         self.clear_remote_objects();
         self.clear_remote_projectiles();
@@ -3597,6 +3598,7 @@ impl Game<'_> {
                             (14, Value::OptPos(bed)) => {
                                 if bed.is_some() && self.sleeping.is_none() {
                                     self.sleep_timer = 0;
+                                    self.clear_entities();
                                 }
                                 self.sleeping = *bed;
                                 if let Some(head) = *bed {

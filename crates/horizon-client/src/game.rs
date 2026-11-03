@@ -12645,6 +12645,14 @@ impl Game<'_> {
         self.riding = None;
         self.persist = Default::default();
         self.entity_attachments.clear();
+        self.entity_vertices.clear();
+        self.see_through_vertices.clear();
+        self.glowing_vertices.get_mut().clear();
+        self.shadow_only_vertices.get_mut().clear();
+        self.skin_models
+            .borrow_mut()
+            .restart(&mut self.skin_frame.borrow_mut());
+        self.skin_frame.borrow_mut().clear_draws();
     }
     /// Equipment attribute modifiers (LivingEntity.collectEquipmentChanges).
     fn apply_equipment(&mut self) {
@@ -15862,7 +15870,7 @@ impl Game<'_> {
             // No level behind the panorama, so no entity either: the GPU path's
             // draws are started by `begin_skinning`, which only `entity_geometry`
             // runs, and would otherwise stay those of the last world frame and
-            // be drawn over the title (#8192). Its models stay stored.
+            // be drawn over the title (#8192, #8696). Its models stay stored.
             self.skin_frame.get_mut().clear_draws();
         }
         let bolts = if title {
@@ -16025,13 +16033,13 @@ impl Game<'_> {
                 fast: self.settings.clouds == "fast",
                 color: sky.cloud_color,
             }),
-            entities: &entities,
+            entities: if title { &[] } else { &entities },
             static_block_entities: &static_block_entities,
             visible_static_block_entity_sections: &visible_static_block_entity_sections,
             static_block_entity_stats,
             entity_motion: &entity_motion,
             entity_spans: &entity_spans,
-            skin: skin.pending().then_some(&skin),
+            skin: (!title).then(|| skin.pending().then_some(&skin)).flatten(),
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
             colored_lights: &colored_lights,
