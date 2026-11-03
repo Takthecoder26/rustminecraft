@@ -26,6 +26,10 @@ env:
   # Test runs never reach the telemetry server: no live-count ping, no uploads (docs/telemetry.md).
   HORIZON_TELEMETRY_URL: "off"
 
+concurrency:
+  group: parity-${{ inputs.head }}
+  cancel-in-progress: true
+
 jobs:
   parity:
     runs-on: ${{ inputs.full && fromJSON('["self-hosted", "horizon-game", "playhorizon"]') || fromJSON('["self-hosted", "horizon-game"]') }}

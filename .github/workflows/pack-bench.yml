@@ -20,6 +20,10 @@ env:
   HORIZON_TELEMETRY_URL: "off"
   CARGO_TERM_COLOR: never
 
+concurrency:
+  group: pack-bench-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   bench:
     runs-on: ubuntu-latest

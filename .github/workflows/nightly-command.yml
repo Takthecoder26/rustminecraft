@@ -15,6 +15,9 @@ on:
     types: [created]
 permissions:
   contents: read
+concurrency:
+  group: nightly-command-${{ github.event.issue.number }}
+  cancel-in-progress: false
 jobs:
   command:
     # Every other comment skips here, before a runner starts.

@@ -35,6 +35,9 @@ on:
         default: true
 permissions:
   contents: read
+concurrency:
+  group: game-build-${{ inputs.ref }}
+  cancel-in-progress: false
 jobs:
   exporters:
     # This runner holds the maintainer's own pinned Minecraft jars. Only our classes leave it. An untrusted build

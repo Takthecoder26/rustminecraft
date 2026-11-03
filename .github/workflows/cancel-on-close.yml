@@ -7,6 +7,9 @@ on:
     types: [closed]
 permissions:
   actions: write
+concurrency:
+  group: cancel-on-close-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 jobs:
   cancel:
     # One of playhorizon's small runners, out of GitHub's shared pool: no checkout, no code of the pull request
