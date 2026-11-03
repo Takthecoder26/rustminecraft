@@ -45,11 +45,13 @@ pub(super) struct ShadowTargets {
     pub depth1: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// Both sides of each shadowcolor buffer used.
     pub color: [Option<[wgpu::TextureView; 2]>; 2],
-    /// The clear colour of each buffer cleared every frame.
+    /// Pre-write main contents for sampler/image feedback or compute snapshot loads.
     pub scratch: [Option<wgpu::TextureView>; 2],
+    /// Buffers used as images; these need frame clearing even with the shadow cache enabled.
     pub storage: u16,
     /// Shadow-resolution invocation coverage for fragment programs writing only images.
     pub sink: Option<wgpu::TextureView>,
+    /// The clear colour of each buffer cleared every frame.
     pub clears: [Option<[f32; 4]>; 2],
     /// Bit n set: B is shadowcolor n's "main".
     pub main: u16,
@@ -128,7 +130,12 @@ impl ShadowTargets {
             (colors & 1 << n != 0).then(|| {
                 [0, 1].map(|side| {
                     let label = format!("Shader pack shadowcolor{n} {}", ["A", "B"][side]);
-                    target(device, &label, size, formats[n], copy | storage_usage(n)).1
+                    let usages = if (storage | copied) & 1 << n != 0 {
+                        copy | storage_usage(n)
+                    } else {
+                        wgpu::TextureUsages::empty()
+                    };
+                    target(device, &label, size, formats[n], usages).1
                 })
             })
         });
