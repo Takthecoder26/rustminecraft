@@ -1581,9 +1581,12 @@ impl Codec<Commands> for Commands {
                 w.string(&n.name);
             }
             if n.kind == 2 {
-                let (id, props) = n.parser.clone().unwrap_or((5, Vec::new()));
+                let (id, props): (i32, &[u8]) = match &n.parser {
+                    Some((id, props)) => (*id, props.as_slice()),
+                    None => (5, &[]),
+                };
                 w.varint(id);
-                w.bytes(&props);
+                w.bytes(props);
                 if let Some(s) = &n.suggestions {
                     w.string(s);
                 }

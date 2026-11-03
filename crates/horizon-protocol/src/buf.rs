@@ -159,7 +159,9 @@ pub struct Writer {
 }
 impl Writer {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            data: Vec::with_capacity(64),
+        }
     }
     pub fn u8(&mut self, v: u8) {
         self.data.push(v);
@@ -357,7 +359,11 @@ pub struct List<C>(PhantomData<C>);
 impl<T, C: Codec<T>> Codec<Vec<T>> for List<C> {
     fn read(r: &mut Reader) -> Result<Vec<T>> {
         let n = r.count(r.remaining())?;
-        (0..n).map(|_| C::read(r)).collect()
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(C::read(r)?);
+        }
+        Ok(out)
     }
     fn write(v: &Vec<T>, w: &mut Writer) {
         w.varint(v.len() as i32);
