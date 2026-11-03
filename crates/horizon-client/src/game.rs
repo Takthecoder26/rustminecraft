@@ -18216,7 +18216,8 @@ impl Game<'_> {
                             }
                             PhysicalKey::Code(KeyCode::Escape) => {
                                 if let Some(t) = self.title.as_mut() {
-                                    t.escape();
+                                    let action = t.escape_action();
+                                    self.title_action(event_loop, action)?;
                                     self.reopen_data_packs(event_loop)?;
                                 }
                                 self.save_title_options();
@@ -21013,6 +21014,9 @@ impl Loading {
         self.draw_menu(&mut batch);
         self.menu.frame_drawn((batch.width, batch.height));
         let mut frame = loading_frame(&batch);
+        if self.menu.friends_overlay_open() && self.settings.menu_blur >= 1 {
+            frame.menu_blur = Some(self.settings.menu_blur as f32);
+        }
         frame.yaw = self.panorama_rotation.update(
             self.started.elapsed().as_secs_f32(),
             self.settings.file.double("panoramaScrollSpeed") as f32,

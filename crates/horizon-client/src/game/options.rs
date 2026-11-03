@@ -173,6 +173,23 @@ impl Game<'_> {
         }
     }
     pub(super) fn draw_options(&mut self, batch: &mut HudBatch) {
+        if self.ui.options.page() == Page::Friends {
+            let cursor = self.cursor;
+            self.cursor = (-1.0, -1.0);
+            if let Some(title) = &self.title {
+                title.draw_with_items(
+                    &self.gui.atlas,
+                    Some(&self.pack.item_renderer),
+                    batch,
+                    self.cursor,
+                    self.settings.file.bool("hideSplashTexts"),
+                );
+            } else {
+                self.draw_pause_menu(batch);
+            }
+            self.cursor = cursor;
+            batch.blur_at = batch.vertices.len() as u32;
+        }
         self.watch_pack_folder();
         let mut ui = std::mem::take(&mut self.ui.options);
         ui.draw(&self.settings, batch, &self.gui.atlas, self.cursor);
@@ -267,6 +284,10 @@ impl Game<'_> {
     pub(super) fn options_key(&mut self, key: KeyCode, text: Option<&str>) -> Result<()> {
         let size = self.gui_size();
         let shift = self.has_shift_down();
+        let control = self.has_control_down_with_quirk();
+        if let Some(events) = self.ui.options.friends_tab_shortcut(key, control, shift) {
+            return self.handle_option_events(events);
+        }
         let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
             [r.config.width as i32, r.config.height as i32]
         });
@@ -317,6 +338,12 @@ impl Game<'_> {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
                 Event::Online(action) => self.online_option_action(action),
+                Event::CopyFriendProfile => {
+                    use horizon_client::clipboard::Clipboard;
+                    if let Some(auth) = horizon_client::auth::current() {
+                        self.clipboard.set(&auth.name);
+                    }
+                }
                 Event::JoinFriendCode => {
                     if let Some(title) = &mut self.title {
                         title.mode = horizon_client::title::Mode::Multiplayer(

@@ -1163,6 +1163,12 @@ impl Title {
         if let Mode::Multiplayer(screen) = &mut self.mode {
             return screen.drag(cursor.1, size);
         }
+        if let Mode::Realms(state) = &mut self.mode {
+            if !state.drag_configuration(cursor, size) {
+                state.drag_scrollbar(cursor.1, size.1);
+            }
+            return;
+        }
         if let Mode::CreateFlat { flat, .. } = &mut self.mode {
             flat::drag(flat, cursor, size);
             return;
@@ -1185,6 +1191,10 @@ impl Title {
         }
         if let Mode::Multiplayer(screen) = &mut self.mode {
             screen.release();
+        }
+        if let Mode::Realms(state) = &mut self.mode {
+            state.release_scrollbar();
+            state.release_configuration();
         }
         if let Mode::CreateFlat { flat, .. } = &mut self.mode {
             flat::release(flat);
@@ -2422,11 +2432,18 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         Some(info)
     }
 
+    fn button_height(&self, button: &Button) -> f32 {
+        match &self.mode {
+            Mode::Realms(state) => state.button_height(button),
+            _ => 20.0,
+        }
+    }
+
     /// A button's narration: `gui.narrate.button` of its label, or the icon
     /// buttons' own message and tooltip, in the order the screen adds them.
     fn button_narration(&self, b: &Button) -> crate::widgets::Narratable {
         use crate::widgets::Narratable;
-        let rect = [b.x, b.y, b.w, 20.0];
+        let rect = [b.x, b.y, b.w, self.button_height(b)];
         match &self.mode {
             Mode::Main => {}
             Mode::Create {
@@ -3184,13 +3201,21 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             ),
         }
         for b in self.buttons(w, h) {
-            crate::widgets::record(&b.label, [b.x, b.y, b.w, 20.0], b.enabled);
-            let inside =
-                cursor.0 >= b.x && cursor.0 < b.x + b.w && cursor.1 >= b.y && cursor.1 < b.y + 20.0;
+            let height = self.button_height(&b);
+            crate::widgets::record(&b.label, [b.x, b.y, b.w, height], b.enabled);
+            let inside = cursor.0 >= b.x
+                && cursor.0 < b.x + b.w
+                && cursor.1 >= b.y
+                && cursor.1 < b.y + height;
             crate::widgets::narratable(|| self.button_narration(&b).hovered(inside));
             crate::widgets::widget_cursor(inside, b.enabled);
             let is_focused = self.focused_button == Some(b.id);
             let hover = b.enabled && (inside || is_focused);
+            if let Mode::Realms(state) = &self.mode
+                && state.draw_button(atlas, batch, &b, hover)
+            {
+                continue;
+            }
             let sprite = if !b.enabled {
                 "gui/sprites/widget/button_disabled"
             } else if hover {
@@ -3240,6 +3265,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     u32::MAX,
                 );
             }
+        }
+        if let Mode::Realms(state) = &self.mode {
+            state.draw_tooltip(atlas, batch, cursor);
         }
         if let Some(from) = fade_from {
             self.draw_onboarding_logo(atlas, batch, w, from);
@@ -3320,7 +3348,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         let hovered = self
             .buttons(size.0, size.1)
             .into_iter()
-            .find(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0);
+            .find(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + self.button_height(b));
         let key = match hovered.map(|b| b.id) {
             Some(10) => "selectWorld.requiresFileFixingTooltip.play",
             Some(13) => "selectWorld.requiresFileFixingTooltip.edit",
@@ -3436,7 +3464,13 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         let hit = self
             .buttons(w, h)
             .into_iter()
-            .find(|b| b.enabled && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + 20.0)
+            .find(|b| {
+                b.enabled
+                    && x >= b.x
+                    && x < b.x + b.w
+                    && y >= b.y
+                    && y < b.y + self.button_height(b)
+            })
             .map(|b| b.id);
         if hit.is_some() {
             self.focused_button = hit;
@@ -4037,9 +4071,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             if let Some(button) = self
                 .buttons(size.0, size.1)
                 .into_iter()
-                .find(|b| b.id == 10 && b.enabled)
+                .find(|b| b.id == 13 && b.enabled)
             {
-                return (self.click_action(button.x, button.y, size, Some(10)), true);
+                return (self.click_action(button.x, button.y, size, Some(13)), true);
             }
             return (Action::None, false);
         }
@@ -4588,6 +4622,20 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             self.next_ban_notice();
         }
     }
+    pub fn escape_action(&mut self) -> Action {
+        if let Mode::Realms(state) = &mut self.mode {
+            let (action, close) = state.back_action();
+            if close {
+                self.mode = Mode::Main;
+            }
+            self.focused_button = None;
+            action
+        } else {
+            self.escape();
+            Action::None
+        }
+    }
+
     pub fn escape(&mut self) {
         // GenericMessageScreen.shouldCloseOnEsc is false: the preparing
         // read takes no input, the player's options survive it.

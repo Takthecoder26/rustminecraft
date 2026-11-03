@@ -116,8 +116,8 @@ fn pause_buttons(
 }
 
 /// The icon row: report bugs, feedback, friends, player reporting.
-/// `FRIENDS_ICON` (vanilla's `CommonButtons.friends`) opens Horizon's
-/// Play with Friends; the first two open their link through
+/// `FRIENDS_ICON` (vanilla's `CommonButtons.friends`) opens the official
+/// friends overlay; the first two open their link through
 /// `ConfirmLinkScreen`; player reporting opens `SocialInteractionsScreen`.
 const FRIENDS_ICON: usize = 2;
 /// `CommonLinks.SNAPSHOT_BUGS_FEEDBACK`, behind `PauseScreen.REPORT_BUGS`.
@@ -233,7 +233,7 @@ impl Game<'_> {
         self.remote.is_some() && self.integrated.is_none()
     }
     pub(super) fn draw_pause_menu(&mut self, batch: &mut HudBatch) {
-        let friends = self.friends_view().shown;
+        let friends = !self.options.split_guest;
         let atlas = &self.gui.atlas;
         let (w, h) = (batch.width, batch.height);
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, true);
@@ -292,7 +292,7 @@ impl Game<'_> {
             // control socket's widget tree.
             if i == FRIENDS_ICON {
                 horizon_client::widgets::record(
-                    horizon_client::friends_screen::TITLE,
+                    &Text::translate("gui.friends.open", &[]).plain(),
                     [x, y, 20.0, 20.0],
                     active,
                 );
@@ -332,7 +332,7 @@ impl Game<'_> {
             batch.sprite_scaled(atlas, sprite, x + 3.0, y + 3.0, 15.0, 15.0, u32::MAX);
             if hover {
                 tooltip = Some(if i == FRIENDS_ICON {
-                    Text::literal(horizon_client::friends_screen::title())
+                    Text::translate("gui.friends.open.tooltip", &[])
                 } else {
                     Text::translate(ICON_LABELS[i], &[])
                 });
@@ -360,7 +360,7 @@ impl Game<'_> {
             3 => self.open_stats(),
             4 => self.open_advancements(true),
             9 => self.open_world_options(),
-            10 => self.screen = Screen::Friends,
+            10 => self.open_options_at(false, horizon_client::options_ui::Page::Friends),
             // DialogConnectionAccess.openDialog(Dialogs.SERVER_LINKS).
             11 => {
                 self.links_ui.scroll = 0.0;
@@ -425,7 +425,7 @@ impl Game<'_> {
                 .map(|i| 12 + i as u8)
         })
         .or_else(|| {
-            (self.friends_view().shown
+            (!self.options.split_guest
                 && ui::hovered(self.cursor, friends.0, friends.1, 20.0, 20.0))
             .then_some(10)
         });
@@ -455,7 +455,7 @@ impl Game<'_> {
             self.options.split_guest || self.split_hud.menu,
         );
         let mut active_ids: Vec<u8> = buttons.into_iter().filter(|b| b.5).map(|b| b.4).collect();
-        let friends = self.friends_view().shown;
+        let friends = !self.options.split_guest;
         active_ids.extend(pause_icon_focus_ids(friends));
         if active_ids.is_empty() {
             return Ok(());
@@ -507,7 +507,7 @@ impl Game<'_> {
                     .filter(|b| b.5)
                     .map(|b| (b.4, b.0, b.1, b.2))
                     .collect();
-                let friends = self.friends_view().shown;
+                let friends = !self.options.split_guest;
                 for (i, (x, y, _)) in pause_icons(
                     w,
                     h,

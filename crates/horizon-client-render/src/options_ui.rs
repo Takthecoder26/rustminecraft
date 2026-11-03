@@ -4,6 +4,8 @@
 //! OptionsList screens and drawn with the shared widgets.
 use std::time::Instant;
 
+mod friends;
+
 pub use crate::settings::Opt;
 
 use crate::{
@@ -1307,6 +1309,7 @@ pub enum OnlineAction {
 enum Act {
     None,
     Online(OnlineAction),
+    FriendsTab(bool),
     Push(Page),
     Done,
     Cycle(Opt),
@@ -1348,6 +1351,7 @@ enum Act {
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
+    CopyFriendProfile,
     /// AI Agent: start or stop the repro recording.
     ToggleRecording,
     /// AI Agent: write the repro bundle now.
@@ -1492,6 +1496,7 @@ pub enum Event {
     Credits,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
+    CopyFriendProfile,
     /// The AI Agent page's recording button: start or stop.
     ToggleRecording,
     /// The AI Agent page's export button.
@@ -1544,9 +1549,18 @@ pub struct OptionsUi {
     online_privacy: bool,
     friend_removal: Option<(u128, String)>,
     friend_list: crate::social_service::FriendsList,
+    friend_order: Vec<usize>,
+    friend_list_refreshed: bool,
     friend_presence: crate::social_service::PresenceResponse,
     friend_profile: String,
     friends_ready: bool,
+    friends_high_contrast: bool,
+    friends_pending_tab: bool,
+    friends_text_height: f32,
+    friends_profile_rect: [f32; 4],
+    friends_link_rects: Vec<[f32; 4]>,
+    friends_dialog_buttons: [[f32; 4]; 2],
+    friends_pending_action: Option<OnlineAction>,
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
@@ -1644,9 +1658,18 @@ impl Default for OptionsUi {
             online_privacy: false,
             friend_removal: None,
             friend_list: Default::default(),
+            friend_order: Vec::new(),
+            friend_list_refreshed: true,
             friend_presence: Default::default(),
             friend_profile: String::new(),
             friends_ready: false,
+            friends_high_contrast: false,
+            friends_pending_tab: false,
+            friends_text_height: 0.0,
+            friends_profile_rect: [0.0; 4],
+            friends_link_rects: Vec::new(),
+            friends_dialog_buttons: [[0.0; 4]; 2],
+            friends_pending_action: None,
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
@@ -2104,8 +2127,13 @@ fn pairs(opts: &[Opt]) -> Vec<Row> {
 impl OptionsUi {
     pub fn set_online_status(&mut self, status: OnlineStatus) {
         if !status.available {
-            self.online_consent = false;
+            if self.page() != Page::Friends {
+                self.online_consent = false;
+            }
             self.friend_removal = None;
+        }
+        if !status.busy {
+            self.friends_pending_action = None;
         }
         self.online_status = status;
     }
@@ -2117,6 +2145,10 @@ impl OptionsUi {
         presence: Option<&crate::social_service::PresenceResponse>,
         ready: bool,
     ) {
+        let refresh = self.friend_list_refreshed
+            || self.friend_profile != profile
+            || friends != Some(&self.friend_list)
+            || (ready && !self.friends_ready);
         if self.friend_profile != profile {
             self.friend_removal = None;
             self.clear_friend_request();
@@ -2129,6 +2161,17 @@ impl OptionsUi {
             self.friend_presence = presence.cloned().unwrap_or_default();
         }
         self.friends_ready = ready;
+        if refresh {
+            self.refresh_friend_order();
+            self.friend_list_refreshed = false;
+        }
+    }
+
+    /// Mark a completed list fetch even when its contents are unchanged. The next
+    /// set_friends snapshots its ordering using the latest presence; presence-only
+    /// updates keep the existing entry order (FriendsTab.applyPresenceUpdate).
+    pub fn mark_friends_list_refreshed(&mut self) {
+        self.friend_list_refreshed = true;
     }
 
     pub fn friend_request_name(&self) -> &str {
@@ -2148,9 +2191,11 @@ impl OptionsUi {
 
     fn friends_editable(&self) -> bool {
         self.page() == Page::Friends
+            && !self.friends_pending_tab
             && self.friends_ready
             && self.online_status.available
             && self.online_status.friends_enabled
+            && self.friend_list_error().is_none()
             && !self.online_status.busy
             && !self.split_guest
             && !self.online_consent
@@ -2162,6 +2207,20 @@ impl OptionsUi {
         self.online_consent = true;
         self.focus = None;
         self.scroll = 0.0;
+    }
+
+    /// Complete the Friends entry-point consent request. Only success opens the overlay;
+    /// a failed settings update leaves the confirmation available for retry.
+    pub fn complete_friends_consent(&mut self, successful: bool) {
+        if self.page() == Page::Friends && self.online_consent {
+            self.online_status.busy = false;
+            if successful {
+                self.online_consent = false;
+                self.online_status.friends_enabled = true;
+                self.online_status.allow_requests = true;
+                self.focus = None;
+            }
+        }
     }
 
     fn online_action(&mut self, action: OnlineAction, events: &mut Vec<Event>) {
@@ -2187,13 +2246,40 @@ impl OptionsUi {
             }
             _ => {}
         }
+        if let OnlineAction::ConfirmRemoval(true) = action {
+            self.friends_pending_action = self
+                .friend_removal
+                .as_ref()
+                .map(|(id, _)| OnlineAction::RemoveFriend(*id));
+        } else if matches!(
+            action,
+            OnlineAction::SendRequest
+                | OnlineAction::AcceptRequest(_)
+                | OnlineAction::DeclineRequest(_)
+                | OnlineAction::RevokeRequest(_)
+        ) {
+            self.friends_pending_action = Some(action);
+        }
         if matches!(action, OnlineAction::ConfirmRemoval(_)) {
             self.friend_removal = None;
             self.focus = None;
         }
-        if matches!(action, OnlineAction::ConfirmFriends(_)) {
-            self.online_consent = false;
+        if let OnlineAction::ConfirmFriends(accepted) = action {
             self.focus = None;
+            if self.page() == Page::Friends {
+                if accepted {
+                    self.online_status.busy = true;
+                } else {
+                    self.online_consent = false;
+                    self.stack.clear();
+                    self.settings_search.focused = false;
+                    events.push(Event::Online(action));
+                    events.push(Event::Close);
+                    return;
+                }
+            } else {
+                self.online_consent = false;
+            }
         }
         events.push(Event::Online(action));
     }
@@ -2334,6 +2420,10 @@ impl OptionsUi {
         self.selected_key = None;
     }
     fn push(&mut self, page: Page) {
+        if page == Page::Friends {
+            self.friends_pending_tab = false;
+            self.refresh_friend_order();
+        }
         self.stack.push(page);
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
@@ -2444,6 +2534,7 @@ impl OptionsUi {
             + match self.page() {
                 Page::KeyBinds | Page::PadBinds => 178.0,
                 Page::Language => 118.0,
+                Page::Friends => 104.0,
                 _ => 163.0,
             }
     }
@@ -2840,16 +2931,6 @@ impl OptionsUi {
                         None,
                     ),
                 ];
-                rows.push(Row::Buttons(
-                    button(
-                        0.0,
-                        0.0,
-                        310.0,
-                        tr("gui.friends.open"),
-                        Act::Push(Page::Friends),
-                    ),
-                    None,
-                ));
                 if let Some(message) = state.message {
                     rows.push(Row::Header(message));
                 }
@@ -2867,145 +2948,7 @@ impl OptionsUi {
                 ));
                 rows
             }
-            Page::Friends => {
-                let state = &self.online_status;
-                let active = self.friends_editable();
-                let control = |key, name: &str, action, enabled| {
-                    let label = tr(key).append(Text::literal(format!(": {name}")));
-                    let widget = button(0.0, 0.0, 150.0, label, Act::Online(action));
-                    if enabled { widget } else { inactive(widget) }
-                };
-                let mut rows = vec![Row::Note(
-                    tr("gui.friends.my_profile_name")
-                        .append(Text::literal(&self.friend_profile))
-                        .plain(),
-                )];
-                if !state.friends_enabled {
-                    rows.push(Row::Buttons(
-                        control(
-                            "options.friendsList",
-                            "",
-                            OnlineAction::FriendsList,
-                            state.available && !state.busy && !self.split_guest,
-                        ),
-                        None,
-                    ));
-                } else {
-                    rows.push(Row::Buttons(
-                        control(
-                            "gui.friends.send_request",
-                            "",
-                            OnlineAction::SendRequest,
-                            active && !self.friend_request_name().is_empty(),
-                        ),
-                        None,
-                    ));
-                }
-                if let Some(message) = state.message {
-                    rows.push(Row::Header(message));
-                } else if state.busy {
-                    rows.push(Row::Header("gui.friends.loading_friends"));
-                } else if !state.available {
-                    rows.push(Row::Header("gui.friends.error.unauthorized"));
-                }
-                if state.friends_enabled {
-                    rows.push(Row::Header("gui.friends.tab_friends"));
-                    if self.friends_ready && self.friend_list.friends.is_empty() {
-                        rows.push(Row::Note(
-                            Text::translate(
-                                "gui.friends.empty_state",
-                                &[tr("gui.friends.empty_state.link")],
-                            )
-                            .plain(),
-                        ));
-                    }
-                    for friend in &self.friend_list.friends {
-                        let status = self
-                            .friend_presence
-                            .presence
-                            .iter()
-                            .find(|p| p.profile_id == friend.profile_id)
-                            .map_or(crate::social_service::PresenceStatus::Offline, |p| p.status);
-                        use crate::social_service::PresenceStatus as P;
-                        let key = match status {
-                            P::Online => "online",
-                            P::Offline => "offline",
-                            P::PlayingOffline => "playing_offline",
-                            P::PlayingRealms => "playing_realms",
-                            P::PlayingServer => "playing_server",
-                            P::PlayingHostedServer => "playing_hosted_server",
-                        };
-                        rows.push(Row::Note(
-                            Text::literal(format!("{}: ", friend.name))
-                                .append(tr(&format!("gui.friends.presence.status.{key}")))
-                                .plain(),
-                        ));
-                        rows.push(Row::Buttons(
-                            control(
-                                "gui.friends.unfriend",
-                                &friend.name,
-                                OnlineAction::RemoveFriend(friend.profile_id),
-                                active,
-                            ),
-                            None,
-                        ));
-                    }
-                    for (header, list, remove, key) in [
-                        (
-                            "gui.friends.pending.received",
-                            &self.friend_list.incoming_requests,
-                            OnlineAction::DeclineRequest as fn(u128) -> OnlineAction,
-                            "gui.friends.decline",
-                        ),
-                        (
-                            "gui.friends.pending.sent",
-                            &self.friend_list.outgoing_requests,
-                            OnlineAction::RevokeRequest as fn(u128) -> OnlineAction,
-                            "gui.friends.cancel_request",
-                        ),
-                    ] {
-                        rows.push(Row::Header(header));
-                        if self.friends_ready && list.is_empty() {
-                            rows.push(Row::Header("gui.friends.pending.empty"));
-                        }
-                        for friend in list {
-                            let accept = (header == "gui.friends.pending.received").then(|| {
-                                control(
-                                    "gui.friends.accept",
-                                    &friend.name,
-                                    OnlineAction::AcceptRequest(friend.profile_id),
-                                    active,
-                                )
-                            });
-                            rows.push(Row::Buttons(
-                                control(key, &friend.name, remove(friend.profile_id), active),
-                                accept,
-                            ));
-                        }
-                    }
-                }
-                rows.push(Row::Buttons(
-                    button(
-                        0.0,
-                        0.0,
-                        310.0,
-                        tr("options.online.xboxSettings"),
-                        Act::Online(OnlineAction::XboxPrivacy),
-                    ),
-                    None,
-                ));
-                rows.push(Row::Buttons(
-                    button(
-                        0.0,
-                        0.0,
-                        310.0,
-                        tr("horizon.friends.title"),
-                        Act::Online(OnlineAction::JoinByCode),
-                    ),
-                    None,
-                ));
-                rows
-            }
+            Page::Friends => Vec::new(),
             Page::Controls => {
                 let mut rows = vec![Row::Buttons(
                     button(
@@ -3234,6 +3177,12 @@ impl OptionsUi {
         let mut rows = ListRows::default();
         let page = self.page();
         let cx = (w / 2.0).floor();
+        if page == Page::Friends
+            && !self.online_privacy
+            && (self.online_consent || self.friend_removal.is_some())
+        {
+            return (self.friends_dialog_layout(), 0.0, 0.0, 0.0);
+        }
         if self.friend_removal.is_some() {
             out.push(button(
                 cx - 155.0,
@@ -3292,10 +3241,12 @@ impl OptionsUi {
             ));
             return (out, 0.0, 0.0, 0.0);
         }
-        if matches!(
-            page,
-            Page::Video | Page::Controls | Page::KeyBinds | Page::Friends
-        ) {
+        if page == Page::Friends {
+            return self.friends_layout(w, h);
+        }
+        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
+            self.settings_search.width = 200.0;
+            self.settings_search.height = 15.0;
             self.settings_search.x = cx - 100.0;
             self.settings_search.y = 17.0;
         }
@@ -4032,6 +3983,15 @@ impl OptionsUi {
             crate::screen_draw::paint(batch, atlas, &draws);
             return;
         }
+        if page == Page::Friends && !self.online_privacy {
+            self.friends_high_contrast = s.high_contrast;
+            if self.online_consent || self.friend_removal.is_some() {
+                self.draw_friends_dialog(batch, atlas, cursor);
+            } else {
+                self.draw_friends(batch, atlas, cursor);
+            }
+            return;
+        }
         let (widgets, top, bottom, content) = self.layout(s, w, h);
         self.size = (w, h);
         let in_world = self.in_world;
@@ -4498,6 +4458,18 @@ impl OptionsUi {
             }
             return events;
         }
+        if self.friends_overlay_visible()
+            && !drag
+            && !ui::hovered(
+                (x, y),
+                (size.0 / 2.0).floor() - 118.0,
+                13.0,
+                236.0,
+                size.1 - 37.0,
+            )
+        {
+            return self.back(s);
+        }
         let (widgets, top, bottom, content) = self.layout(s, size.0, size.1);
         self.size = size;
         self.framebuffer = framebuffer;
@@ -4775,6 +4747,8 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::CopyFriendProfile => events.push(Event::CopyFriendProfile),
+                        Act::FriendsTab(pending) => self.select_friends_tab(pending),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
                         Act::Online(action) => self.online_action(action, &mut events),
@@ -5356,7 +5330,9 @@ impl OptionsUi {
             if !self.friends_editable() {
                 self.focus = None;
             } else if key == K::Enter && !self.friend_request_name().is_empty() {
-                return vec![Event::ButtonClick, Event::Online(OnlineAction::SendRequest)];
+                let mut events = vec![Event::ButtonClick];
+                self.online_action(OnlineAction::SendRequest, &mut events);
+                return events;
             }
         }
         // Search field text entry when search box is focused
@@ -5715,6 +5691,8 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::CopyFriendProfile => events.push(Event::CopyFriendProfile),
+                        Act::FriendsTab(pending) => self.select_friends_tab(pending),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
                         Act::Online(action) => self.online_action(action, &mut events),

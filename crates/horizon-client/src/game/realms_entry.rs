@@ -252,20 +252,9 @@ impl RealmEntryState {
                         name: target.identity.name.clone(),
                     };
                     let mut client = RealmsClient::new();
-                    // Match RealmsRuntime's gate on this fresh client: feature
-                    // flags also select the upload service's request format.
-                    client
-                        .refresh_feature_flags(&auth)
-                        .map_err(|e| e.to_string())?;
-                    if client.client_compatible(&auth).map_err(|e| e.to_string())? != "COMPATIBLE" {
-                        return Err("mco.errorMessage.6001".into());
-                    }
-                    if !client
-                        .has_parental_consent(&auth)
-                        .map_err(|e| e.to_string())?
-                    {
-                        return Err("mco.account.privacy.information".into());
-                    }
+                    // This fresh client shares the availability checks and the
+                    // feature-flag legacy fallback used by the menu controller.
+                    super::realms::gate(&mut client, &auth).map_err(|e| e.to_string())?;
                     if worker_control.cancel.load(Ordering::Acquire)
                         || !same_account(&target.identity)
                     {

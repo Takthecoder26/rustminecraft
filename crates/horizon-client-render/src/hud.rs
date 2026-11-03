@@ -1077,8 +1077,19 @@ impl HudAtlas {
             }
         }
         files.retain(|p| {
-            let s = p.to_string_lossy();
-            !s.contains("title/background") && !s.contains("realms") && !s.contains("presets")
+            let s = p
+                .strip_prefix(&textures)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace(char::from(92), "/");
+            (!s.starts_with("gui/title/background/")
+                || matches!(
+                    s.as_str(),
+                    "gui/title/background/panorama_0.png"
+                        | "gui/title/background/panorama_2.png"
+                        | "gui/title/background/panorama_3.png"
+                ))
+                && !s.starts_with("gui/presets/")
         });
         // OptiFine random entity variants, under the names their scan gives them (those
         // outside `textures/` are `<ns>:optifine/random/...`).
@@ -1200,12 +1211,15 @@ impl HudAtlas {
             let flags = mcmeta.as_deref().and_then(TextureFlags::from_mcmeta);
             let animated = frames && animation.is_some();
             let (gw, gh) = gui_size.unwrap_or((w, h));
-            (gw <= 1024 && (gh <= 512 || name.starts_with("font/"))).then_some((
-                (name, w, h, pixels),
-                flags,
-                gui_size,
-                animated,
-            ))
+            let realm_preview = matches!(
+                name.as_str(),
+                "gui/title/background/panorama_0"
+                    | "gui/title/background/panorama_2"
+                    | "gui/title/background/panorama_3"
+            );
+            (gw <= 1024
+                && (gh <= 512 || name.starts_with("font/") || (realm_preview && gh <= 1024)))
+                .then_some(((name, w, h, pixels), flags, gui_size, animated))
         };
         let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
         let chunk = files.len().div_ceil(threads).max(1);

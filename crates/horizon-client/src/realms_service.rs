@@ -195,8 +195,16 @@ impl RealmsClient {
     }
     /// Vanilla obtains this flag from the legacy origin, before choosing the AKS origin.
     pub fn refresh_feature_flags(&mut self, auth: &RealmsAuth) -> RealmsResult<Vec<String>> {
-        let request = self.request(auth, "GET", &format!("{LEGACY}/feature/v1"), false)?;
-        let flags: Vec<String> = decode(&response_text(request.call())?)?;
+        // RealmsClient.fetchFeatureFlags treats both transport and parse failures
+        // as an empty set, selecting the legacy service rather than failing availability.
+        let flags: Vec<String> = (|| {
+            let request = self.request(auth, "GET", &format!("{LEGACY}/feature/v1"), false)?;
+            decode(&response_text(request.call())?)
+        })()
+        .unwrap_or_else(|error: RealmsError| {
+            log::warn!("Realms feature flags: {error}");
+            Vec::new()
+        });
         self.origin = if flags.iter().any(|f| f == "realms_in_aks") {
             AKS
         } else {

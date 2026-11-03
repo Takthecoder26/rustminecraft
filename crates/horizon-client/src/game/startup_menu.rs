@@ -54,6 +54,10 @@ pub(super) struct StartupMenu {
 }
 
 impl StartupMenu {
+    pub(super) fn friends_overlay_open(&self) -> bool {
+        self.options_open && self.options.page() == Page::Friends
+    }
+
     pub(super) fn stop_online(&mut self) {
         self.online.send_offline_presence();
         self.realms.cancel();
@@ -287,7 +291,7 @@ impl StartupMenu {
             return Action::None;
         }
         match event.physical_key {
-            PhysicalKey::Code(KeyCode::Escape) => title.escape(),
+            PhysicalKey::Code(KeyCode::Escape) => return title.escape_action(),
             PhysicalKey::Code(KeyCode::F5) => title.refresh_servers(),
             PhysicalKey::Code(KeyCode::Tab) => {
                 title.tab_dir(self.modifiers.shift_key(), viewport);
@@ -524,6 +528,12 @@ impl Loading {
                             horizon_client::multiplayer::Screen::friend(),
                         );
                         self.menu.options_open = false;
+                    }
+                }
+                Event::CopyFriendProfile => {
+                    use horizon_client::clipboard::Clipboard;
+                    if let Some(auth) = horizon_client::auth::current() {
+                        self.menu.clipboard.set(&auth.name);
                     }
                 }
                 Event::Online(action) => {
@@ -1174,6 +1184,21 @@ impl Loading {
                     self.apply_menu_settings();
                     self.save_menu_settings();
                 } else if self.menu.options_open {
+                    let control = if cfg!(target_os = "macos") {
+                        self.menu.modifiers.super_key()
+                    } else {
+                        self.menu.modifiers.control_key()
+                    };
+                    if let PhysicalKey::Code(key) = event.physical_key
+                        && let Some(events) = self.menu.options.friends_tab_shortcut(
+                            key,
+                            control,
+                            self.menu.modifiers.shift_key(),
+                        )
+                    {
+                        self.menu_option_events(events);
+                        return Ok(());
+                    }
                     let shortcut = self.menu.shortcut(&event);
                     let atlas = &self.gui.as_ref().unwrap().atlas;
                     let handled = shortcut.is_some_and(|s| {
@@ -1264,6 +1289,22 @@ impl Loading {
                 self.menu.win = None;
             }
         } else if self.menu.options_open {
+            if self.menu.options.page() == Page::Friends
+                && let Some(title) = &self.menu.title
+            {
+                let items = match &self.loaded {
+                    Some(Ok(loaded)) => Some(&*loaded.pack.item_renderer),
+                    _ => None,
+                };
+                title.draw_with_items(
+                    &gui.atlas,
+                    items,
+                    batch,
+                    (-1.0, -1.0),
+                    self.settings.file.bool("hideSplashTexts"),
+                );
+                batch.blur_at = batch.vertices.len() as u32;
+            }
             self.menu
                 .options
                 .draw(&self.settings, batch, &gui.atlas, self.menu.cursor);

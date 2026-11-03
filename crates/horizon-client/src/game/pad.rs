@@ -342,7 +342,9 @@ impl Game<'_> {
             return self.options_key(KeyCode::Escape, None);
         }
         if let Some(title) = self.title.as_mut() {
-            title.escape();
+            if let horizon_client::title::Action::Realms(action) = title.escape_action() {
+                self.realms.start(action, title);
+            }
             self.save_title_options();
             return Ok(());
         }

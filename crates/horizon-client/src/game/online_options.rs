@@ -253,6 +253,7 @@ impl OnlineState {
                 }
                 Reply::Attributes(Err(error)) => self.failure(&error),
                 Reply::Settings(list, requests, result) => {
+                    ui.complete_friends_consent(result.is_ok());
                     match result {
                         Ok(_) => {
                             self.friends_enabled = list;
@@ -261,11 +262,19 @@ impl OnlineState {
                             self.friends_at = Instant::now();
                         }
                         Err(error) => {
-                            // Vanilla rolls back disabling only. Enabling was consented
-                            // optimistically; request-only changes were not applied yet.
-                            if !list && let Some((old_list, old_requests)) = self.rollback {
+                            // The entry confirmation stays open until enabling succeeds.
+                            // Restore its runtime gate as well, so Turn On can retry.
+                            let retry_consent = ui.page() == Page::Friends
+                                && list
+                                && self.rollback.is_some_and(|(enabled, _)| !enabled);
+                            if (!list || retry_consent)
+                                && let Some((old_list, old_requests)) = self.rollback
+                            {
                                 self.friends_enabled = old_list;
                                 self.allow_requests = old_requests;
+                            }
+                            if retry_consent {
+                                self.consent = true;
                             }
                             self.failure(&error);
                         }
@@ -274,6 +283,7 @@ impl OnlineState {
                 }
                 Reply::UpdateFriend(result) => match result {
                     Ok(data) => {
+                        ui.mark_friends_list_refreshed();
                         if let Some(data) = data {
                             self.friends = Some(data);
                         }
@@ -293,6 +303,7 @@ impl OnlineState {
                     match result {
                         Ok(data) if cache != CacheState::Stale => {
                             if self.friends_enabled {
+                                ui.mark_friends_list_refreshed();
                                 if let Some(previous) = &self.friends
                                     && self.friends_success
                                     && (!in_world || settings.file.bool("inGameNotification"))
@@ -371,6 +382,15 @@ impl OnlineState {
                 }
             }
         }
+        if self.loaded
+            && ui.page() == Page::Friends
+            && !self.friends_enabled
+            && !self.busy
+            && !self.consent
+        {
+            self.consent = true;
+            ui.confirm_online_friends();
+        }
         ui.set_online_status(self.status(realms_available));
         ui.set_friends(
             self.worker.as_ref().map_or("", |w| w.session.name.as_str()),
@@ -405,6 +425,9 @@ impl OnlineState {
             return false;
         }
         if action == OnlineAction::ConfirmFriends(false) {
+            if self.busy && self.rollback.is_some() {
+                self.cancel_updates();
+            }
             self.consent = false;
             return false;
         }

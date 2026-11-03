@@ -6,7 +6,7 @@ use horizon_client::{
     realms_transfer::{self, TransferControl},
     title::{
         Mode, Title,
-        realms::{Page, RealmsAction},
+        realms::{AvailabilityErrorKind, Page, RealmsAction},
     },
 };
 use serde_json::{Value, json};
@@ -38,11 +38,23 @@ enum Update {
     Servers {
         realms: Value,
         snapshots: Value,
-        trial: bool,
     },
+    RefreshServers,
     Snapshots(Value),
     Invites(Value),
     Server(Value, Option<Page>),
+    Configuration {
+        server: Value,
+        subscription: RealmsResult<Value>,
+        tier: RealmsResult<Value>,
+        regions: RealmsResult<Value>,
+    },
+    SettingsSaved {
+        server: Value,
+        render_distance: Option<u32>,
+        simulation_distance: Option<u32>,
+        continuation: Option<Box<RealmsAction>>,
+    },
     SnapshotCreated {
         realm: Value,
         error: Option<RealmsError>,
@@ -69,6 +81,7 @@ struct Pending {
     identity: Arc<auth::AuthSession>,
     page: Page,
     generation: u64,
+    state_generation: u64,
     attempts: u8,
     retry_at: Option<Instant>,
     control: TransferControl,
@@ -77,10 +90,82 @@ struct Notices {
     receiver: Receiver<RealmsResult<(Value, Value)>>,
     identity: Arc<auth::AuthSession>,
 }
+/// DataFetcher keeps the last successful value in the UI; failures only change
+/// the next update time. Each task owns its receiver, so slow trial/news requests
+/// cannot hold up the server list.
+struct FetchTask<T> {
+    receiver: Option<Receiver<(RealmsResult<T>, Instant)>>,
+    due: Option<Instant>,
+    failures: u32,
+}
+impl<T: Send + 'static> Default for FetchTask<T> {
+    fn default() -> Self {
+        Self {
+            receiver: None,
+            due: None,
+            failures: 0,
+        }
+    }
+}
+impl<T: Send + 'static> FetchTask<T> {
+    fn poll(&mut self, period: u64, backoff: u64, stage: &'static str) -> Option<T> {
+        let (result, completed) = match self.receiver.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => (Err(RealmsError::Transport), Instant::now()),
+        };
+        self.receiver = None;
+        let cycles = if result.is_ok() {
+            self.failures = 0;
+            1
+        } else {
+            self.failures = self.failures.saturating_add(1);
+            (1u64 << self.failures.min(63)).min(backoff)
+        };
+        self.due = Some(completed + Duration::from_secs(period * cycles));
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                log::warn!("Realms {stage}: {error}");
+                None
+            }
+        }
+    }
+    fn start(&mut self, fetch: impl FnOnce() -> RealmsResult<T> + Send + 'static) {
+        if self.receiver.is_some() || self.due.is_some_and(|due| Instant::now() < due) {
+            return;
+        }
+        let (send, receiver) = mpsc::channel();
+        self.receiver = Some(receiver);
+        let _ = std::thread::Builder::new()
+            .name("Realms data fetch".into())
+            .spawn(move || {
+                let result = fetch();
+                let _ = send.send((result, Instant::now()));
+            });
+    }
+}
+struct AvailabilityFailure {
+    kind: AvailabilityErrorKind,
+    error: RealmsError,
+}
+struct Subscription {
+    identity: Arc<auth::AuthSession>,
+    generation: u64,
+    availability: Option<Receiver<Result<RealmsClient, AvailabilityFailure>>>,
+    client: Option<RealmsClient>,
+    servers: FetchTask<(Value, Value)>,
+    trial: FetchTask<bool>,
+    invites: FetchTask<usize>,
+    news: FetchTask<Value>,
+    notifications: FetchTask<Value>,
+    news_link: Option<String>,
+}
 #[derive(Default)]
 pub(super) struct RealmsRuntime {
     pub connected_realm: Option<i64>,
     pending: Option<Pending>,
+    subscription: Option<Subscription>,
     generation: u64,
     notices: Option<Notices>,
     notices_due: Option<Instant>,
@@ -104,6 +189,10 @@ pub(super) fn prepare_title(title: &mut Title) {
 }
 impl RealmsRuntime {
     pub(super) fn cancel(&mut self) {
+        self.subscription = None;
+        self.cancel_pending();
+    }
+    fn cancel_pending(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         if let Some(pending) = self.pending.take() {
             pending.control.cancel.store(true, Ordering::Release);
@@ -128,14 +217,23 @@ impl RealmsRuntime {
                 Some(RealmsAction::Download { .. }) => "mco.download.cancelled",
                 _ => "gui.cancel",
             };
-            self.cancel();
+            self.cancel_pending();
             if let Some(state) = title.realms_mut() {
                 state.set_status(lang::get(key));
             }
             return;
         }
-        self.cancel();
+        self.cancel_pending();
+        if matches!(action, RealmsAction::Refresh) {
+            self.refresh(title);
+            return;
+        }
         // A background snapshot started before a mutation must not replace its result.
+        if let Some(subscription) = &mut self.subscription {
+            subscription.servers = FetchTask::default();
+            subscription.invites = FetchTask::default();
+            subscription.notifications = FetchTask::default();
+        }
         self.notices = None;
         prepare_title(title);
         let Some(state) = title.realms_mut() else {
@@ -147,12 +245,20 @@ impl RealmsRuntime {
         };
         state.set_loading(true);
         let page = state.page.clone();
+        let state_generation = state.request_generation;
         let control = TransferControl::default();
         let receiver = spawn(
             action.clone(),
             identity.clone(),
             title.saves.clone(),
             control.clone(),
+            self.subscription
+                .as_ref()
+                .filter(|subscription| {
+                    subscription.generation == state_generation
+                        && Arc::ptr_eq(&subscription.identity, &identity)
+                })
+                .and_then(|subscription| subscription.client.clone()),
         );
         self.pending = Some(Pending {
             receiver,
@@ -160,19 +266,175 @@ impl RealmsRuntime {
             identity,
             page,
             generation: self.generation,
+            state_generation,
             attempts: 0,
             retry_at: None,
             control,
         });
     }
+    fn refresh(&mut self, title: &mut Title) {
+        prepare_title(title);
+        let Some(state) = title.realms_mut() else {
+            return;
+        };
+        let Some(identity) = auth::current().filter(|_| state.eligible) else {
+            self.subscription = None;
+            state.set_availability_error_kind(
+                AvailabilityErrorKind::Unauthorized,
+                lang::get("mco.error.invalid.session.message"),
+            );
+            return;
+        };
+        if let Some(subscription) = &mut self.subscription
+            && subscription.generation == state.request_generation
+            && Arc::ptr_eq(&subscription.identity, &identity)
+        {
+            subscription.servers = FetchTask::default();
+            state.set_loading(!state.servers_loaded);
+            return;
+        }
+        state.set_loading(!state.servers_loaded);
+        let session = identity.clone();
+        let (send, receiver) = mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("Realms availability".into())
+            .spawn(move || {
+                let auth = credentials(&session);
+                let mut client = RealmsClient::new();
+                let result = availability(&mut client, &auth).map(|()| client);
+                let _ = send.send(result);
+            });
+        self.subscription = Some(Subscription {
+            identity,
+            generation: state.request_generation,
+            availability: Some(receiver),
+            client: None,
+            servers: FetchTask::default(),
+            trial: FetchTask::default(),
+            invites: FetchTask::default(),
+            news: FetchTask::default(),
+            notifications: FetchTask::default(),
+            news_link: None,
+        });
+    }
+    fn poll_subscription(&mut self, title: &mut Title) {
+        let Some(subscription) = &self.subscription else {
+            return;
+        };
+        let valid = title.allows_multiplayer
+            && auth::current()
+                .is_some_and(|identity| Arc::ptr_eq(&identity, &subscription.identity))
+            && matches!(&title.mode, Mode::Realms(state)
+                if state.request_generation == subscription.generation
+                    && state.page != Page::AvailabilityError);
+        if !valid {
+            self.subscription = None;
+            return;
+        }
+        let subscription = self.subscription.as_mut().unwrap();
+        let state = title.realms_mut().unwrap();
+        if let Some(receiver) = &subscription.availability {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => Err(AvailabilityFailure {
+                    kind: AvailabilityErrorKind::Service,
+                    error: RealmsError::Transport,
+                }),
+            };
+            subscription.availability = None;
+            match result {
+                Ok(client) => subscription.client = Some(client),
+                Err(failure) => {
+                    state.set_availability_error_kind(failure.kind, error_text(&failure.error));
+                    self.subscription = None;
+                    return;
+                }
+            }
+        }
+        let Some(client) = &subscription.client else {
+            return;
+        };
+        // Main and PDP subscribe to trial independently of list readiness. A
+        // background callback must never finish a foreground mutation's loading.
+        if matches!(state.page, Page::List | Page::Pdp) {
+            if let Some(trial) = subscription.trial.poll(60, 60, "trial") {
+                state.set_trial_available(trial);
+            }
+            let client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription
+                .trial
+                .start(move || client.trial_available(&credentials(&identity)));
+        }
+        if state.polls_server_list()
+            && self.pending.is_none()
+            && (!state.loading || !state.servers_loaded)
+        {
+            if let Some((realms, snapshots)) = subscription.servers.poll(60, 1, "server list") {
+                state.snapshot_realms = snapshots
+                    .get("servers")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                state.set_servers(realms);
+            }
+            let client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription
+                .servers
+                .start(move || fetch_servers(&client, &credentials(&identity)));
+        }
+        if matches!(state.page, Page::List | Page::Pdp) {
+            if let Some(count) = subscription.invites.poll(10, 360, "pending invites") {
+                self.invites = count;
+                state.set_pending_invite_count(count);
+            }
+            let invite_client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription.invites.start(move || {
+                Ok(invite_client
+                    .pending_invites(&credentials(&identity))?
+                    .invites
+                    .len())
+            });
+            if let Some(news) = subscription.news.poll(300, 1, "news") {
+                let link = news
+                    .get("newsLink")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                // Publishing only a changed link preserves a read badge after the
+                // player opens it. Persistence across launches belongs to the UI.
+                if link.is_some() && link != subscription.news_link {
+                    state.set_header_news(link.clone(), true);
+                    subscription.news_link = link;
+                }
+            }
+            let client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription
+                .news
+                .start(move || client.news(&credentials(&identity)));
+            if let Some(notifications) = subscription.notifications.poll(300, 1, "notifications") {
+                self.notifications = notifications.clone();
+                state.set_notifications(notifications);
+            }
+            let client = subscription.client.as_ref().unwrap().clone();
+            let identity = subscription.identity.clone();
+            subscription
+                .notifications
+                .start(move || client.notifications(&credentials(&identity)));
+        }
+    }
     pub(super) fn poll(&mut self, title: &mut Title) -> Option<Completion> {
+        self.poll_subscription(title);
         let pending = self.pending.as_ref()?;
         let valid = pending.generation == self.generation
             && auth::current().is_some_and(|s| Arc::ptr_eq(&s, &pending.identity))
             && title.allows_multiplayer
-            && matches!(&title.mode, Mode::Realms(s) if s.loading && s.page == pending.page && s.profile_uuid.as_deref() == Some(format!("{:032x}", pending.identity.uuid).as_str()));
+            && matches!(&title.mode, Mode::Realms(s) if s.loading && s.page == pending.page && s.request_generation == pending.state_generation && s.profile_uuid.as_deref() == Some(format!("{:032x}", pending.identity.uuid).as_str()));
         if !valid {
-            self.cancel();
+            self.cancel_pending();
             return None;
         }
         if let Some(at) = pending.retry_at {
@@ -186,6 +448,9 @@ impl RealmsRuntime {
                 auth::current()?,
                 title.saves.clone(),
                 pending.control.clone(),
+                self.subscription
+                    .as_ref()
+                    .and_then(|subscription| subscription.client.clone()),
             );
         }
         let result = match self.pending.as_ref()?.receiver.try_recv() {
@@ -241,6 +506,12 @@ impl RealmsRuntime {
         let state = title.realms_mut()?;
         state.set_loading(false);
         match result {
+            Err(error) if matches!(completed_action, RealmsAction::Configure(_)) => {
+                state.set_configuration_error(error_text(&error));
+            }
+            Err(error) if matches!(completed_action, RealmsAction::SaveSettings { .. }) => {
+                state.set_error(error_text(&error));
+            }
             Err(RealmsError::TermsRequired) => state.require_terms(),
             Err(error) => {
                 let message = if matches!(error, RealmsError::Transport) {
@@ -260,19 +531,22 @@ impl RealmsRuntime {
                 };
                 state.set_error(message);
             }
-            Ok(Update::Servers {
-                realms,
-                snapshots,
-                trial,
-            }) => {
+            Ok(Update::Servers { realms, snapshots }) => {
                 state.return_page(Page::List);
-                state.set_servers(realms);
                 state.snapshot_realms = snapshots
                     .get("servers")
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                state.trial_available = trial;
+                state.set_servers(realms);
+                if let Some(subscription) = &mut self.subscription {
+                    subscription.servers.due = Some(Instant::now() + Duration::from_secs(60));
+                }
+            }
+            Ok(Update::RefreshServers) => {
+                state.return_page(Page::List);
+                state.selected = None;
+                self.refresh(title);
             }
             Ok(Update::Snapshots(value)) => {
                 state.snapshot_realms = value
@@ -295,6 +569,59 @@ impl RealmsRuntime {
                     state.return_page(page);
                 }
                 state.set_server(value);
+            }
+            Ok(Update::Configuration {
+                server,
+                subscription,
+                tier,
+                regions,
+            }) => {
+                state.set_server(server);
+                let mut failure = None;
+                match subscription {
+                    Ok(value) => state.set_subscription(value),
+                    Err(error) => failure = Some(error),
+                }
+                match tier {
+                    Ok(value) => state.set_tier_configuration(value),
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+                match regions {
+                    Ok(value) => state.set_regions(value),
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
+                if let Some(error) = failure {
+                    state.set_configuration_error(error_text(&error));
+                }
+            }
+            Ok(Update::SettingsSaved {
+                server,
+                render_distance,
+                simulation_distance,
+                continuation,
+            }) => {
+                state.set_server(server);
+                for (key, distance) in [
+                    ("renderDistance", render_distance),
+                    ("simDistance", simulation_distance),
+                ] {
+                    if let Some(distance) = distance
+                        && let Some(range) = state
+                            .tier_configuration
+                            .get_mut(key)
+                            .and_then(Value::as_object_mut)
+                    {
+                        range.insert("current".into(), json!(distance));
+                    }
+                }
+                state.settings_saved();
+                if let Some(action) = continuation {
+                    self.start(*action, title);
+                }
             }
             Ok(Update::SnapshotCreated { realm, error }) => {
                 let id = realm.get("id").and_then(Value::as_i64);
@@ -361,6 +688,13 @@ impl RealmsRuntime {
     /// Disabled/offline/restricted accounts never start background service requests.
     pub(super) fn poll_notifications(&mut self, title: &mut Title, enabled: bool) {
         prepare_title(title);
+        // The Realms screen owns independent subscriptions even when title-screen
+        // notifications are disabled. Never overwrite those results with a stale
+        // title request or the disabled setting's empty value.
+        if matches!(title.mode, Mode::Realms(_)) {
+            self.notices = None;
+            return;
+        }
         if !enabled || !title.realms_eligible {
             self.notices = None;
             self.notices_due = None;
@@ -459,30 +793,59 @@ fn credentials(session: &auth::AuthSession) -> RealmsAuth {
         name: session.name.clone(),
     }
 }
-pub(super) fn gate(client: &mut RealmsClient, auth: &RealmsAuth) -> RealmsResult<()> {
-    client.refresh_feature_flags(auth)?;
-    if client.client_compatible(auth)? != "COMPATIBLE" {
-        return Err(RealmsError::Service {
-            status: 200,
-            code: Some(6001),
+fn availability(client: &mut RealmsClient, auth: &RealmsAuth) -> Result<(), AvailabilityFailure> {
+    let service_failure = |error| AvailabilityFailure {
+        kind: if error == RealmsError::Unauthorized {
+            AvailabilityErrorKind::Unauthorized
+        } else {
+            AvailabilityErrorKind::Service
+        },
+        error,
+    };
+    client
+        .refresh_feature_flags(auth)
+        .map_err(service_failure)?;
+    if client.client_compatible(auth).map_err(service_failure)? != "COMPATIBLE" {
+        return Err(AvailabilityFailure {
+            kind: AvailabilityErrorKind::Incompatible,
+            error: RealmsError::Service {
+                status: 200,
+                code: Some(6001),
+            },
         });
     }
-    if !client.has_parental_consent(auth)? {
-        return Err(RealmsError::Forbidden);
+    if !client.has_parental_consent(auth).map_err(service_failure)? {
+        return Err(AvailabilityFailure {
+            kind: AvailabilityErrorKind::ParentalConsent,
+            error: RealmsError::Forbidden,
+        });
     }
     Ok(())
+}
+pub(super) fn gate(client: &mut RealmsClient, auth: &RealmsAuth) -> RealmsResult<()> {
+    availability(client, auth).map_err(|failure| failure.error)
+}
+fn fetch_servers(client: &RealmsClient, auth: &RealmsAuth) -> RealmsResult<(Value, Value)> {
+    let realms = to_value(client.list_realms(auth)?)?;
+    let snapshots = if realms_service::is_snapshot() {
+        to_value(client.snapshot_eligible_realms(auth)?)?
+    } else {
+        Value::Null
+    };
+    Ok((realms, snapshots))
 }
 fn spawn(
     action: RealmsAction,
     identity: Arc<auth::AuthSession>,
     saves: PathBuf,
     control: TransferControl,
+    client: Option<RealmsClient>,
 ) -> Receiver<RealmsResult<Update>> {
     let (send, receiver) = mpsc::channel();
     let _ = std::thread::Builder::new()
         .name("Realms request".into())
         .spawn(move || {
-            let result = execute(action, &identity, &saves, &control);
+            let result = execute(action, &identity, &saves, &control, client);
             let _ = send.send(result);
         });
     receiver
@@ -540,6 +903,7 @@ fn execute(
     identity: &auth::AuthSession,
     saves: &std::path::Path,
     control: &TransferControl,
+    client: Option<RealmsClient>,
 ) -> RealmsResult<Update> {
     use RealmsAction::*;
     active(control)?;
@@ -569,8 +933,14 @@ fn execute(
         )));
     }
     let auth = credentials(identity);
-    let mut client = RealmsClient::new();
-    gate(&mut client, &auth)?;
+    let client = match client {
+        Some(client) => client,
+        None => {
+            let mut client = RealmsClient::new();
+            gate(&mut client, &auth)?;
+            client
+        }
+    };
     active(control)?;
     let servers = || -> RealmsResult<Update> {
         let realms = to_value(client.list_realms(&auth)?)?;
@@ -581,13 +951,7 @@ fn execute(
             Value::Null
         };
         active(control)?;
-        // Trial discovery must not hide an otherwise usable Realm list on failure.
-        let trial = client.trial_available(&auth).unwrap_or(false);
-        Ok(Update::Servers {
-            realms,
-            snapshots,
-            trial,
-        })
+        Ok(Update::Servers { realms, snapshots })
     };
     let server = |id, page| -> RealmsResult<Update> {
         Ok(Update::Server(
@@ -616,7 +980,7 @@ fn execute(
             }
             active(control)?;
             client.delete_realm(&auth, id)?;
-            servers()
+            Ok(Update::RefreshServers)
         }
         Join(id) => {
             let info = client.join(&auth, id)?;
@@ -648,7 +1012,30 @@ fn execute(
             client.reject_invitation(&auth, &id)?;
             invites()
         }
-        Configure(id) | Slots(id) | Players(id) => server(id, None),
+        Configure(id) => {
+            let realm = to_value(client.get_own_realm(&auth, id)?)?;
+            active(control)?;
+            // Each tab has its own vanilla future. Keep the required world even
+            // if another request fails, and never invent subscription/tier data.
+            let (subscription, tier, regions) = std::thread::scope(|scope| {
+                let subscription = scope.spawn(|| client.subscription_for(&auth, id));
+                let tier = scope.spawn(|| client.tier_configuration(&auth, id));
+                let regions = scope.spawn(|| client.preferred_regions(&auth));
+                (
+                    subscription.join().unwrap_or(Err(RealmsError::Transport)),
+                    tier.join().unwrap_or(Err(RealmsError::Transport)),
+                    regions.join().unwrap_or(Err(RealmsError::Transport)),
+                )
+            });
+            active(control)?;
+            Ok(Update::Configuration {
+                server: realm,
+                subscription,
+                tier,
+                regions,
+            })
+        }
+        Slots(id) | Players(id) => server(id, None),
         Initialize {
             id,
             name,
@@ -723,6 +1110,83 @@ fn execute(
                 client.update_configuration(&auth, id, &configuration)?;
             }
             server(id, Some(Page::Configure))
+        }
+        SaveSettings {
+            id,
+            name,
+            description,
+            preference,
+            render_distance,
+            simulation_distance,
+            continuation,
+        } => {
+            validate_region(&preference)?;
+            let mut realm = client.get_own_realm(&auth, id)?;
+            active(control)?;
+            let name = name.trim().to_owned();
+            let description = if description.trim().is_empty() {
+                String::new()
+            } else {
+                description
+            };
+            let mut preference = preference;
+            if preference
+                .get("regionSelectionPreference")
+                .and_then(Value::as_u64)
+                != Some(2)
+            {
+                preference["preferredRegion"] = Value::Null;
+            }
+            let old_preference = realm.extra.get("regionSelectionPreference");
+            let configuration_changed = realm.name.as_deref() != Some(name.as_str())
+                || realm.motd.as_deref() != Some(description.as_str())
+                || old_preference.and_then(|p| p.get("regionSelectionPreference"))
+                    != preference.get("regionSelectionPreference")
+                || old_preference
+                    .and_then(|p| p.get("preferredRegion"))
+                    .unwrap_or(&Value::Null)
+                    != preference.get("preferredRegion").unwrap_or(&Value::Null);
+            // The vanilla tab only supplies changed distances from its tier range.
+            // Validate those ranges before issuing any part of the save.
+            if render_distance.is_some() || simulation_distance.is_some() {
+                let tier = client.tier_configuration(&auth, id)?;
+                if let Some(distance) = render_distance {
+                    validate_distance(&tier, "renderDistance", distance)?;
+                }
+                if let Some(distance) = simulation_distance {
+                    validate_distance(&tier, "simDistance", distance)?;
+                }
+            }
+            active(control)?;
+            if configuration_changed {
+                let mut configuration = configuration(&realm)?;
+                configuration["description"]["name"] = json!(name);
+                configuration["description"]["description"] = json!(description);
+                configuration["regionSelectionPreference"] = preference.clone();
+                client.update_configuration(&auth, id, &configuration)?;
+            }
+            active(control)?;
+            if let Some(distance) = render_distance {
+                client.update_render_distance(&auth, id, distance)?;
+            }
+            active(control)?;
+            if let Some(distance) = simulation_distance {
+                client.update_simulation_distance(&auth, id, distance)?;
+            }
+            active(control)?;
+            // Vanilla updates its local DTO after all writes succeed; a readback
+            // failure must not turn a completed save into an apparent save failure.
+            realm.name = Some(name);
+            realm.motd = Some(description);
+            realm
+                .extra
+                .insert("regionSelectionPreference".into(), preference);
+            Ok(Update::SettingsSaved {
+                server: to_value(realm)?,
+                render_distance,
+                simulation_distance,
+                continuation,
+            })
         }
         SaveSlot { id, slot, options } => {
             let realm = client.get_own_realm(&auth, id)?;
@@ -815,7 +1279,7 @@ fn execute(
         }
         Leave(id) => {
             client.leave(&auth, id)?;
-            servers()
+            Ok(Update::RefreshServers)
         }
         InvitePlayer { id, name } => {
             client.invite(&auth, id, &name)?;
@@ -884,7 +1348,7 @@ fn execute(
         }
         RedeemInvite(code) => {
             client.redeem_invite_code(&auth, &code)?;
-            servers()
+            Ok(Update::RefreshServers)
         }
         MarkNotificationsSeen(ids) => {
             client.notifications_seen(&auth, &ids)?;
