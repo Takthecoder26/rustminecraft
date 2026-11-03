@@ -1051,6 +1051,25 @@ impl Loader<'_> {
     /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
     fn preprocess(&self, path: &str) -> Preprocessed {
         let mut pp = preprocess(self.pack, path, self.macros);
+        let fade = ["iris.features.optional", "iris.features.required"]
+            .iter()
+            .any(|key| {
+                self.properties.get(key).is_some_and(|features| {
+                    features.split_whitespace().any(|f| f == "FADE_VARIABLE")
+                })
+            });
+        let file = path.rsplit('/').next().unwrap_or(path);
+        if fade && file.starts_with("gbuffers_") && file.ends_with(".vsh") {
+            // The input is automatic and opt-in. Other gbuffers programs receive a
+            // constant sentinel, so it is also valid in constant expressions.
+            let declaration = if file.starts_with("gbuffers_terrain") {
+                "attribute float mc_chunkFade;\n"
+            } else {
+                "const float mc_chunkFade = -1.0;\n"
+            };
+            pp.code.insert_str(0, declaration);
+            pp.lines.insert(0, Default::default());
+        }
         if self.post.images.is_empty() || !pp.code.contains("image") {
             return pp;
         }

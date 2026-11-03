@@ -222,6 +222,12 @@ impl PackAtlas {
             "vec4(0.0)"
         };
         let attributes = [
+            // section_instance stores vanilla's visibility in the step's mantissa.
+            // The negative LOD transition encoding represents a whole section.
+            (
+                "mc_chunkFade",
+                "(hz_origin.w > 0.0 ? 1.0 - float(floatBitsToUint(hz_origin.w) & 0x7fffffu) / 8388608.0 : 1.0)",
+            ),
             ("mc_Entity", entity),
             ("at_midBlock", mid_block),
             (
@@ -371,3 +377,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "pack_atlas/fade_tests.rs"]
+mod fade_tests;
