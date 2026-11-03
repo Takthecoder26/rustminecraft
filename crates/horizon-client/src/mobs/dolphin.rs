@@ -274,9 +274,9 @@ impl Goal for Jump {
 /// Only the player the mob sees (the nearest) is considered.
 #[derive(Clone, Debug)]
 pub struct FollowPlayerRidden {
+    recalc: i32,
     nautilus: bool,
     following: bool,
-    recalc: i32,
     leading: bool,
 }
 impl FollowPlayerRidden {
