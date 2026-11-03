@@ -1,65 +1,85 @@
 # Horizon documentation
 
-To play, use [the launcher](../launcher/README.md); the project site is [playhorizon.dev](https://playhorizon.dev). These pages are for developers. What is being done now and next, the work board and how to help: [the hub](https://playhorizon.dev/hub) ([ROADMAP.md](../ROADMAP.md), [roadmap/README.md](../roadmap/README.md) for keeping it current).
+To play, use [the launcher](../launcher/README.md); the project site is [playhorizon.dev](https://playhorizon.dev). These pages are for developers. What is being done now and next, the work board and how to help: [the hub](https://playhorizon.dev/hub) ([ROADMAP.md](../ROADMAP.md), [roadmap/README.md](../roadmap/README.md)).
 
-## Build and run
+## Getting started and code map
 
 - [AGENTS.md](../AGENTS.md) and [Architecture](architecture.md): where each part of the code lives, how `Game` is organised, which harness checks which area.
 - [Build from source](../README.md#build-from-source): your own copy of the game, resource preparation, `cargo run`.
-- [Build times](build-times.md): `tools/build_times.py` measures cold and incremental builds per crate and the critical path, writes a JSON report and a table, and compares two reports; the first numbers, Windows and Linux.
-- [Native client](native-client.md): options, controls, the dedicated server, `horizon-ctl` scripting, packaging, architecture.
-- [Host a server](hosting.md): install `horizon-server`, prepare the game files, first run, `server.toml`, the commands, the web panel, backups, services and Docker; what works today and what doesn't yet.
-- [The anticheat](anticheat.md): the dedicated server's own checks, off unless `server.toml`'s `[anticheat]` turns them on: violation levels, setback, alerts, kicks, the log, and how to write a check.
-- [The chat filter](chat-filter.md): the dedicated server refuses hate slurs in chat, message commands, signs, anvil names and book titles: the list and its normalising, mutes, temporary bans, `[chat_filter]`.
-- [Hosting a server: design](server.md): `horizon-server`, the design and the plan: install, `server.toml`, the CLI, the web panel, backups, services, Docker, and the bot benchmark against vanilla.
-- [The next server: design](server-next.md): Horizon's dedicated server against vanilla and Pumpkin (measured), the targets, parallel ticking that keeps vanilla's order, the network front, the Horizon fast path, the plugin API and the plan.
-- [Survival multiplayer](smp.md): the official server's `smp` native mod (economy, market, trades, games of chance, spawn, homes, teleport requests, warps, land claims) and the server hook points it needs; not part of Horizon's own server.
-- [For server owners](owners.md): every `server.properties` key next to its `server.toml` field.
-- [Agent control](agent-control.md): what AI agents can drive in the launcher and the game, and the design of the control socket, `horizon-ctl` and MCP.
-- [Graphics](graphics.md): the graphics settings screen (pages, search, descriptions), the graphics benchmark and what it measured.
-- [Server against Pumpkin](performance/server-vs-pumpkin.md): Horizon's server and Pumpkin (Rust) under the same bots at 0, 20, 60 and 100 players: tick time, CPU, memory, chunks, join; where Horizon loses, and how to run it again.
-- [Benchmark](benchmark.md): Horizon against vanilla 26.3 and vanilla with performance mods, on the same machine, world, path and settings: what is measured, how it is kept fair, how to reproduce it.
-- [Extras](extras.md): optional zoom, minimap, FPS and keystroke overlays and auto-reconnect, all off by default.
-- [Narrator](narrator.md): vanilla's text-to-speech (Ctrl+B): the voices per platform, how screens record what they narrate, `horizon-ctl narration`, and where it still differs from vanilla.
-- [Shader packs](shaders.md): Horizon's own WGSL shader packs, how to make and check one (`horizon-shader`).
-- [Mods](mods.md): content mods (data) and native mods (Rust), how to make, install and publish them. [Native mods](native-mods.md): how the launcher builds them. [Native hook points modelled on NeoForge](native-hooks-neoforge.md): the proposal for new hooks.
-- [Upgrading a 26.2 data pack](datapack-upgrade.md): `horizon-port-pack upgrade-datapack` rewrites a 26.2 worldgen pack in 26.3's formats, and how the rewrite is checked against vanilla.
-- [Modpacks](modpacks.md): porting whole packs (ATM10 and smaller): import, inventory, carry-over, an agent per mod with a harness against the Java original, coverage, and how "10x" is measured.
-- [Launcher](../launcher/README.md): installs, updates and starts builds; its CLI and MCP server; releasing it.
-- [Versioning](versioning.md): how releases are numbered from 0.2 (`v0.2.x`, `launcher@0.2.x`), how installs from before 0.2 get there, and the steps for the day 0.2 ships.
-- [Resource packs](resource-packs.md): everything a 26.3 resource pack can change, whether Horizon honours it, and the proof.
-- [Opt-in data collection](telemetry.md): the consent, exactly what is sent, how it is stored and sent.
-- [Benchmark report format](benchmark-report.md): the versioned JSON every benchmark writes (game, launcher, `tools/perf_bench.py`), the local log and, with consent, the upload.
-- [Horizon APIs](api/README.md): every surface other programs build on (mods, shaders, agent control, servers, the launcher, data formats), each with its guide, generated reference, stability and changelog, and the [stability and versioning policy](api/stability.md).
-- Menus: every screen is vanilla's (title, world list, create world, multiplayer, options, pause), except Horizon's graphics settings, drawn in the design system's Blocks palette. Horizon's own settings hang off vanilla's Options the way mods add theirs: **Horizon Settings...** and **Mods...** in the last two slots of the Options grid (Horizon Settings opens the graphics settings screen, at General or Advanced, and Controller Settings, Extras and Mods, each a vanilla options list), with Horizon Graphics and Advanced Graphics also at the top of Video Settings and Controller Settings at the bottom of Controls. The title screen's and pause menu's Friends buttons open Join a Friend and Play with Friends ([play-with-friends.md](play-with-friends.md)).
+- [Build times](build-times.md): cold and incremental build measurement per crate and the critical path.
+- [How Horizon is built](how-horizon-is-built.md): the overall build and release pipeline.
+- [Native client](native-client.md): options, controls, the dedicated server, `horizon-ctl` scripting, packaging.
+- [Versioning](versioning.md): release numbering from 0.2 and upgrading older installs.
 
-## Parity
+## Server, hosting, and play
 
-- [Rust rewrite status](rust-parity.md): completion criteria, how to reproduce the validation, and per-area scope.
-- [Parity workflow](parity-workflow.md): `tools/parity.py`, the gate, other machines, merging.
-- [CI runners](ci-runners.md): which jobs run on GitHub's runners and which on ours (playhorizon, the Mac mini), and why a fork's pull request never runs on ours.
+- [Host a server](hosting.md): install, first run, `server.toml`, commands, web panel, backups, services, Docker.
+- [For server owners](owners.md): every `server.properties` key beside its `server.toml` field.
+- [Hosting: design](server.md) and [The next server](server-next.md): dedicated server design, targets and plan.
+- [The anticheat](anticheat.md) and [The chat filter](chat-filter.md): dedicated-server checks and message filtering.
+- [Survival multiplayer](smp.md): the official server's `smp` native mod.
+- [Security](security.md) and [Velocity forwarding](velocity-forwarding.md): hardening and proxy support.
+- [Play with Friends](play-with-friends.md): invite codes, tunnel, relay.
+- [Microsoft account](microsoft-account.md): login flow.
+- [Server against Pumpkin](performance/server-vs-pumpkin.md): tick time, CPU, memory, chunks, join at scale.
+
+## Parity, porting, and vanilla reference
+
+- [Rust rewrite status](rust-parity.md) and [Parity workflow](parity-workflow.md): what is ported and how to run harnesses.
+- [CI runners](ci-runners.md): which jobs run where.
 - Area notes: [block behaviours and ticking](parity/blocks.md), [section meshing](parity/meshing.md).
-- [Port ledger](port-ledger.md): `tools/port_ledger.py`, every vanilla method next to the Rust functions that port it, both ways, with the gaps where a port isn't wired like vanilla.
-- [Version ports](version-ports.md): how a new Minecraft release is detected, diffed against the pinned one and ported, and what stays manual.
-- [Decompilation and research lab](research-lab.md) and [decompilation status](decompilation-status.md): the local game inspection workspace the harnesses build on.
+- [Port ledger](port-ledger.md) and [Version ports](version-ports.md): vanilla-to-Rust mapping and new-release porting.
+- [Decompilation status](decompilation-status.md) and [research lab](research-lab.md): local inspection workspace.
+- [Upgrading a 26.2 data pack](datapack-upgrade.md) and [Modpacks](modpacks.md): porting whole packs.
 
-## Architecture: world generation
+## World generation
 
 - [World generation](world-generation.md): the pipeline from noise to features.
-- [World height](world-height.md): each level's shape from its dimension type, data packs' taller levels.
-- [Pregeneration](pregeneration.md): `/pregen`, generating, lighting and saving an area ahead of the players.
-- [Noise generation](noise-generation.md), [compiled density functions](density-functions.md), [structure density](structure-density.md), [terrain filling](terrain-filling.md).
+- [World height](world-height.md), [Noise generation](noise-generation.md), [Compiled density functions](density-functions.md), [Structure density](structure-density.md), [Terrain filling](terrain-filling.md).
 - Biomes: [lookup](biome-lookup.md), [temperatures](biome-temperatures.md).
 - Surfaces: [material surfaces](material-surfaces.md), [material conditions](material-conditions.md), [rule libraries](material-rule-libraries.md), [vertical anchors](vertical-anchors.md), [value providers](value-providers.md).
-- [Carving](carving.md), [heightmaps](heightmaps.md), [feature placement](feature-placement.md).
+- [Carving](carving.md), [Heightmaps](heightmaps.md), [Feature placement](feature-placement.md), [Pregeneration](pregeneration.md).
 
-## Architecture: world data and simulation
+## World data and simulation
 
 - [World data](world-data.md): chunk storage, palettes, region files.
-- [Block-state codecs](block-state-codecs.md), [scheduled ticks](scheduled-ticks.md).
+- [Block-state codecs](block-state-codecs.md), [Scheduled ticks](scheduled-ticks.md), [Save batch entities](save-batch-entities.md).
 - [Collision geometry](collision-geometry.md): shapes, collision, movement and fluids.
 - [Face visibility](face-visibility.md): which model faces the mesher emits.
+- [Server levels](server-levels.md): one level per dimension.
 
-## Java comparison profiling
+## Rendering, resources, and UI
 
-- [JFR analysis for Java comparisons](profiling.md).
+- [Graphics](graphics.md): settings screen, benchmark and results.
+- [Resource packs](resource-packs.md): what a 26.3 pack can change and whether Horizon honours it.
+- [Shader packs](shaders.md): Horizon's own WGSL shader packs.
+- [Design system](design-system.md) and [Extras](extras.md): palette, panels, zoom, minimap overlays.
+- [Controllers](controllers.md) and [Narrator](narrator.md): input glyphs, text-to-speech.
+- Menus are vanilla's, with Horizon's graphics and settings hanging off Options and Friends buttons on title and pause menus ([Play with Friends](play-with-friends.md)).
+
+## Mods and content
+
+- [Mods](mods.md): content and native mods, making, installing, publishing.
+- [Native mods](native-mods.md) and [Native hook points](native-hooks-neoforge.md): launcher build flow and proposed hooks.
+- [Mod browser](mod-browser.md) and [Cosmetics](cosmetics.md): browsing and cosmetic items.
+- [Launcher preparation](launcher-preparation.md), [launcher commands](launcher-commands.md), and [Launcher](../launcher/README.md).
+
+## Gameplay and systems
+
+- [Agent control](agent-control.md) and [Horizon ctl commands](horizon-ctl-commands.md): what agents drive and the socket CLI.
+- [Narrator](narrator.md): vanilla text-to-speech (Ctrl+B).
+
+## Horizon-only features and APIs
+
+- [Horizon APIs](api/README.md): mods, shaders, agent control, servers, launcher, data formats, stability.
+- Opt-in [telemetry](telemetry.md) and [benchmark report format](benchmark-report.md).
+
+## Tools, benchmarks, and profiling
+
+- [Benchmark](benchmark.md): Horizon versus vanilla 26.3 and performance mods.
+- [Build times](build-times.md), [Profiling (JFR)](profiling.md), [CI runners](ci-runners.md).
+- [Performance directory](performance/) and the `*-benchmark.md` notes: individual micro-benchmarks.
+
+## Reference
+
+- [Known issues](known-issues.md), [Release flow](release-flow.md), [Owners](owners.md).
