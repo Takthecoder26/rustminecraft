@@ -74,7 +74,7 @@ fn slot(grouped: bool, n: usize) -> (usize, bool) {
 
 /// Where each part of each bucket of a mesh's solid quads ends, and the
 /// planes that tell whether a bucket can face the eye.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sides {
     /// The solid quads up to the end of each part of each bucket, in mesh
     /// order (`slot`).
@@ -205,25 +205,46 @@ fn bucket(quad: &[TerrainVertex; 4]) -> usize {
 /// cutout quads are also ordered front to back within each axis-facing
 /// bucket; quads that tie keep the mesher's order (the quad's index ends its
 /// sort key), so coplanar overlays still draw over their base.
-pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
-    sort_parts(solid, GROUPED.load(Ordering::Relaxed))
+#[cfg(test)]
+fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
+    sort_tinted(solid, &mut Vec::new())
 }
 
+/// `sort`, moving each quad's tint in `tints` (one per quad, or none) with it.
+pub fn sort_tinted(solid: &mut Vec<TerrainVertex>, tints: &mut Vec<u32>) -> Sides {
+    let grouped = GROUPED.load(Ordering::Relaxed);
+    SORT_SCRATCH.with_borrow_mut(|scratch| sort_with(solid, tints, grouped, scratch))
+}
+
+/// `sort`, retaining each quad's source record.
 pub fn sort_provenance(
     solid: &mut Vec<TerrainVertex>,
     provenance: Option<&mut Vec<[u32; 2]>>,
 ) -> Sides {
-    if provenance.is_none() {
-        return sort(solid);
-    }
+    sort_tinted_provenance(solid, &mut Vec::new(), provenance)
+}
+
+/// Move tint and source records with the same stable quad permutation.
+pub fn sort_tinted_provenance(
+    solid: &mut Vec<TerrainVertex>,
+    tints: &mut Vec<u32>,
+    provenance: Option<&mut Vec<[u32; 2]>>,
+) -> Sides {
     SORT_SCRATCH.with_borrow_mut(|scratch| {
-        sort_with_provenance(solid, GROUPED.load(Ordering::Relaxed), scratch, provenance)
+        sort_with_provenance(
+            solid,
+            tints,
+            GROUPED.load(Ordering::Relaxed),
+            scratch,
+            provenance,
+        )
     })
 }
 
 /// `sort`, with all the opaque parts first when `grouped`.
+#[cfg(test)]
 fn sort_parts(solid: &mut Vec<TerrainVertex>, grouped: bool) -> Sides {
-    SORT_SCRATCH.with_borrow_mut(|scratch| sort_with(solid, grouped, scratch))
+    SORT_SCRATCH.with_borrow_mut(|scratch| sort_with(solid, &mut Vec::new(), grouped, scratch))
 }
 
 /// `sort`'s buffers, kept by each meshing thread so sorting a mesh allocates
@@ -235,6 +256,7 @@ struct SortScratch {
     keys: Vec<u64>,
     sorted: Vec<[TerrainVertex; 4]>,
     provenance: Vec<[u32; 2]>,
+    tints: Vec<u32>,
 }
 thread_local! {
     static SORT_SCRATCH: std::cell::RefCell<SortScratch> = Default::default();
@@ -246,18 +268,25 @@ fn total_order_key(v: f32) -> u32 {
     (bits ^ (((bits >> 31) as u32) >> 1) as i32) as u32 ^ 0x8000_0000
 }
 
-fn sort_with(solid: &mut Vec<TerrainVertex>, grouped: bool, scratch: &mut SortScratch) -> Sides {
-    sort_with_provenance(solid, grouped, scratch, None)
+fn sort_with(
+    solid: &mut Vec<TerrainVertex>,
+    tints: &mut Vec<u32>,
+    grouped: bool,
+    scratch: &mut SortScratch,
+) -> Sides {
+    sort_with_provenance(solid, tints, grouped, scratch, None)
 }
 
 fn sort_with_provenance(
     solid: &mut Vec<TerrainVertex>,
+    tints: &mut Vec<u32>,
     grouped: bool,
     scratch: &mut SortScratch,
     provenance: Option<&mut Vec<[u32; 2]>>,
 ) -> Sides {
     let (quads, rest) = solid.as_chunks::<4>();
     debug_assert!(rest.is_empty(), "solid vertices come in quads");
+    let quads_len = quads.len();
     let cutout = |q: &[TerrainVertex; 4]| q[0].layer & OPAQUE_LAYER == 0;
     // Each quad's part, by its place in mesh order (`slot`).
     let position = |b: usize, cutout: bool| match grouped {
@@ -327,6 +356,12 @@ fn sort_with_provenance(
         sorted.extend(keys.iter().map(|&k| quads[(k & 0xFF_FFFF) as usize]));
         solid.clear();
         solid.extend_from_slice(sorted.as_flattened());
+        if tints.len() == quads_len {
+            let sorted_tints = &mut scratch.tints;
+            sorted_tints.clear();
+            sorted_tints.extend(keys.iter().map(|&k| tints[(k & 0xFF_FFFF) as usize]));
+            std::mem::swap(tints, sorted_tints);
+        }
     }
     Sides {
         ends: slot_ends,
@@ -366,6 +401,46 @@ mod tests {
             sorted.extend(part);
         }
         sorted.into_flattened()
+    }
+
+    #[test]
+    fn tint_and_provenance_follow_the_same_quad_permutation() {
+        for grouped in [false, true] {
+            let mut solid = Vec::new();
+            let mut tints = Vec::new();
+            let mut provenance = Vec::new();
+            for (id, face, layer) in [(1u32, 3, 0), (2, 0, OPAQUE_LAYER), (3, 5, 0), (4, 3, 0)] {
+                let faces = cube([0.0, 0.0, id as f32], layer);
+                let mut quad: [TerrainVertex; 4] =
+                    faces[face * 4..face * 4 + 4].try_into().unwrap();
+                for vertex in &mut quad {
+                    vertex.color = id;
+                }
+                solid.extend(quad);
+                tints.push(0x10_2030 * id);
+                provenance.push([id, 0x1000 | id]);
+            }
+            let expected = reference(&solid, grouped);
+            let sides = sort_with_provenance(
+                &mut solid,
+                &mut tints,
+                grouped,
+                &mut SortScratch::default(),
+                Some(&mut provenance),
+            );
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&solid),
+                bytemuck::cast_slice::<_, u8>(&expected)
+            );
+            assert_eq!(sides.quads(), 4);
+            for ((quad, &tint), record) in
+                solid.as_chunks::<4>().0.iter().zip(&tints).zip(&provenance)
+            {
+                let id = quad[0].color;
+                assert_eq!(tint, 0x10_2030 * id);
+                assert_eq!(*record, [id, 0x1000 | id]);
+            }
+        }
     }
 
     #[test]

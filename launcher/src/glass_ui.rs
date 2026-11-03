@@ -68,6 +68,55 @@ pub fn setting_row(
         .children(control.map(|c| div().flex().flex_none().items_center().gap(px(8.)).child(c)))
 }
 
+/// A stacked Settings row (`SettingRow stacked`): the name and note, the control under them at
+/// full width.
+pub fn setting_row_stacked(
+    title: impl IntoElement,
+    note: Option<gpui::AnyElement>,
+    control: gpui::AnyElement,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(16.))
+        .px(px(16.))
+        .py(px(16.))
+        .rounded(px(radius::LARGE))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    text(15., FontWeight::SEMIBOLD, ink::FULL)
+                        .line_height(px(21.))
+                        .child(title),
+                )
+                .children(note.map(|n| {
+                    text(13., FontWeight::NORMAL, 0.6)
+                        .line_height(px(19.5))
+                        .max_w(px(580.))
+                        .child(n)
+                })),
+        )
+        .child(div().w_full().child(control))
+}
+
+/// The mockup's `WIDE_FIELD` look on a field built for the old one: 44 px, up to 560 px wide,
+/// 12 px corners, white at 7 % (11 % while typed in), 14 px Geist.
+pub fn wide_field(field: Stateful<Div>, focused: bool) -> Stateful<Div> {
+    field
+        .w_full()
+        .max_w(px(560.))
+        .h(px(44.))
+        .px(px(16.))
+        .border_0()
+        .rounded(px(radius::ROW))
+        .bg(white(if focused { 0.11 } else { 0.07 }))
+        .font_family(horizon_theme::glass::FONT)
+        .text_size(px(14.))
+}
+
 /// Whether the pages being built draw the glass look: helpers with no theme at hand ask.
 pub fn on() -> bool {
     ON.get()
@@ -365,6 +414,30 @@ pub fn popover(width: f32) -> Div {
         .p(px(6.))
         .flex()
         .flex_col()
+}
+
+/// What a dialog or the palette lays over the launcher (`bg-[#07050f]/50 backdrop-blur-xl`):
+/// GPUI can't blur what it drew, so the scene's blurred copy (a menu's, `hzl-float`) covers the
+/// page. The scrim goes over it.
+pub fn scrim_backdrop() -> impl IntoElement {
+    crate::glass::backdrop(crate::glass::Kind::Float, 0.)
+}
+
+/// A dialog's plate, round at `radius` (`hzl-glass` over the scrim): its piece of the scene
+/// under the scrim's dimming, then the plates' white. The content goes after it.
+pub fn dialog_plate(radius: f32) -> Div {
+    let layer = |c: Hsla| {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .rounded(px(radius))
+            .bg(c)
+    };
+    crate::glass::plate(radius)
+        .child(layer(color(horizon_theme::glass::SCRIM).opacity(0.5)))
+        .child(layer(white(horizon_theme::glass::TINT)))
 }
 
 /// Text on a white button (`SOLID`): `#100a1f`, medium.
