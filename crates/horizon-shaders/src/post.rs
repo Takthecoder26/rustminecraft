@@ -401,6 +401,8 @@ pub struct Post {
     pub clouds: Option<PostProgram>,
     /// What draws rain and snow, after deferred.
     pub weather: Option<PostProgram>,
+    /// Whether rain and snow write depthtex0 (`rain.depth`, false by default).
+    pub rain_depth: bool,
     /// What draws the first-person hand and held items.
     pub hand: Option<PostProgram>,
     /// Some program reads a shadow buffer, or `shadow.enabled=true`: the shadow pass runs (2.5).
@@ -548,6 +550,7 @@ pub fn load_post(
         damaged_block: None,
         clouds: None,
         weather: None,
+        rain_depth: false,
         hand: None,
         shadow_pass: false,
         shadow: None,
@@ -764,6 +767,7 @@ pub fn load_post(
     loader.post.weather = weather;
     loader.post.hand = hand;
     let flag = |key: &str| properties.get(key).map(|v| v.trim() == "true");
+    loader.post.rain_depth = flag("rain.depth").unwrap_or(false);
     loader.post.translucent_late = flag("separateEntityDraws").unwrap_or(false);
     // `after` when the pack has a deferred program, else `mixed`; ours are all translucent, so
     // `mixed` draws them after deferred too.
@@ -1729,6 +1733,28 @@ mod tests {
         assert!(none("shadow.enabled=true").shadow.is_some());
         let post = none("shadow.enabled=true\nshadowTranslucent=false");
         assert!(post.shadow.is_some() && post.shadow_water.is_none());
+    }
+
+    #[test]
+    fn rain_depth_is_opt_in() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/terrain-test");
+        let pack = Pack::open(&dir).unwrap();
+        for (property, writes) in [
+            ("", false),
+            ("rain.depth=false", false),
+            ("rain.depth=true", true),
+            ("rain.depth=invalid", false),
+        ] {
+            let properties = crate::Properties::parse(property, &Macros::standard());
+            let post = load_post(
+                &pack,
+                "",
+                &properties,
+                &Macros::standard(),
+                &GameInputs::default(),
+            );
+            assert_eq!(post.rain_depth, writes, "{property}");
+        }
     }
 
     /// Water falls back to the terrain chain and blends by default, as the sky does; entities

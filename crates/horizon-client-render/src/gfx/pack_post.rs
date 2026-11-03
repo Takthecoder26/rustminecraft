@@ -2037,7 +2037,7 @@ impl PackPost {
         let weather_geometry = world.weather.then(|| Geometry {
             buffers: &entity_buffers,
             table: None,
-            depth_write: true,
+            depth_write: post.rain_depth,
             atlas: None,
             ids: None,
             cull: false,
@@ -4383,3 +4383,6 @@ mod tests {
         assert!(source("shadowtex1HW", false, true, false) == Source::ShadowDepth(1, true));
     }
 }
+
+#[cfg(test)]
+mod weather_depth_test;
