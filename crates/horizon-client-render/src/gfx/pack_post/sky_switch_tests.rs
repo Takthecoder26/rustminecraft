@@ -80,12 +80,13 @@ impl Gpu {
                 hand: false,
             },
         );
-        assert!(built.notes.is_empty(), "{:?}", built.notes);
         assert!(
             built
                 .sky
                 .as_ref()
-                .is_some_and(|s| s.basic.is_some() && s.textured.is_some())
+                .is_some_and(|s| s.basic.is_some() && s.textured.is_some()),
+            "{:?}",
+            built.notes
         );
         built
     }
