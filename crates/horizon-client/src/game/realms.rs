@@ -35,7 +35,12 @@ pub(super) enum Completion {
 }
 
 enum Update {
-    Servers(Value),
+    Servers {
+        realms: Value,
+        snapshots: Value,
+        trial: bool,
+    },
+    Snapshots(Value),
     Invites(Value),
     Server(Value, Option<Page>),
     Tier {
@@ -239,9 +244,26 @@ impl RealmsRuntime {
                 };
                 state.set_error(message);
             }
-            Ok(Update::Servers(value)) => {
+            Ok(Update::Servers {
+                realms,
+                snapshots,
+                trial,
+            }) => {
                 state.return_page(Page::List);
-                state.set_servers(value);
+                state.set_servers(realms);
+                state.snapshot_realms = snapshots
+                    .get("servers")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                state.trial_available = trial;
+            }
+            Ok(Update::Snapshots(value)) => {
+                state.snapshot_realms = value
+                    .get("servers")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
             }
             Ok(Update::Invites(value)) => {
                 self.invites = value
@@ -457,6 +479,9 @@ fn execute(
 ) -> RealmsResult<Update> {
     use RealmsAction::*;
     active(control)?;
+    if matches!(action, SnapshotRealms | CreateSnapshotRealm(_)) && !realms_service::is_snapshot() {
+        return Err(RealmsError::InvalidInput);
+    }
     // These links are CommonLinks constants verified in realms-service/dto-request-links.javap.txt.
     if matches!(action, OpenTerms) {
         return Ok(Update::Completion(Completion::OpenUri(
@@ -467,8 +492,23 @@ fn execute(
     let mut client = RealmsClient::new();
     gate(&mut client, &auth)?;
     active(control)?;
-    let servers =
-        || -> RealmsResult<Update> { Ok(Update::Servers(to_value(client.list_realms(&auth)?)?)) };
+    let servers = || -> RealmsResult<Update> {
+        let realms = to_value(client.list_realms(&auth)?)?;
+        active(control)?;
+        let snapshots = if realms_service::is_snapshot() {
+            to_value(client.snapshot_eligible_realms(&auth)?)?
+        } else {
+            Value::Null
+        };
+        active(control)?;
+        // Trial discovery must not hide an otherwise usable Realm list on failure.
+        let trial = client.trial_available(&auth).unwrap_or(false);
+        Ok(Update::Servers {
+            realms,
+            snapshots,
+            trial,
+        })
+    };
     let server = |id, page| -> RealmsResult<Update> {
         Ok(Update::Server(
             to_value(client.get_own_realm(&auth, id)?)?,
@@ -481,6 +521,32 @@ fn execute(
     match action {
         ConfirmJoinPack(_) => Err(RealmsError::InvalidInput),
         Refresh => servers(),
+        SnapshotRealms => Ok(Update::Snapshots(to_value(
+            client.snapshot_eligible_realms(&auth)?,
+        )?)),
+        CreateSnapshotRealm(parent) => {
+            // Recheck service eligibility after the confirmation, before creating anything.
+            if !client
+                .snapshot_eligible_realms(&auth)?
+                .servers
+                .iter()
+                .any(|s| s.id == parent)
+            {
+                return Err(RealmsError::InvalidInput);
+            }
+            active(control)?;
+            let realm = client.create_snapshot_realm(&auth, parent)?;
+            Ok(Update::Server(to_value(realm)?, Some(Page::Configure)))
+        }
+        DeleteRealm(id) => {
+            let realm = client.get_own_realm(&auth, id)?;
+            if !realm.expired || !owned_realm(&realm, &auth) {
+                return Err(RealmsError::InvalidInput);
+            }
+            active(control)?;
+            client.delete_realm(&auth, id)?;
+            servers()
+        }
         Join(id) => {
             let info = client.join(&auth, id)?;
             if info.address.is_empty() || info.address.chars().any(char::is_whitespace) {
@@ -635,8 +701,12 @@ fn execute(
             Ok(Update::Done("mco.download.done", None))
         }
         Subscription(id) => Ok(Update::Subscription(client.subscription_for(&auth, id)?)),
-        OpenSubscription(id) => {
+        OpenSubscription(id) | RenewSubscription(id) => {
+            let renewal = matches!(action, RenewSubscription(_));
             let realm = client.get_own_realm(&auth, id)?;
+            if !owned_realm(&realm, &auth) {
+                return Err(RealmsError::InvalidInput);
+            }
             let mut uri = match realm.remote_subscription_id.as_deref() {
                 Some(subscription) => realms_service::extend_subscription_link(
                     subscription,
@@ -645,11 +715,8 @@ fn execute(
                 )?,
                 None => "https://aka.ms/ExtendJavaRealms".into(),
             };
-            // CommonLinks.ExtensionReference.NONE appends no referral for active subscriptions.
-            if !realm.expired
-                && !realm.expired_trial
-                && let Some(base) = uri.strip_suffix("&ref=expiredRealm")
-            {
+            // Subscription tab always uses NONE; main-list renewal uses its expiry referral.
+            if !renewal && let Some((base, _)) = uri.rsplit_once("&ref=") {
                 uri = base.to_owned();
             }
             Ok(Update::Completion(Completion::OpenUri(uri)))
@@ -757,6 +824,14 @@ fn execute(
             Ok(Update::Notifications(client.notifications(&auth)?))
         }
     }
+}
+fn owned_realm(realm: &realms_service::RealmsServer, auth: &RealmsAuth) -> bool {
+    realm.owner_uuid.as_deref().is_some_and(|owner| {
+        !owner.is_empty()
+            && owner
+                .replace('-', "")
+                .eq_ignore_ascii_case(&auth.uuid.replace('-', ""))
+    })
 }
 fn validate_distance(tier: &Value, key: &str, distance: u32) -> RealmsResult<()> {
     let range = tier.get(key).ok_or(RealmsError::InvalidResponse)?;
@@ -902,6 +977,7 @@ fn retryable(action: &RealmsAction) -> bool {
     matches!(
         action,
         RealmsAction::Refresh
+            | RealmsAction::SnapshotRealms
             | RealmsAction::Join(_)
             | RealmsAction::Invites
             | RealmsAction::Configure(_)

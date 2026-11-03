@@ -13,6 +13,10 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, PartialEq)]
 pub enum RealmsAction {
     Refresh,
+    SnapshotRealms,
+    CreateSnapshotRealm(i64),
+    DeleteRealm(i64),
+    RenewSubscription(i64),
     CancelRequest,
     ConfirmJoinPack(bool),
     Initialize {
@@ -125,6 +129,7 @@ pub enum RealmsAction {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Page {
     List,
+    Snapshots,
     Invites,
     Configure,
     Settings,
@@ -170,6 +175,8 @@ pub struct State {
     pub error: Option<String>,
     pub status: Option<String>,
     pub servers: Vec<Value>,
+    pub snapshot_realms: Vec<Value>,
+    pub trial_available: bool,
     pub invites: Vec<Value>,
     pub notifications: Vec<Value>,
     pub server: Value,
@@ -313,6 +320,8 @@ impl State {
             error: None,
             status: None,
             servers: vec![],
+            snapshot_realms: vec![],
+            trial_available: false,
             invites: vec![],
             notifications: vec![],
             server: Value::Null,
@@ -393,7 +402,10 @@ impl State {
         if self.page == Page::Configure {
             self.slot = number(&self.server, "activeSlot").clamp(1, 3) as i32;
         }
-        if self.page == Page::Configure && text(&self.server, "state") == "UNINITIALIZED" {
+        if self.page == Page::Configure
+            && text(&self.server, "state") == "UNINITIALIZED"
+            && self.server.get("expired").and_then(Value::as_bool) != Some(true)
+        {
             self.enter(Page::Initialize);
         } else if matches!(self.page, Page::Settings) {
             self.enter(Page::Settings);
@@ -542,6 +554,7 @@ impl State {
                 .unwrap_or(Page::List),
             Page::Terms => self.terms_return.clone(),
             Page::Configure
+            | Page::Snapshots
             | Page::Invites
             | Page::Redeem
             | Page::Notifications
@@ -564,6 +577,7 @@ impl State {
             Page::Region => "mco.configure.world.region_preference.title",
             Page::ResourcePack => "mco.warning",
             Page::List => "menu.online",
+            Page::Snapshots => "mco.snapshot.start",
             Page::Invites => "mco.invites.title",
             Page::Configure => "mco.configure.world.title",
             Page::Settings => "mco.configure.world.settings.title",
@@ -584,6 +598,16 @@ impl State {
     }
     fn rows(&self) -> Vec<(String, String)> {
         match self.page {
+            Page::Snapshots => self
+                .snapshot_realms
+                .iter()
+                .map(|server| {
+                    (
+                        tr("mco.snapshot.start"),
+                        translated("mco.snapshot.description", &[text(server, "name")]),
+                    )
+                })
+                .collect(),
             Page::Region => REGIONS
                 .iter()
                 .map(|(_, key)| {
@@ -753,6 +777,20 @@ impl State {
         let slot = self.slot;
         let editable = self.editable();
         match self.page {
+            Page::Snapshots => {
+                let parent = self.selected.and_then(|i| self.snapshot_realms.get(i));
+                add!(
+                    "mco.selectServer.create",
+                    crate::realms_service::is_snapshot() && parent.is_some(),
+                    Event::Confirm(
+                        RealmsAction::CreateSnapshotRealm(
+                            parent.map(|s| number(s, "id")).unwrap_or_default()
+                        ),
+                        "mco.snapshot.createSnapshotPopup.title",
+                        tr("mco.snapshot.createSnapshotPopup.text")
+                    )
+                );
+            }
             Page::ResourcePack => {
                 add!(
                     "gui.yes",
@@ -867,10 +905,35 @@ impl State {
                 add!("mco.news", true, Event::Page(Page::Notifications));
                 add!("mco.selectServer.joinCode", true, Event::Page(Page::Redeem));
                 add!(
-                    "mco.selectServer.purchase",
+                    if self.trial_available {
+                        "mco.selectServer.freeTrial"
+                    } else {
+                        "mco.selectServer.purchase"
+                    },
                     true,
                     Event::Confirm(RealmsAction::Purchase, "chat.link.confirm", String::new())
                 );
+                if owner
+                    && server
+                        .is_some_and(|s| s.get("expired").and_then(Value::as_bool) == Some(true))
+                {
+                    add!(
+                        "mco.selectServer.expiredRenew",
+                        true,
+                        Event::Confirm(
+                            RealmsAction::RenewSubscription(sid),
+                            "chat.link.confirm",
+                            String::new()
+                        )
+                    );
+                }
+                if crate::realms_service::is_snapshot() && !self.snapshot_realms.is_empty() {
+                    add!(
+                        "mco.snapshot.start",
+                        true,
+                        Event::Request(RealmsAction::SnapshotRealms)
+                    );
+                }
                 add!(
                     "selectServer.refresh",
                     true,
@@ -1117,15 +1180,27 @@ impl State {
                     )
                 );
             }
-            Page::Subscription => add!(
-                "mco.configure.world.subscription.extend",
-                self.owned(&self.server),
-                Event::Confirm(
-                    RealmsAction::OpenSubscription(id),
-                    "chat.link.confirm",
-                    String::new()
-                )
-            ),
+            Page::Subscription => {
+                add!(
+                    "mco.configure.world.subscription.extend",
+                    self.owned(&self.server),
+                    Event::Confirm(
+                        RealmsAction::OpenSubscription(id),
+                        "chat.link.confirm",
+                        String::new()
+                    )
+                );
+                add!(
+                    "mco.configure.world.delete.button",
+                    self.owned(&self.server)
+                        && self.server.get("expired").and_then(Value::as_bool) == Some(true),
+                    Event::Confirm(
+                        RealmsAction::DeleteRealm(id),
+                        "mco.configure.world.delete.question.line1",
+                        text(&self.server, "name")
+                    )
+                );
+            }
             Page::Players => {
                 let player = self
                     .server
@@ -1360,6 +1435,7 @@ impl State {
             return Action::Realms(action);
         }
         match &action {
+            RealmsAction::SnapshotRealms => self.enter(Page::Snapshots),
             RealmsAction::TierConfiguration(_) => self.enter(Page::Distances),
             RealmsAction::ConfirmJoinPack(false) => {
                 self.enter(Page::List);
@@ -1391,7 +1467,10 @@ impl State {
         }
         if !matches!(
             action,
-            RealmsAction::OpenTerms | RealmsAction::OpenSubscription(_) | RealmsAction::Purchase
+            RealmsAction::OpenTerms
+                | RealmsAction::OpenSubscription(_)
+                | RealmsAction::RenewSubscription(_)
+                | RealmsAction::Purchase
         ) {
             self.set_loading(true);
         }

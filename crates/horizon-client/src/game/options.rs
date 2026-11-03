@@ -314,6 +314,16 @@ impl Game<'_> {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
                 Event::Online(action) => self.online_option_action(action),
+                Event::JoinFriendCode => {
+                    if let Some(title) = &mut self.title {
+                        title.mode = horizon_client::title::Mode::Multiplayer(
+                            horizon_client::multiplayer::Screen::friend(),
+                        );
+                        self.screen = Screen::Playing;
+                    } else {
+                        self.screen = Screen::Friends;
+                    }
+                }
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();

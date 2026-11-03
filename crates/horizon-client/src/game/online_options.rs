@@ -4,14 +4,14 @@ use horizon_client::{
     auth::{self, AuthSession},
     hud::{HudAtlas, HudBatch},
     options_file::V,
-    options_ui::{OnlineAction, OnlineStatus, OptionsUi},
+    options_ui::{OnlineAction, OnlineStatus, OptionsUi, Page},
     settings::Settings,
     social_service::{
-        CacheState, FriendsList, PresenceResponse, PresenceStatus, SocialClient, SocialError,
-        SocialErrorKind, UserAttributes,
+        CacheState, FriendAction, FriendTarget, FriendsList, PresenceResponse, PresenceStatus,
+        SocialClient, SocialError, SocialErrorKind, UpdateType, UserAttributes,
     },
     text::Text,
-    toasts::SystemToast,
+    toasts::FriendToast,
 };
 use std::{
     collections::VecDeque,
@@ -29,12 +29,14 @@ enum Job {
     Attributes,
     Settings(bool, bool),
     Friends,
+    UpdateFriend(FriendAction),
     Presence(PresenceStatus),
 }
 enum Reply {
     Attributes(Result<UserAttributes, SocialError>),
     Settings(bool, bool, Result<Option<UserAttributes>, SocialError>),
     Friends(Result<FriendsList, SocialError>, CacheState, Duration),
+    UpdateFriend(Result<Option<FriendsList>, SocialError>),
     Presence(
         Result<PresenceResponse, SocialError>,
         PresenceStatus,
@@ -81,6 +83,7 @@ impl Worker {
                             client.friends_poll_interval(),
                         )
                     }
+                    Job::UpdateFriend(action) => Reply::UpdateFriend(client.update_friends(action)),
                     Job::Presence(status) => {
                         let result = client.presence(status);
                         Reply::Presence(result, status, client.presence_poll_interval())
@@ -115,6 +118,7 @@ pub(super) struct OnlineState {
     allow_requests: bool,
     rollback: Option<(bool, bool)>,
     consent: bool,
+    pending_removal: Option<u128>,
     message: Option<&'static str>,
     attributes_at: Instant,
     friends_at: Instant,
@@ -125,8 +129,8 @@ pub(super) struct OnlineState {
     friends_success: bool,
     pub(super) friends: Option<FriendsList>,
     pub(super) presence: Option<PresenceResponse>,
-    notifications: VecDeque<SystemToast>,
-    toast: Option<SystemToast>,
+    notifications: VecDeque<FriendToast>,
+    toast: Option<FriendToast>,
 }
 impl Default for OnlineState {
     fn default() -> Self {
@@ -139,6 +143,7 @@ impl Default for OnlineState {
             allow_requests: false,
             rollback: None,
             consent: false,
+            pending_removal: None,
             message: None,
             attributes_at: Instant::now(),
             friends_at: Instant::now(),
@@ -183,6 +188,7 @@ impl OnlineState {
         self.busy = false;
         self.loaded = false;
         self.consent = false;
+        self.pending_removal = None;
         self.rollback = None;
         self.attributes_at = Instant::now();
     }
@@ -266,9 +272,24 @@ impl OnlineState {
                     }
                     self.rollback = None;
                 }
+                Reply::UpdateFriend(result) => match result {
+                    Ok(data) => {
+                        if let Some(data) = data {
+                            self.friends = Some(data);
+                        }
+                        self.friends_success = false;
+                        self.friends_at = Instant::now();
+                        self.message = None;
+                        ui.clear_friend_request();
+                    }
+                    Err(error) => self.failure(&error),
+                },
                 Reply::Friends(result, cache, interval) => {
                     self.friends_interval = interval.max(Duration::from_secs(1));
-                    self.friends_at = Instant::now() + self.friends_interval.saturating_mul(5);
+                    self.friends_at = Instant::now()
+                        + self
+                            .friends_interval
+                            .saturating_mul(if ui.page() == Page::Friends { 1 } else { 5 });
                     match result {
                         Ok(data) if cache != CacheState::Stale => {
                             if self.friends_enabled {
@@ -280,15 +301,30 @@ impl OnlineState {
                                         if self.notifications.len() < 64 {
                                             let text = Text::translate(key, &[Text::literal(name)])
                                                 .plain();
-                                            self.notifications.push_back(
-                                                SystemToast::new(text, None)
-                                                    .with_display_time(5000.0),
-                                            );
+                                            let profile = data
+                                                .friends
+                                                .iter()
+                                                .chain(&data.incoming_requests)
+                                                .chain(&data.outgoing_requests)
+                                                .find(|friend| friend.name == name);
+                                            let uuid = if key
+                                                == "gui.friends.toast.request_sent.message"
+                                            {
+                                                None
+                                            } else {
+                                                profile.map(|friend| friend.profile_id)
+                                            };
+                                            let mut toast = FriendToast::new(uuid, text);
+                                            if uuid.is_some() {
+                                                toast.profile_name = Some(name.to_owned());
+                                            }
+                                            self.notifications.push_back(toast);
                                         }
                                     }
                                 }
                                 self.friends = Some(data);
                                 self.friends_success = true;
+                                self.message = None;
                             }
                         }
                         Ok(_) => {
@@ -314,7 +350,7 @@ impl OnlineState {
             }
         }
         let now = Instant::now();
-        if self.worker.is_some() && !self.busy && !self.consent {
+        if self.worker.is_some() && !self.busy && !self.consent && self.pending_removal.is_none() {
             if !self.loaded && now >= self.attributes_at {
                 self.send(Job::Attributes);
             } else if self.loaded && self.friends_enabled {
@@ -336,6 +372,12 @@ impl OnlineState {
             }
         }
         ui.set_online_status(self.status(realms_available));
+        ui.set_friends(
+            self.worker.as_ref().map_or("", |w| w.session.name.as_str()),
+            self.friends.as_ref(),
+            self.presence.as_ref(),
+            self.friends_success,
+        );
     }
     /// Returns true only after OptionsUi has confirmed opening the privacy link.
     pub(super) fn action(
@@ -349,6 +391,7 @@ impl OnlineState {
         }
         if action == OnlineAction::CancelUpdates {
             self.consent = false;
+            self.pending_removal = None;
             if self.rollback.is_some() {
                 self.cancel_updates();
             }
@@ -365,7 +408,111 @@ impl OnlineState {
             self.consent = false;
             return false;
         }
-        if !self.loaded || self.worker.is_none() || self.busy {
+        if action == OnlineAction::ConfirmRemoval(false) {
+            self.pending_removal = None;
+            return false;
+        }
+        if ui.split_guest || !self.loaded || self.worker.is_none() || self.busy {
+            return false;
+        }
+        let mut update = None;
+        if self.friends_enabled && self.friends_success {
+            let list = self.friends.as_ref();
+            let contains = |entries: &[horizon_client::social_service::Friend], id| {
+                entries.iter().any(|f| f.profile_id == id)
+            };
+            match action {
+                OnlineAction::SendRequest => {
+                    let name = ui.friend_request_name().to_owned();
+                    if name.is_empty() {
+                        return false;
+                    }
+                    let own = self.worker.as_ref().unwrap().session.name.as_str();
+                    let validation = if name.eq_ignore_ascii_case(own) {
+                        Some("gui.friends.validation.cannot_add_self")
+                    } else {
+                        list.and_then(|list| {
+                            [
+                                (&list.friends, "gui.friends.validation.already_friend"),
+                                (
+                                    &list.outgoing_requests,
+                                    "gui.friends.validation.already_outgoing",
+                                ),
+                                (
+                                    &list.incoming_requests,
+                                    "gui.friends.validation.already_incoming",
+                                ),
+                            ]
+                            .into_iter()
+                            .find_map(|(entries, key)| {
+                                entries
+                                    .iter()
+                                    .any(|f| f.name.eq_ignore_ascii_case(&name))
+                                    .then_some(key)
+                            })
+                        })
+                    };
+                    if let Some(key) = validation {
+                        self.notifications.push_back(FriendToast::new(
+                            None,
+                            Text::translate(key, &[Text::literal(name)]).plain(),
+                        ));
+                        return false;
+                    }
+                    update = Some(FriendAction {
+                        target: FriendTarget::Name(name),
+                        update_type: UpdateType::Add,
+                    });
+                }
+                OnlineAction::AcceptRequest(id)
+                    if list.is_some_and(|l| contains(&l.incoming_requests, id)) =>
+                {
+                    update = Some(FriendAction {
+                        target: FriendTarget::ProfileId(id),
+                        update_type: UpdateType::Add,
+                    });
+                }
+                OnlineAction::DeclineRequest(id)
+                    if list.is_some_and(|l| contains(&l.incoming_requests, id)) =>
+                {
+                    update = Some(FriendAction {
+                        target: FriendTarget::ProfileId(id),
+                        update_type: UpdateType::Remove,
+                    });
+                }
+                OnlineAction::RevokeRequest(id)
+                    if list.is_some_and(|l| contains(&l.outgoing_requests, id)) =>
+                {
+                    update = Some(FriendAction {
+                        target: FriendTarget::ProfileId(id),
+                        update_type: UpdateType::Remove,
+                    });
+                }
+                OnlineAction::RemoveFriend(id) => {
+                    if let Some(friend) =
+                        list.and_then(|l| l.friends.iter().find(|f| f.profile_id == id))
+                    {
+                        self.pending_removal = Some(id);
+                        ui.confirm_friend_removal(id, friend.name.clone());
+                    }
+                }
+                OnlineAction::ConfirmRemoval(true) => {
+                    if let Some(id) = self.pending_removal.take()
+                        && list.is_some_and(|l| contains(&l.friends, id))
+                    {
+                        update = Some(FriendAction {
+                            target: FriendTarget::ProfileId(id),
+                            update_type: UpdateType::Remove,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(update) = update {
+            self.message = None;
+            self.send(Job::UpdateFriend(update));
+            ui.set_online_status(self.status(true));
             return false;
         }
         match action {
@@ -421,10 +568,11 @@ impl OnlineState {
     }
 
     pub(super) fn toast_slots(&self) -> u32 {
-        self.toast
-            .as_ref()
-            .and_then(|toast| toast.slot)
-            .map_or(0, |slot| 1 << slot)
+        self.toast.as_ref().map_or(0, |toast| {
+            toast
+                .slot
+                .map_or(0, |slot| ((1u32 << toast.slot_count().min(31)) - 1) << slot)
+        })
     }
 
     pub(super) fn draw_toasts(
@@ -438,14 +586,26 @@ impl OnlineState {
         if self.toast.is_none() {
             self.toast = self.notifications.pop_front();
         }
-        super::narrator::draw_toast(
-            &mut self.toast,
-            used_slots,
-            display_time,
-            atlas,
-            batch,
-            hidden,
-        )
+        let toast = self.toast.as_mut()?;
+        toast.layout(atlas);
+        if toast.slot.is_none() {
+            let count = toast.slot_count();
+            if count > Game::TOAST_SLOTS {
+                self.toast = None;
+                return None;
+            }
+            let mask = (1u32 << count) - 1;
+            toast.slot =
+                (0..=Game::TOAST_SLOTS - count).find(|slot| used_slots & (mask << slot) == 0);
+            toast.slot?;
+        }
+        let (sound, finished) = toast.update(display_time);
+        if finished {
+            self.toast = None;
+        } else if let (false, Some(slot)) = (hidden, toast.slot) {
+            toast.draw(atlas, batch, 32.0 * slot as f32);
+        }
+        sound
     }
 }
 

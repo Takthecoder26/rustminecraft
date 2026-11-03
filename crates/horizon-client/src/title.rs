@@ -367,6 +367,7 @@ pub enum Action {
     Realms(realms::RealmsAction),
     Quit,
     Options,
+    SocialFriends,
     Accessibility,
     Language,
     /// AccessibilityOnboardingScreen's Music & Sounds button.
@@ -1797,8 +1798,7 @@ impl Title {
                         2,
                     ),
                 ];
-                // CommonButtons' icon buttons; Horizon's Join a Friend (an
-                // invite code) sits behind vanilla's Friends button.
+                // CommonButtons' icon buttons, including the account's Friends list.
                 for (i, (key, plain, id, icon)) in [
                     ("gui.friends.open", "Friends", 5, "friends/friends"),
                     ("options.language", "Language...", 6, "icon/language"),
@@ -3472,10 +3472,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 }
                 crate::multiplayer::Outcome::None => Action::None,
             },
-            (Mode::Main, Some(5)) => {
-                self.mode = Mode::Multiplayer(crate::multiplayer::Screen::friend());
-                Action::None
-            }
+            (Mode::Main, Some(5)) => Action::SocialFriends,
             (Mode::Onboarding(_), Some(onboarding::SOUNDS)) => Action::Sounds,
             (Mode::Onboarding(_), Some(onboarding::ACCESSIBILITY)) => Action::Accessibility,
             (Mode::Onboarding(_), Some(onboarding::LANGUAGE)) => Action::Language,

@@ -4,7 +4,17 @@
 //! Callers must confirm mutations/terms and handle RetryAfter before invoking again.
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, error::Error, fmt, io::Read, time::Duration};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    io::{self, Read},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 const LEGACY: &str = "https://pc.realms.minecraft.net";
 const AKS: &str = "https://java.frontendlegacy.realms.minecraft-services.net";
@@ -13,6 +23,12 @@ const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 pub const BUY_REALMS: &str = "https://aka.ms/BuyJavaRealms";
 pub const START_TRIAL: &str = "https://aka.ms/startjavarealmstrial";
 pub const REALMS_TERMS: &str = "https://aka.ms/MinecraftRealmsTerms";
+
+/// RealmsMainScreen.isSnapshot with vanilla's default snapshotToggle.
+/// Stable releases cannot opt into snapshot Realms.
+pub fn is_snapshot() -> bool {
+    !horizon_core::version::STABLE
+}
 
 /// The Minecraft session access token (not a Microsoft OAuth token). Never Debug/Serialize.
 #[derive(Clone)]
@@ -51,6 +67,7 @@ pub enum RealmsError {
     Service { status: u16, code: Option<i64> },
     Redirect { status: u16 },
     Timeout,
+    Cancelled,
     Transport,
     InvalidResponse,
     ResponseTooLarge,
@@ -189,7 +206,7 @@ impl RealmsClient {
         Ok(flags)
     }
     operations! {
-        list_realms() -> RealmsServerList, "GET", "worlds", None;
+        list_realms() -> RealmsServerList, "GET", if is_snapshot() { "worlds/listUserWorldsOfType/any" } else { "worlds" }, None;
         get_own_realm(id: i64) -> RealmsServer, "GET", format!("worlds/{id}"), None;
         join(id: i64) -> JoinInfo, "GET", format!("worlds/v1/{id}/join/pc"), None;
         pending_invites() -> PendingInvites, "GET", "invites/pending", None;
@@ -434,6 +451,31 @@ impl RealmsClient {
         body: impl Read,
         len: u64,
     ) -> RealmsResult<()> {
+        self.upload_body_with_cancel(
+            auth,
+            id,
+            slot,
+            info,
+            world_version,
+            body,
+            len,
+            Arc::default(),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_body_with_cancel(
+        &self,
+        auth: &RealmsAuth,
+        id: i64,
+        slot: i32,
+        info: &UploadInfo,
+        world_version: &str,
+        body: impl Read,
+        len: u64,
+        cancel: Arc<AtomicBool>,
+    ) -> RealmsResult<()> {
+        let guard = TransferGuard::new(cancel);
+        guard.check()?;
         if !info.world_closed {
             return Err(RealmsError::WorldNotClosed);
         }
@@ -447,15 +489,7 @@ impl RealmsClient {
             .map_err(|_| RealmsError::UnsafeEndpoint)?;
         let mut url = endpoint.as_url().clone();
         official_transfer(&url)?;
-        // Java defaults missing ports to 8080, including when the scheme is HTTPS.
-        let port = info
-            .port
-            .filter(|port| *port != -1)
-            .unwrap_or_else(|| i32::from(url.port().unwrap_or(8080)));
-        let port = u16::try_from(port)
-            .ok()
-            .filter(|port| *port != 0)
-            .ok_or(RealmsError::UnsafeEndpoint)?;
+        let port = upload_port(info)?;
         url.set_port(Some(port))
             .map_err(|_| RealmsError::UnsafeEndpoint)?;
         url.set_path(&format!("/upload/{id}/{slot}"));
@@ -464,19 +498,29 @@ impl RealmsClient {
             "{};token={token};worldVersion={world_version}",
             auth.cookie()?
         );
-        let request = self
-            .agent
+        let request = transfer_agent()
             .post(url.as_str())
-            .timeout(Duration::from_secs(600))
             .set("Cookie", &cookie)
             .set("Content-Type", "application/octet-stream")
             .set("Content-Length", &len.to_string());
-        response_text(request.send(body.take(len))).map(|_| ())
+        guard.check()?;
+        let result = request.send(guard.reader(body.take(len)));
+        guard.check()?;
+        response_text_guarded(result, Some(&guard)).map(|_| ())
     }
     /// Signed download links may target a CDN. Absolutely no session headers/cookies.
     /// The caller must bound bytes, verify hashes and sanitize archives before extraction.
     pub fn download_body(&self, url: &str) -> RealmsResult<Box<dyn Read + Send + Sync>> {
-        let req = self.agent.get(url).timeout(Duration::from_secs(600));
+        self.download_body_with_cancel(url, Arc::default())
+    }
+    pub fn download_body_with_cancel(
+        &self,
+        url: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> RealmsResult<Box<dyn Read + Send + Sync>> {
+        let guard = TransferGuard::new(cancel);
+        guard.check()?;
+        let req = transfer_agent().get(url);
         let parsed = req.request_url().map_err(|_| RealmsError::UnsafeEndpoint)?;
         let parsed = parsed.as_url();
         if parsed.scheme() != "https"
@@ -486,11 +530,15 @@ impl RealmsClient {
         {
             return Err(RealmsError::UnsafeEndpoint);
         }
-        let response = response(req.call())?;
+        guard.check()?;
+        let result = req.call();
+        guard.check()?;
+        let response = response(result)?;
         if response.status() == 277 || !(200..300).contains(&response.status()) {
-            return response_text(Ok(response)).and(Err(RealmsError::InvalidResponse));
+            return response_text_guarded(Ok(response), Some(&guard))
+                .and(Err(RealmsError::InvalidResponse));
         }
-        Ok(response.into_reader())
+        Ok(Box::new(guard.reader(response.into_reader())))
     }
     fn request(
         &self,
@@ -505,7 +553,10 @@ impl RealmsClient {
             .set("Cookie", &auth.cookie()?)
             .set("Client-Ref", "26.3")
             .set("X-NetworkProtocolVersion", "777")
-            .set("Is-Prerelease", "false")
+            .set(
+                "Is-Prerelease",
+                if is_snapshot() { "true" } else { "false" },
+            )
             .set("Accept", "application/json")
             .set("Content-Type", "application/json; charset=utf-8");
         if frontend {
@@ -571,6 +622,106 @@ pub fn extend_subscription_link(
         }
     ))
 }
+// Cooperative deadline: DNS, TLS and response-header parsing cannot be interrupted here.
+#[derive(Clone)]
+struct TransferGuard {
+    cancel: Arc<AtomicBool>,
+    deadline: Instant,
+}
+impl TransferGuard {
+    fn new(cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            cancel,
+            deadline: Instant::now() + Duration::from_secs(600),
+        }
+    }
+    fn check(&self) -> RealmsResult<()> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(RealmsError::Cancelled)
+        } else if Instant::now() >= self.deadline {
+            Err(RealmsError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+    fn reader<R: Read>(&self, inner: R) -> TransferReader<R> {
+        TransferReader {
+            inner,
+            guard: self.clone(),
+        }
+    }
+}
+struct TransferReader<R> {
+    inner: R,
+    guard: TransferGuard,
+}
+impl<R: Read> Read for TransferReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let check = || {
+            self.guard.check().map_err(|error| {
+                let kind = if error == RealmsError::Timeout {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::Other
+                };
+                io::Error::new(kind, error)
+            })
+        };
+        check()?;
+        let result = self.inner.read(buffer);
+        check()?;
+        result.map_err(|error| {
+            if timed_out(&error) {
+                io::Error::new(io::ErrorKind::TimedOut, RealmsError::Timeout)
+            } else {
+                io::Error::other(RealmsError::Transport)
+            }
+        })
+    }
+}
+fn transfer_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .https_only(true)
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(10))
+        .timeout_write(Duration::from_secs(10))
+        // ureq 2 clears socket timeouts when returning a connection to its pool.
+        .max_idle_connections(0)
+        .build()
+}
+fn upload_port(info: &UploadInfo) -> RealmsResult<u16> {
+    // URL normalization removes explicit :443; Java URI preserves it. Inspect the
+    // raw authority only after official_transfer validated the parsed HTTPS URL.
+    let authority = info
+        .upload_endpoint
+        .split_once("://")
+        .ok_or(RealmsError::UnsafeEndpoint)?
+        .1
+        .split(['/', '?', '#'])
+        .next()
+        .ok_or(RealmsError::UnsafeEndpoint)?;
+    if authority.contains(['\\', '@']) || authority.chars().any(char::is_control) {
+        return Err(RealmsError::UnsafeEndpoint);
+    }
+    let explicit = authority
+        .rsplit_once(':')
+        .map(|(_, port)| {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(RealmsError::UnsafeEndpoint);
+            }
+            port.parse::<u16>().map_err(|_| RealmsError::UnsafeEndpoint)
+        })
+        .transpose()?;
+    let port = info
+        .port
+        .filter(|port| *port != -1)
+        .unwrap_or(i32::from(explicit.unwrap_or(8080)));
+    u16::try_from(port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(RealmsError::UnsafeEndpoint)
+}
 fn agent(tls: bool) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .https_only(tls)
@@ -599,6 +750,15 @@ fn response(result: Result<ureq::Response, ureq::Error>) -> RealmsResult<ureq::R
     }
 }
 fn response_text(result: Result<ureq::Response, ureq::Error>) -> RealmsResult<String> {
+    response_text_guarded(result, None)
+}
+fn response_text_guarded(
+    result: Result<ureq::Response, ureq::Error>,
+    guard: Option<&TransferGuard>,
+) -> RealmsResult<String> {
+    if let Some(guard) = guard {
+        guard.check()?;
+    }
     let response = response(result)?;
     let status = response.status();
     if matches!(status, 503 | 277 | 429) {
@@ -613,17 +773,22 @@ fn response_text(result: Result<ureq::Response, ureq::Error>) -> RealmsResult<St
         return Err(RealmsError::Redirect { status });
     }
     let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(MAX_RESPONSE + 1)
-        .read_to_end(&mut body)
-        .map_err(|e| {
-            if timed_out(&e) {
-                RealmsError::Timeout
-            } else {
-                RealmsError::Transport
-            }
-        })?;
+    let reader = response.into_reader();
+    let reader: Box<dyn Read + Send + Sync> = match guard {
+        Some(guard) => Box::new(guard.reader(reader)),
+        None => reader,
+    };
+    let result = reader.take(MAX_RESPONSE + 1).read_to_end(&mut body);
+    if let Some(guard) = guard {
+        guard.check()?;
+    }
+    result.map_err(|e| {
+        if timed_out(&e) {
+            RealmsError::Timeout
+        } else {
+            RealmsError::Transport
+        }
+    })?;
     if body.len() as u64 > MAX_RESPONSE {
         return Err(RealmsError::ResponseTooLarge);
     }

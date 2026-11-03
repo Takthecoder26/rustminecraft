@@ -41,8 +41,9 @@ pub enum TransferStage {
 
 /// Clones share cancellation and progress. A fresh control belongs to one transfer.
 /// Bytes reset at each stage. Zero total means the service did not supply a length.
-/// Cancellation is checked between IO chunks; a stalled HTTP read is bounded by
-/// the service client's socket timeout. Cancellation cannot undo an accepted upload.
+/// Cancellation is checked around IO chunks; transfer sockets have 10-second idle
+/// timeouts. The 600-second deadline is cooperative, not a hard request bound.
+/// Cancellation cannot undo an accepted upload.
 #[derive(Clone, Default)]
 pub struct TransferControl {
     pub cancel: Arc<AtomicBool>,
@@ -116,7 +117,16 @@ pub fn upload_world_with_options_control(
         control.begin(TransferStage::Uploading, len);
         let file = File::open(&archive).map_err(|_| RealmsError::Transport)?;
         let body = CheckedReader::new(file, MAX_ARCHIVE, control, true);
-        client.upload_body(auth, id, slot, &info, "26.3", body, len)
+        client.upload_body_with_cancel(
+            auth,
+            id,
+            slot,
+            &info,
+            "26.3",
+            body,
+            len,
+            control.cancel.clone(),
+        )
     })?;
     // Vanilla applies the selected slot's options/settings after accepting the file.
     retry(control, 20, || client.update_slot(auth, id, slot, options))?;
@@ -403,7 +413,9 @@ impl<R: Read> Read for CheckedReader<'_, R> {
         let max = buffer
             .len()
             .min(self.remaining.saturating_add(1).min(64 * 1024) as usize);
-        let n = self.inner.read(&mut buffer[..max])?;
+        let result = self.inner.read(&mut buffer[..max]);
+        self.control.check()?;
+        let n = result?;
         if n as u64 > self.remaining {
             return Err(invalid());
         }
@@ -667,7 +679,9 @@ fn download_file(
     control: &TransferControl,
 ) -> Result<(), String> {
     // Service URL validation and no-redirect policy apply equally to world and pack.
-    let body = retry(control, 20, || client.download_body(url))?;
+    let body = retry(control, 20, || {
+        client.download_body_with_cancel(url, control.cancel.clone())
+    })?;
     let mut reader = CheckedReader::new(body, limit, control, true);
     let mut output = new_file(path).map_err(io_error)?;
     io::copy(&mut reader, &mut output).map_err(io_error)?;

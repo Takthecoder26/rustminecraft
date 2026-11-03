@@ -54,6 +54,12 @@ pub(super) struct StartupMenu {
 }
 
 impl StartupMenu {
+    pub(super) fn stop_online(&mut self) {
+        self.online.send_offline_presence();
+        self.realms.cancel();
+        self.realms_entry.cancel();
+    }
+
     pub fn new(options: &Options, pack_error: Option<&str>) -> Result<Self> {
         let pending = if let Some(address) = &options.server {
             Some(PendingWorldEntry::Server {
@@ -512,6 +518,14 @@ impl Loading {
     fn menu_option_events(&mut self, events: Vec<Event>) {
         for event in events {
             match event {
+                Event::JoinFriendCode => {
+                    if let Some(title) = self.menu.title.as_mut() {
+                        title.mode = horizon_client::title::Mode::Multiplayer(
+                            horizon_client::multiplayer::Screen::friend(),
+                        );
+                        self.menu.options_open = false;
+                    }
+                }
                 Event::Online(action) => {
                     if self
                         .menu
@@ -711,6 +725,7 @@ impl Loading {
                 }
             }
             Action::Options => self.open_menu_options(Page::Main),
+            Action::SocialFriends => self.open_menu_options(Page::Friends),
             Action::Accessibility => self.open_menu_options(Page::Accessibility),
             Action::Language => self.open_menu_options(Page::Language),
             Action::Sounds => self.open_menu_options(Page::Sound),

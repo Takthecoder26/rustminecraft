@@ -11707,6 +11707,9 @@ impl Game<'_> {
             Action::Quit if self.options.split_guest => {}
             Action::Quit => event_loop.exit(),
             Action::Options => self.open_options(true),
+            Action::SocialFriends => {
+                self.open_options_at(true, horizon_client::options_ui::Page::Friends)
+            }
             Action::Accessibility => {
                 self.open_options_at(true, horizon_client::options_ui::Page::Accessibility)
             }
@@ -20777,8 +20780,9 @@ impl ApplicationHandler for App {
         }
     }
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        if let App::Ready(game) = self {
-            game.exiting(event_loop);
+        match self {
+            App::Ready(game) => game.exiting(event_loop),
+            App::Loading(loading) => loading.menu.stop_online(),
         }
     }
 }
