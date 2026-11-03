@@ -72,8 +72,10 @@ jobs:
         run: |
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+            # GitHub-hosted runners do not keep a Rust toolchain between jobs; playhorizon's runners get theirs
+            # preinstalled by tools/ci/checks-runners.sh (stable, with rustfmt and clippy).
+            rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           fi
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       # Dependencies and the workspace's own build, saved from main's runs (pull requests read main's cache).
       - uses: Swatinem/rust-cache@v2
         if: steps.rust.outputs.required != 'false' && runner.environment == 'github-hosted'
@@ -125,8 +127,9 @@ jobs:
           if [ "$HOSTED" = true ]; then
             sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-x11-dev libwayland-dev \
               libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev libudev-dev
+            # See verify: host runners preinstall the toolchain.
+            rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           fi
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - uses: Swatinem/rust-cache@v2
         if: steps.launcher.outputs.required != 'false' && runner.environment == 'github-hosted'
         with:

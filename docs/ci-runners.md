@@ -84,5 +84,6 @@ ssh ludovic@playhorizon 'bash ~/horizon-install/checks-runners.sh status'
   keeps it): a run rebuilds only what changed. `CARGO_BUILD_JOBS=4`. `job-started.sh` empties a build folder over
   40 GB (`MAX_TARGET_GB`) before the job.
 - No sccache: each build folder already holds the dependencies, and the host's shared cache is the remote runs'.
+- The stable toolchain (rustfmt, clippy) is preinstalled by `tools/ci/checks-runners.sh`, so `ci.yml` skips `rustup toolchain install` on `playhorizon-ci` and reuses it: faster setup on the host, and forks stay on GitHub's runners unchanged.
 - Python is the host's 3.13 (`ci-shared/bin/python3`); the apt packages the jobs need are installed by the script, so
   the jobs skip their `apt-get`, `setup-python` and Rust cache steps there (`runner.environment == 'github-hosted'`).
