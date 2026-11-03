@@ -21,7 +21,11 @@ fn independent_blending_pixels_and_feature_negotiation_match_the_adapter() {
         eprintln!("SKIP positive independent blend pixels: adapter lacks capability");
         return;
     }
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .unwrap();
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, text) in [
         (
