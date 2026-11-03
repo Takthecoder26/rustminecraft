@@ -151,6 +151,29 @@ fn disc(y: f32, kind: u32, out: &mut Vec<Vertex>) {
     }
 }
 
+/// The sides and floor of the sky around the camera, under the sky disc: vanilla leaves every
+/// direction below the disc's rim (about 1.8 degrees above the horizon) to the clear colour,
+/// which a pack's `gbuffers_skybasic` never sees, so packs that colour the sky there (BSL's
+/// below-horizon sky) showed the raw fog colour, overexposed to white, between the terrain and
+/// the disc. Walls along the disc's rim from `top` down to `bottom` and a floor at `bottom` give
+/// the pack a fragment in every direction. The sky draws without culling and with the pack's
+/// blending, so each wall is one triangle pair: a second winding would blend it twice.
+fn horizon(top: f32, bottom: f32, kind: u32, out: &mut Vec<Vertex>) {
+    let rim = |i: i32, y: f32| {
+        let a = (i as f32).to_radians();
+        Vertex {
+            pos: [512.0 * a.cos(), y, 512.0 * a.sin()],
+            kind,
+        }
+    };
+    for i in (-180..180).step_by(45) {
+        let (a, b) = (rim(i, top), rim(i + 45, top));
+        let (c, d) = (rim(i, bottom), rim(i + 45, bottom));
+        out.extend([a, c, b, b, c, d]);
+    }
+    disc(bottom, kind, out);
+}
+
 pub(super) struct PackSky {
     vertices: wgpu::Buffer,
     celestial: wgpu::Buffer,
@@ -165,6 +188,7 @@ impl PackSky {
     pub fn new(device: &wgpu::Device) -> Self {
         let mut v = Vec::new();
         disc(16.0, SKY, &mut v);
+        horizon(16.0, -16.0, SKY, &mut v);
         let sky = 0..v.len() as u32;
         let apex = Vertex {
             pos: [0.0; 3],
