@@ -604,7 +604,8 @@ def run_environment(reuse_oracles=False):
             link = SHIM / name
             if not link.is_symlink():
                 link.symlink_to(ROOT / "tools" / "parity_shim.py")
-        environment.update(PARITY_SHIM_REAL_PATH=os.environ.get("PATH", ""), PARITY_SHIM_CACHE=str(STATE_DIR / "oracle-cache"),
+        environment.update(PARITY_SHIM_REAL_PATH=os.environ.get("PATH", ""),
+                           PARITY_SHIM_CACHE=os.environ.get("PARITY_ORACLE_CACHE", str(SHARED / "oracle-cache")),
                            PATH=f"{SHIM}{os.pathsep}{os.environ.get('PATH', '')}")
     return environment
 

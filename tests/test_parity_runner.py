@@ -642,3 +642,10 @@ class WorkspaceManifestTests(unittest.TestCase):
 
     def test_without_a_base_everything_counts(self):
         self.assertEqual(parity.workspace_only_manifests({"Cargo.lock"}, None), set())
+
+
+class OracleCacheLocationTests(unittest.TestCase):
+    def test_run_environment_keeps_oracle_cache_in_shared_storage(self):
+        with mock.patch.object(parity, "SHARED", __import__("pathlib").Path("/shared")):
+            environment = parity.run_environment(True)
+        self.assertEqual(environment["PARITY_SHIM_CACHE"], "/shared/oracle-cache")
