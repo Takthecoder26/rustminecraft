@@ -109,6 +109,41 @@ pub(super) fn flatten_as(code: &str, inputs: &str) -> Option<String> {
                 }
             }
             if whole {
+                // naga's GLSL frontend rejects interpolation qualifiers on the
+                // members of an interface block left unflattened ("Expected ...,
+                // found Interpolation(Flat)"). Drop the ones it cannot parse here;
+                // flattened blocks keep theirs as standalone varyings.
+                for (first, _) in &b.members {
+                    let mut j = *first;
+                    while j < tokens.len() && significant(&tokens[j]) {
+                        if tokens[j] == "layout" {
+                            j += 1;
+                            let mut level = 0;
+                            while j < tokens.len() {
+                                match tokens[j].as_str() {
+                                    "(" => level += 1,
+                                    ")" => {
+                                        level -= 1;
+                                        if level == 0 {
+                                            j += 1;
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                j += 1;
+                            }
+                        } else if matches!(tokens[j].as_str(), "flat" | "smooth" | "noperspective") {
+                            blank(&mut tokens[j]);
+                            j += 1;
+                        } else if MEMBER_QUALIFIERS.contains(&tokens[j].as_str()) {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                changed = true;
                 continue;
             }
         }
