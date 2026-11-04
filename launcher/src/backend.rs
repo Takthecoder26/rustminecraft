@@ -3927,9 +3927,10 @@ pub fn {f}("
             .get_envs()
             .find(|(k, _)| *k == "PIPEWIRE_PROPS")
             .and_then(|(_, v)| v);
-        assert!(props.is_some_and(|v| v
-            .to_string_lossy()
-            .contains("application.name = \"Horizon\"")));
+        assert!(props.is_some_and(|v| {
+            v.to_string_lossy()
+                .contains("application.name = \"Horizon\"")
+        }));
     }
 
     #[test]
@@ -4732,9 +4733,11 @@ pub fn {f}("
             Some("v2026.10.13".into())
         );
         assert!(is_prepared("v2026.10.13.1"));
-        assert!(resources_at(&versions.join("v2026.10.13.1"))
-            .join("worldgen/biomes.json")
-            .exists());
+        assert!(
+            resources_at(&versions.join("v2026.10.13.1"))
+                .join("worldgen/biomes.json")
+                .exists()
+        );
         let left: Vec<_> = fs::read_dir(versions.join("v2026.10.13.1/.local/horizon-client"))
             .unwrap()
             .flatten()
@@ -5079,9 +5082,11 @@ pub fn {f}("
                 "v0.2.2: The sounds",
             ]
         );
-        assert!(resources_at(&versions.join("v0.2.2"))
-            .join(RESOURCES_MANIFEST)
-            .exists());
+        assert!(
+            resources_at(&versions.join("v0.2.2"))
+                .join(RESOURCES_MANIFEST)
+                .exists()
+        );
         assert_eq!(
             asset("v0.2.2", &format!("{background}/panorama_0.png")).as_deref(),
             Some(&placeholder[..])
