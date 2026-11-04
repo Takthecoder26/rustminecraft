@@ -277,7 +277,6 @@ impl ServerCoordination {
         self.parallel_commit = parallel;
         self.walk_log = Some(Vec::new());
         if verify {
-            horizon_client::mobs::frog::repeat_jump_shuffles();
             self.execution = Execution::Verify;
         }
     }
