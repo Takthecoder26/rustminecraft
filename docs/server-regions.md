@@ -145,9 +145,19 @@ The focused tests cover topology/bridge merge and split, stable ordering,
 negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
 sparse-grid equivalence, negative-space reads, distant ID/full-scan reads,
 foreign bounds growth, sparse populated-cell queries, shared RNG/Gaussian
-consumption, complete mutable-mob
-transactions and exact indexed player selection. Broader parity, server/LAN
-checks and the live comparison are recorded here after the current run finishes.
+consumption, complete mutable-mob transactions and exact indexed player
+selection. The full mob-AI vanilla oracle passes all 272 scenarios and all
+127,179 mob ticks. Forced-parallel dedicated-server, server-entity,
+player-damage and natural-spawning harnesses pass. Live server-thread/LAN
+checks pass for mobs, portals, projectiles/vehicles and blasts; the mob check
+was repeated against the final runtime.
+
+The final repository check passes formatting, clippy (including the server
+feature configuration), 5,853 workspace Rust tests, 627 Python tests and 24
+content-root tests. Launcher formatting/clippy and 463 launcher tests pass;
+its translation-completeness test fails on missing Hebrew strings. The exact
+unchanged test also fails against base `9697aaf14`, independently reproducing
+that existing failure. The PR records the broader affected-parity sweep.
 
 `tools/bench_region_ticks.py` starts 100 real `horizon-bots` clients, teleports
 them to a 512-block grid in a fixed-seed flat world, and summons 70 persistent
@@ -172,3 +182,44 @@ the final comparison uses the PR's original base revision rather than attributin
 improvements common to both new execution modes to parallel scheduling.
 This is a quick workload comparison, not a claim about every mob mix: shared
 RNG, native mods, active raids and unbounded observations can require replay.
+
+### Measured comparison (2026-11-03)
+
+Same 100 connected standing players, 512-block spacing, 7,000 invulnerable
+AI-enabled zombies, seed 12345, flat terrain, view/simulation distance 2,
+200 simulation warmup ticks and a 20-second measurement. Both engines use the
+`fast` optimized profile and Rust 1.99.0 on a Ryzen 5 5600X (6 cores/12 threads).
+The new pool has eight workers. Validation scheduling/compilation was paused
+for measurement after active harnesses finished; other desktop applications
+remained running. This is one quick sweep on a shared machine.
+
+The original engine was built from base `9697aaf14`; the new engine was built
+from `4c5925eb2`. The direct serial control uses the new engine with region
+execution disabled. The complete inputs, percentile summaries and selected
+phase timings are in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Execution | Tick median ms | Tick p95 ms | Tick p99 ms | Mob median ms | Mob p95 ms | Mob p99 ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original engine | 133.74 | 189.87 | 418.22 | 99.2 | 142.2 | 365.8 | 98.50 | 442.38 |
+| New engine, direct serial control | 182.63 | 550.65 | 679.61 | 136.1 | 404.9 | 609.9 | 81.99 | 454.81 |
+| New engine, parallel regions | 91.56 | 101.05 | 110.53 | 60.2 | 66.3 | 72.9 | 236.50 | 521.65 |
+
+CPU 100% means one logical core. Peak RSS was 443.96/456.22/547.60 MiB,
+respectively. The reports contain 139/79/219 ticks; timed mob spans cover
+138/78/218 ticks, with the initial frozen/report boundary omitted. Every
+measurement kept all 100 players and 7,000 mobs. Parallel execution committed
+all 7,000 predictions across 100 regions per tick, with no replay in this
+workload. The direct serial control had substantial tail variation; this
+single sweep does not establish a small-workload or serial-mode speedup.
+
+Against the original engine, parallel execution reduced median mob time by
+39%, whole-tick median by 32%, p95 by 47% and p99 by 74%, using more CPU and
+about 79 MiB more mean RSS. This dense collision workload still runs below
+20 TPS (6.93 before, 10.90 after). The results establish a live improvement,
+not a guarantee that every 100-player mob mix fits a 50 ms tick budget.
+
+```sh
+python3 tools/bench_region_ticks.py --bin .local/parity-target/fast \
+  --before-bin /path/to/base-build/target/fast --modes legacy,control,parallel \
+  --warmup 10 --settle 20 --seconds 20
+```
