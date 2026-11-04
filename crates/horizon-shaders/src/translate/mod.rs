@@ -151,7 +151,8 @@ pub struct GbuffersInputs {
     /// `hz_MultiTexCoord1` and `hz_Normal` (the compatibility inputs), run first in `main`.
     pub body: String,
     /// The value of each attribute a pack may declare (`mc_Entity`, `vaPosition`...), as a GLSL
-    /// expression of the declared type's size; an attribute not listed reads zero.
+    /// expression of the declared type's size; an attribute not listed reads zero, except
+    /// `mc_chunkFade` (also available undeclared), whose neutral fallback is 1.
     pub attributes: Vec<(String, String)>,
     /// GLSL statements run last in `main`, with `gl_Position` in wgpu's clip space.
     pub after: String,
@@ -274,6 +275,15 @@ fn translate(
     let mut f = Stage::scan(fragment, ShaderStage::Fragment);
     v.gbuffers = gbuffers.is_some();
     f.gbuffers = gbuffers.is_some();
+    // Packs may read this vertex input without declaring it. An authored declaration keeps
+    // its meaning; only the otherwise undeclared name gets an injected private global.
+    let implicit_fade = gbuffers.is_some()
+        && !v.globals.contains("mc_chunkFade")
+        && uses_name(&vertex.code, "mc_chunkFade");
+    if implicit_fade {
+        v.attributes
+            .push(("mc_chunkFade".into(), "1.0".into(), "float".into()));
+    }
     let mut errors: Vec<Error> = v.errors.drain(..).chain(f.errors.drain(..)).collect();
 
     // One uniform block and one set of samplers for both stages.
@@ -432,6 +442,9 @@ fn translate(
         if let (Some(inputs), ShaderStage::Vertex) = (gbuffers, stage.kind) {
             h.push_str(&inputs.declarations);
             h.push('\n');
+            if implicit_fade {
+                h.push_str("float mc_chunkFade;\n");
+            }
         }
         h.push_str(&stage.prelude());
         h
@@ -454,9 +467,10 @@ fn translate(
         let value = match gbuffers {
             // Our quad's values for a composite.
             None => value.clone(),
-            // The game's, or zero for anything it doesn't provide.
+            // The game's, or a neutral fallback for inputs it doesn't provide.
             Some(inputs) => match inputs.attributes.iter().find(|a| &a.0 == name) {
                 Some((_, given)) => format!("{ty}({given})"),
+                None if name == "mc_chunkFade" => format!("{ty}(1.0)"),
                 None => format!("{ty}(0)"),
             },
         };
@@ -1435,6 +1449,54 @@ fn block_layout(module: &naga::Module) -> (u32, Vec<(String, u32)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Always runs without an adapter: packs can read the implicit vertex name, including
+    /// from a global initializer, and authored declarations keep their own meaning.
+    #[test]
+    fn chunk_fade_vertex_inputs_compile_with_and_without_terrain() {
+        let pp = |code: String| Preprocessed {
+            code,
+            ..Default::default()
+        };
+        let fragment =
+            pp("varying float opacity; void main() { gl_FragColor = vec4(opacity); }".into());
+        for declarations in [
+            "",
+            "attribute float mc_chunkFade;",
+            "float mc_chunkFade = 0.625;",
+            "uniform float mc_chunkFade;",
+        ] {
+            let vertex = pp(format!(
+                "{declarations}\nfloat initial_opacity = mc_chunkFade;\n\
+                 varying float opacity;\nvoid main() {{\n\
+                 opacity = initial_opacity; gl_Position = gl_Vertex; }}"
+            ));
+            for attributes in [vec![], vec![("mc_chunkFade".into(), "0.25".into())]] {
+                let inputs = GbuffersInputs {
+                    body: "hz_Vertex = vec4(0.0, 0.0, 0.0, 1.0);".into(),
+                    attributes,
+                    ..Default::default()
+                };
+                for shadow in [false, true] {
+                    let program = if shadow {
+                        translate_shadow(&vertex, &fragment, &inputs)
+                    } else {
+                        translate_gbuffers(&vertex, &fragment, Target::Buffers, &inputs)
+                    }
+                    .unwrap_or_else(|e| panic!("{declarations:?}, shadow={shadow}: {e:?}"));
+                    // Only an explicitly authored uniform can use frame-uniform storage.
+                    assert_eq!(
+                        program
+                            .interface
+                            .uniforms
+                            .iter()
+                            .any(|u| u.name == "mc_chunkFade"),
+                        declarations.starts_with("uniform")
+                    );
+                }
+            }
+        }
+    }
 
     /// A gbuffers program whose fragment stage writes `float(<name>)` after `decl`.
     fn item_program(

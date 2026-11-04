@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 /// "Separate Hardware Shadow Samplers"): `shadowtex0`/`shadowtex1` stay plain depth samplers when
 /// hardware filtering is on, `shadowtex0HW`/`shadowtex1HW` compare; Horizon picks a comparison
 /// sampler by the declared type (`sampler2DShadow`), so they always are. `HIGHER_SHADOWCOLOR`:
-/// `shadowcolor2` to `shadowcolor7` beside the first two.
-const FEATURES: [&str; 8] = [
+/// `shadowcolor2` to `shadowcolor7` beside the first two. `FADE_VARIABLE`: terrain's
+/// normalized visibility is available to a pack as the vertex input `mc_chunkFade`.
+const FEATURES: [&str; 9] = [
     "BLOCK_EMISSION_ATTRIBUTE",
     "COMPUTE_SHADERS",
     "CUSTOM_IMAGES",
     "ENTITY_TRANSLUCENT",
+    "FADE_VARIABLE",
     "HIGHER_SHADOWCOLOR",
     "REVERSED_CULLING",
     "SEPARATE_HARDWARE_SAMPLERS",
@@ -404,6 +406,29 @@ pub(crate) fn is_ident(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_fade_can_be_negotiated_without_a_renderer() {
+        let mut properties_macros = Macros::standard();
+        properties_macros.define_every_feature();
+        let properties = crate::Properties::parse(
+            "#ifdef IRIS_FEATURE_FADE_VARIABLE\n\
+             iris.features.optional = FADE_VARIABLE\n\
+             #endif\n\
+             iris.features.required = FADE_VARIABLE\n",
+            &properties_macros,
+        );
+        let mut program_macros = Macros::standard();
+        assert!(program_macros.define_features(&properties).is_empty());
+        // The declaration is available only after successful optional negotiation.
+        translates(
+            "#version 330\n\
+             #ifdef IRIS_FEATURE_FADE_VARIABLE\nconst float opacity = 1.0;\n#endif\n\
+             out vec4 c;\nvoid main() { c = vec4(opacity); }\n",
+            &program_macros,
+        )
+        .unwrap();
+    }
 
     /// Whether `fsh` translates with `m`: a program that declares what it reads only under
     /// a macro's condition translates when the condition holds.

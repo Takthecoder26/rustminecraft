@@ -262,6 +262,12 @@ impl PackAtlas {
         };
         let attributes = [
             ("mc_Entity", entity),
+            // Positive origins carry native chunk visibility in their mantissa. Negative
+            // origins use the independent distant-terrain dither encoding, so stay whole.
+            (
+                "mc_chunkFade",
+                "(hz_origin.w > 0.0 ? 1.0 - float(floatBitsToUint(hz_origin.w) & 0x7fffffu) / 8388608.0 : 1.0)",
+            ),
             ("at_midBlock", mid_block),
             (
                 "mc_midTexCoord",
