@@ -312,8 +312,11 @@ impl Game<'_> {
         }
         // EndGatewayBlock.entityInside: a gateway that is not cooling down
         // takes the player at once (no transition time) and cools down
-        // (triggerCooldown), even for a player still on its own cooldown.
-        if let Some(g) = gateway
+        // (triggerCooldown), even for a player still on its own cooldown. A
+        // passenger's `canUsePortal(false)` is false: it neither goes through
+        // nor starts the gateway's cooldown.
+        if !riding
+            && let Some(g) = gateway
             && self.gateway_available(g)
         {
             if self.portals.player.cooldown == 0 {

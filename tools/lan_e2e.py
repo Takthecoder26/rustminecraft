@@ -228,6 +228,8 @@ address. The script then checks, from both sides, what a guest's game used to ge
              cart carries the player, who arrives in the Nether still riding the same cart (#6021).
 - portal_rider: a survival guest rides a horse into a Nether portal: the horse goes
              through at once and carries it, so it arrives in the Nether still riding the same horse.
+- gateway_rider: a guest on a horse and in a boat, in an End gateway: it is never parted from its
+             vehicle; on foot, the same gateway takes it to its exit.
 - riding_teleport: the host and the guest each /tp through chat while riding a horse; after 60
              ticks each stays dismounted at the destination and both sides see the horse left
              behind. The host also teleports a mounted guest by name.
@@ -9575,6 +9577,94 @@ def check_portal_rider(host, guest, out):
 
 CHECKS += ['portal_rider']
 CHECK_FNS.update(portal_rider=check_portal_rider)
+
+
+def check_gateway_rider(host, guest, out):
+    """#9290: EndGatewayBlock.entityInside asks canUsePortal(false), false for a passenger, so a guest
+    riding through an End gateway does not go through it alone, and its vehicle does not leave without
+    it. Holds whether the vehicle stays (Horizon) or carries the rider (vanilla). On foot, the same
+    gateway takes the guest to its exact exit, on the floor built here."""
+    hx, hy, hz = (int(v // 1) for v in pos_of(guest))
+    x, y, z = 700, 80, 0
+    exit_at = (x - 2.5, z - 2.5)
+    tag = 'gateway_rider'
+
+    def gateway(bx, bz):
+        guest('command', command=f'setblock {bx} {y + 1} {bz} minecraft:end_gateway'
+                                 f'{{exit_portal:[I;{x - 3},{y},{z - 3}],ExactTeleport:1b}}')
+
+    def stays_seated(vehicle_id, vehicle_at, what):
+        # Past the gateway's 40 ticks of cooldown, so it would take the rider twice.
+        for _ in range(12):
+            guest.wait(5)
+            at, there = pos_of(guest), vehicle_at()
+            riding = guest('status').get('riding')
+            assert riding == vehicle_id, f'the {what} {vehicle_id} lost its rider: riding {riding}'
+            assert there, f'the {what} {vehicle_id} went through the gateway alone'
+            assert math.dist(there, at) < 3, f'the guest at {at} is not on its {what} at {there}'
+
+    try:
+        into_level(guest, END, x, y, z)
+        guest('command', command='clear @s')
+        guest('command', command='gamemode survival')
+        # A horse's box and its rider's both reach into the gateway above the floor.
+        horse_at = (x + 1.0, y, z + 2.5)
+        guest('command', command='item replace entity @s weapon.mainhand with minecraft:saddle')
+        guest('command', command=f'summon minecraft:horse {horse_at[0]} {y} {horse_at[2]} '
+                                 f'{{Tame:1b,NoAI:1b,Tags:["{tag}"]}}')
+        guest.wait(5)
+        horses = [m for m in guest.raw('mobs', 16)['near'] if m['kind'] == 'minecraft:horse' and m['health'] > 0]
+        horse = next((m for m in horses if math.dist(m['pos'], horse_at) < 0.1), None)
+        assert horse, f'no live horse at {horse_at}: {horses}'
+        guest.raw('look-at', horse_at[0], y + 0.8, horse_at[2])
+        guest.raw('mouse', 'right', 'click')
+        guest.wait(5)
+        guest('command', command='item replace entity @s weapon.mainhand with minecraft:air')
+        guest.wait(2)
+        guest.raw('mouse', 'right', 'click')
+        guest.wait(5)
+        assert guest('status').get('riding') == horse['id'], 'the guest is not riding the horse'
+        gateway(x + 1, z + 2)
+        stays_seated(horse['id'], lambda: (mob_seen(guest, horse['id']) or {}).get('pos'), 'horse')
+        guest('command', command=f'kill @e[tag={tag}]')
+        guest('command', command=f'setblock {x + 1} {y + 1} {z + 2} minecraft:air')
+        guest('command', command=f'tp @s {x + 0.5} {y} {z + 0.5} 0 0')
+        # Leaving the horse started the 60 ticks before it can board again.
+        guest.wait(70)
+
+        # A boat stays below the gateway: only its rider reaches it.
+        boat_at = (x + 2.5, y, z + 0.5)
+        guest('command', command=f'summon minecraft:oak_boat {boat_at[0]} {y} {boat_at[2]} {{Tags:["{tag}"]}}')
+        guest.wait(10)
+        boat = board(guest, 'oak_boat', boat_at)
+        gateway(x + 2, z)
+
+        def boat_position():
+            return next((o['position'] for o in guest('status')['objects'] if o['id'] == boat['id']), None)
+
+        stays_seated(boat['id'], boat_position, 'boat')
+        leave_vehicle(guest, 'oak_boat')
+
+        # On foot it goes through: the gateway above was live all along.
+        guest('command', command=f'tp @s {x + 2.5} {y + 1} {z + 0.5}')
+        at = None
+        for _ in range(20):
+            guest.wait(5)
+            at = pos_of(guest)
+            if math.dist((at[0], at[2]), exit_at) < 1:
+                break
+        assert math.dist((at[0], at[2]), exit_at) < 1, f'on foot, the gateway left the guest at {at}'
+        return {'horse': horse['id'], 'boat': boat['id'], 'on_foot': at}
+    finally:
+        back_to_game(guest)
+        guest('command', command=f'kill @e[tag={tag}]')
+        guest('command', command=f'execute in {OVERWORLD} run tp @s {hx + 0.5} {hy} {hz + 0.5} 0 0')
+        wait_dimension(guest, OVERWORLD, 600)
+        guest.wait(20)
+
+
+CHECKS += ['gateway_rider']
+CHECK_FNS.update(gateway_rider=check_gateway_rider)
 
 
 def check_cart_portal_rider(host, guest, out):
