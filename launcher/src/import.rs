@@ -134,11 +134,25 @@ pub fn import_instance(file: &Path, progress: &dyn Fn(&str, f32)) -> Result<Inst
     import_into(file, progress, &|name| instances::create(name, None))
 }
 
+/// The most a shared instance may unpack to, all files together. A zip's sizes are its own claim, so
+/// this counts the bytes actually inflated: a few kilobytes of zip bomb can't fill the disk.
+pub const MAX_IMPORT: u64 = 8 << 30;
+
 /// [`import_instance`] with the instance made by `create`.
 pub fn import_into(
     file: &Path,
     progress: &dyn Fn(&str, f32),
     create: &dyn Fn(&str) -> Result<Instance, String>,
+) -> Result<Instance, String> {
+    import_capped(file, progress, create, MAX_IMPORT)
+}
+
+/// [`import_into`] with at most `limit` bytes unpacked from the archive.
+fn import_capped(
+    file: &Path,
+    progress: &dyn Fn(&str, f32),
+    create: &dyn Fn(&str) -> Result<Instance, String>,
+    limit: u64,
 ) -> Result<Instance, String> {
     if what(file)? != Dropped::Instance {
         return Err(format!("{} is not a shared instance.", name_of(file)));
@@ -168,7 +182,7 @@ pub fn import_into(
         .find_map(|name| create(&name).ok())
         .ok_or_else(|| format!("Could not make an instance called {base}."))?;
     let home = instance.home.clone();
-    let filled = fill(&mut zip, index.as_ref(), &home, progress);
+    let filled = fill(&mut zip, index.as_ref(), &home, progress, limit);
     if let Err(e) = filled {
         let _ = fs::remove_dir_all(&home);
         return Err(e);
@@ -176,13 +190,24 @@ pub fn import_into(
     Ok(instance)
 }
 
+/// `limit` as people read it: GiB from 1 GiB up, else KiB.
+fn size_text(limit: u64) -> String {
+    if limit >= 1 << 30 {
+        format!("{} GiB", limit >> 30)
+    } else {
+        format!("{} KiB", limit.div_ceil(1024))
+    }
+}
+
 fn fill(
     zip: &mut zip::ZipArchive<fs::File>,
     index: Option<&serde_json::Value>,
     home: &Path,
     progress: &dyn Fn(&str, f32),
+    limit: u64,
 ) -> Result<(), String> {
     let count = zip.len();
+    let mut total = 0u64;
     for i in 0..count {
         let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().map_err(|e| e.to_string())?.into_owned();
@@ -198,7 +223,17 @@ fn fill(
         };
         fs::create_dir_all(to.parent().expect("inside home")).map_err(|e| e.to_string())?;
         let mut out = fs::File::create(&to).map_err(|e| format!("{}: {e}", to.display()))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| format!("{}: {e}", to.display()))?;
+        let room = limit.saturating_sub(total);
+        let written = std::io::copy(&mut (&mut entry).take(room.saturating_add(1)), &mut out)
+            .map_err(|e| format!("{}: {e}", to.display()))?;
+        total = total.saturating_add(written);
+        if written > room {
+            return Err(format!(
+                "{} unpacks to more than {}: it isn't imported.",
+                name_of(&to),
+                size_text(limit)
+            ));
+        }
         progress(
             &format!("Copying {relative}"),
             (i + 1) as f32 / count as f32,
