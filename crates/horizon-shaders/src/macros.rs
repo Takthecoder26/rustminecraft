@@ -1,5 +1,4 @@
-//! Object-like macros: the ones packs test in `#if` lines and use inside property values
-//! (spec 1.5, 1.5.1). The GLSL preprocessor's function-like macros are not needed here.
+//! Object-like and function-like macros in GLSL stages, conditions and property values.
 
 use std::collections::BTreeMap;
 
@@ -234,118 +233,267 @@ impl Macros {
             .map(|m| m.body.as_str())
     }
 
-    /// Whether `text` calls a function-like macro whose arguments go on past its end.
-    pub(crate) fn unfinished_call(&self, text: &str) -> bool {
-        let tokens = lex(text);
-        tokens.iter().enumerate().any(|(i, t)| {
-            self.0.get(*t).is_some_and(|m| m.params.is_some())
-                && tokens[i + 1..]
+    /// Whether another line can complete a macro invocation, including an expanded alias.
+    pub(crate) fn unfinished_call(&self, text: &str, next_line: &str) -> bool {
+        if !self.has_macro(text) {
+            return false;
+        }
+        let (tokens, unfinished) = self.expand_tokens(expansion_tokens(text));
+        let next = next_line.trim_start();
+        unfinished
+            || ((next.is_empty() || next.starts_with('('))
+                && tokens
                     .iter()
-                    .find(|t| !t.trim().is_empty())
-                    .is_some_and(|t| *t == "(")
-                && arguments(&tokens, i + 1).is_none()
-        })
+                    .rfind(|t| !t.text.trim().is_empty())
+                    .is_some_and(|token| {
+                        !token.hidden.iter().any(|name| *name == token.text)
+                            && self.0.get(&token.text).is_some_and(|m| m.params.is_some())
+                    }))
     }
 
     /// `text` with every macro expanded, repeatedly; a macro is not expanded again inside its own
     /// expansion, so `A` defined as `A + 1` stops. Function-like macros take their arguments
     /// (expanded first, raw beside `##`, which pastes) when a `(` follows their name.
     pub fn expand(&self, text: &str) -> String {
-        self.expand_hiding(text, &mut Vec::new())
+        if !self.has_macro(text) {
+            return text.to_owned();
+        }
+        expansion_text(&self.expand_tokens(expansion_tokens(text)).0)
     }
 
-    fn expand_hiding<'a>(&'a self, text: &str, hidden: &mut Vec<&'a str>) -> String {
-        let mut out = String::with_capacity(text.len());
-        let tokens = lex(text);
+    fn has_macro(&self, text: &str) -> bool {
+        lex(text).iter().any(|token| self.0.contains_key(*token))
+    }
+
+    fn expand_tokens<'a>(
+        &'a self,
+        mut tokens: Vec<ExpansionToken<'a>>,
+    ) -> (Vec<ExpansionToken<'a>>, bool) {
+        let mut out = Vec::new();
+        let mut unfinished = false;
         let mut i = 0;
         while i < tokens.len() {
-            let word = tokens[i];
-            i += 1;
-            let Some((name, m)) = self.0.get_key_value(word) else {
-                out.push_str(word);
+            let word = &tokens[i];
+            let Some((name, m)) = self.0.get_key_value(&word.text) else {
+                out.push(word.clone());
+                i += 1;
                 continue;
             };
-            if hidden.contains(&name.as_str()) {
-                out.push_str(word);
+            if word.hidden.contains(&name.as_str()) {
+                out.push(word.clone());
+                i += 1;
                 continue;
             }
-            let body = match &m.params {
-                None => m.body.clone(),
+            let (mut body, next, mut hidden) = match &m.params {
+                None => (
+                    paste_tokens(expansion_tokens(&m.body)),
+                    i + 1,
+                    word.hidden.clone(),
+                ),
                 Some(params) => {
-                    let Some((args, next)) = arguments(&tokens, i) else {
-                        out.push_str(word);
+                    let opening =
+                        (i + 1..tokens.len()).find(|&j| !tokens[j].text.trim().is_empty());
+                    if opening.is_none_or(|j| tokens[j].text != "(") {
+                        out.push(word.clone());
+                        i += 1;
+                        continue;
+                    }
+                    let Some((args, next)) = arguments(&tokens, opening.unwrap()) else {
+                        unfinished = true;
+                        out.push(word.clone());
+                        i += 1;
                         continue;
                     };
-                    i = next;
-                    self.substitute(params, &args, &m.body, hidden)
+                    // A call can end outside the replacement that produced its name. Only
+                    // suppress enclosing macros still active at both ends of that call.
+                    let hidden = word
+                        .hidden
+                        .iter()
+                        .copied()
+                        .filter(|name| tokens[next - 1].hidden.contains(name))
+                        .collect();
+                    (self.substitute(params, &args, &m.body), next, hidden)
                 }
             };
             hidden.push(name);
-            out.push_str(&self.expand_hiding(&body, hidden));
-            hidden.pop();
+            for token in &mut body {
+                for name in &hidden {
+                    if !token.hidden.contains(name) {
+                        token.hidden.push(name);
+                    }
+                }
+            }
+            // C++ [cpp.rescan]: rescan together with the remaining source, without
+            // revisiting tokens already emitted or converting them back into text.
+            tokens.splice(i..next, body);
         }
-        out
+        (out, unfinished)
     }
 
     /// A function-like macro's body with its parameters replaced.
     fn substitute<'a>(
         &'a self,
         params: &[String],
-        args: &[String],
+        args: &[Vec<ExpansionToken<'a>>],
         body: &str,
-        hidden: &mut Vec<&'a str>,
-    ) -> String {
-        let tokens = lex(body);
+    ) -> Vec<ExpansionToken<'a>> {
+        let tokens = expansion_tokens(body);
         let pasted = |at: usize, step: isize| {
             let mut j = at as isize + step;
-            while (0..tokens.len() as isize).contains(&j) && tokens[j as usize].trim().is_empty() {
+            while (0..tokens.len() as isize).contains(&j)
+                && tokens[j as usize].text.trim().is_empty()
+            {
                 j += step;
             }
-            (0..tokens.len() as isize).contains(&j) && tokens[j as usize] == "##"
+            (0..tokens.len() as isize).contains(&j) && tokens[j as usize].text == "##"
         };
-        let mut out = String::new();
+        let mut expanded = vec![None; args.len()];
+        let mut out = Vec::new();
         for (at, token) in tokens.iter().enumerate() {
-            match params.iter().position(|p| p == token) {
+            match params.iter().position(|p| *p == token.text) {
                 Some(k) => {
-                    let arg = args.get(k).map_or("", |a| a.trim());
-                    if pasted(at, -1) || pasted(at, 1) {
-                        out.push_str(arg);
+                    let raw = pasted(at, -1) || pasted(at, 1);
+                    let arg = if raw {
+                        args.get(k)
                     } else {
-                        out.push_str(&self.expand_hiding(arg, hidden));
+                        args.get(k)
+                            .map(|arg| {
+                                expanded[k].get_or_insert_with(|| self.expand_tokens(arg.clone()).0)
+                            })
+                            .map(|arg| &*arg)
+                    };
+                    let arg = arg.map_or(&[][..], |arg| trim_tokens(arg));
+                    out.extend_from_slice(arg);
+                    if raw && arg.is_empty() {
+                        out.push(ExpansionToken::new("")); // placemarker beside ##
                     }
                 }
-                None => out.push_str(token),
+                None => out.push(token.clone()),
             }
         }
-        // `a ## b` → `ab`.
-        let mut joined = String::with_capacity(out.len());
-        for (k, part) in out.split("##").enumerate() {
-            joined.push_str(if k == 0 { part.trim_end() } else { part.trim() });
-        }
-        if out.contains("##") { joined } else { out }
+        paste_tokens(out)
     }
+}
+
+/// Suppression belongs to each token, including tokens substituted through an argument.
+/// Flattening an expansion to a string would make a disabled recursive name eligible again.
+#[derive(Clone)]
+struct ExpansionToken<'a> {
+    text: String,
+    hidden: Vec<&'a str>,
+}
+
+impl ExpansionToken<'_> {
+    fn new(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            hidden: Vec::new(),
+        }
+    }
+}
+
+fn trim_tokens<'t, 'a>(mut tokens: &'t [ExpansionToken<'a>]) -> &'t [ExpansionToken<'a>] {
+    while tokens.first().is_some_and(|t| t.text.trim().is_empty()) {
+        tokens = &tokens[1..];
+    }
+    while tokens.last().is_some_and(|t| t.text.trim().is_empty()) {
+        tokens = &tokens[..tokens.len() - 1];
+    }
+    tokens
+}
+
+fn paste_tokens<'a>(mut tokens: Vec<ExpansionToken<'a>>) -> Vec<ExpansionToken<'a>> {
+    while let Some(i) = tokens.iter().position(|t| t.text == "##") {
+        let left =
+            (0..i).rfind(|&j| !tokens[j].text.trim().is_empty() || tokens[j].text.is_empty());
+        let right = (i + 1..tokens.len())
+            .find(|&j| !tokens[j].text.trim().is_empty() || tokens[j].text.is_empty());
+        let (Some(left), Some(right)) = (left, right) else {
+            break;
+        };
+        let mut joined = tokens[left].clone();
+        if joined.text.is_empty() {
+            joined = tokens[right].clone();
+        } else if !tokens[right].text.is_empty() {
+            joined.text.push_str(&tokens[right].text);
+            joined
+                .hidden
+                .retain(|name| tokens[right].hidden.contains(name));
+        }
+        tokens.splice(left..=right, [joined]);
+    }
+    tokens.retain(|t| !t.text.is_empty());
+    tokens
+}
+
+fn expansion_tokens<'a>(text: &str) -> Vec<ExpansionToken<'a>> {
+    expansion_lex(text)
+        .into_iter()
+        .map(ExpansionToken::new)
+        .collect()
+}
+
+/// Keep the translator's single-character lexer unchanged; preprocessing also needs compound
+/// punctuators so serializing separate tokens cannot accidentally create `++`, `<<`, etc.
+fn expansion_lex(text: &str) -> Vec<&str> {
+    const COMPOUND: &[&str] = &[
+        "<<=", ">>=", "##", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "^^", "+=",
+        "-=", "*=", "/=", "%=", "&=", "^=", "|=",
+    ];
+    let mut parts = lex(text).into_iter();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(part) = parts.next() {
+        let mut len = part.len();
+        if let Some(op) = COMPOUND.iter().find(|op| text[at..].starts_with(**op)) {
+            while len < op.len() {
+                len += parts.next().unwrap().len();
+            }
+        }
+        out.push(&text[at..at + len]);
+        at += len;
+    }
+    out
+}
+
+fn expansion_text(tokens: &[ExpansionToken<'_>]) -> String {
+    let mut out = String::new();
+    let mut previous = "";
+    for token in tokens {
+        let text = token.text.as_str();
+        if !previous.trim().is_empty() && !text.trim().is_empty() {
+            let joined = format!("{previous}{text}");
+            let split = expansion_lex(&joined);
+            if split.as_slice() != [previous, text]
+                || joined.starts_with("//")
+                || joined.starts_with("/*")
+            {
+                out.push(' ');
+            }
+        }
+        out.push_str(text);
+        previous = text;
+    }
+    out
 }
 
 /// The arguments of a call whose `(` is the next non-blank token from `i`, split at top-level
 /// commas, and the index after its `)`. `None` when no `(` follows or it never closes.
-fn arguments(tokens: &[&str], mut i: usize) -> Option<(Vec<String>, usize)> {
-    while tokens.get(i)?.trim().is_empty() {
-        i += 1;
-    }
-    if tokens[i] != "(" {
-        return None;
-    }
+fn arguments<'a>(
+    tokens: &[ExpansionToken<'a>],
+    i: usize,
+) -> Option<(Vec<Vec<ExpansionToken<'a>>>, usize)> {
     let (mut depth, mut args, mut from) = (0, Vec::new(), i + 1);
     for (j, t) in tokens.iter().enumerate().skip(i + 1) {
-        match *t {
+        match t.text.as_str() {
             "(" => depth += 1,
             ")" if depth == 0 => {
-                args.push(tokens[from..j].concat());
+                args.push(tokens[from..j].to_vec());
                 return Some((args, j + 1));
             }
             ")" => depth -= 1,
             "," if depth == 0 => {
-                args.push(tokens[from..j].concat());
+                args.push(tokens[from..j].to_vec());
                 from = j + 1;
             }
             _ => {}
@@ -565,5 +713,126 @@ mod tests {
         assert_eq!(m.expand("CAT(N, 2) CAT(col, ortex4)"), "N2 colortex4");
         assert_eq!(m.expand("PI() SQ SQ(1"), "3.14 SQ SQ(1");
         assert_eq!(m.get("SQ"), None);
+    }
+
+    fn definitions(lines: &[&str]) -> Macros {
+        let mut macros = Macros::default();
+        for line in lines {
+            macros.define_line(line).unwrap();
+        }
+        macros
+    }
+
+    /// GLSL 4.60 section 3.3 adopts C++ [cpp.rescan] and [cpp.subst]. These fixtures
+    /// are original examples of replacement lists borrowing the caller's tokens.
+    #[test]
+    fn aliases_and_returned_macro_names_invoke_following_arguments() {
+        let m = definitions(&[
+            "APPLY(x) ((x) + 2)",
+            "ALIAS APPLY",
+            "CHAIN ALIAS",
+            "RETURN() CHAIN",
+            "CALL(f, x) f(x)",
+            "PASS(x) x",
+            "CAT(a, b) a ## b",
+            "PASTED AP ## PLY",
+            "N 5",
+        ]);
+        for call in [
+            "ALIAS(N)",
+            "CHAIN (N)",
+            "RETURN()(N)",
+            "CALL(ALIAS, N)",
+            "PASS(ALIAS)(N)",
+            "CAT(AP, PLY)(N)",
+            "CAT(, APPLY)(N)",
+            "PASTED(N)",
+        ] {
+            assert_eq!(m.expand(call), "((5) + 2)", "{call}");
+        }
+        assert_eq!(m.expand("ALIAS + RETURN()"), "APPLY + APPLY");
+        translates(
+            "#version 330\nout vec4 c;\nvoid main() { c = vec4(float(ALIAS(N))); }\n",
+            &m,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn disabled_names_survive_argument_prescan_and_substitution() {
+        let m = definitions(&[
+            "PASS(x) x",
+            "LOOP LOOP + 1",
+            "LEFT RIGHT",
+            "RIGHT LEFT",
+            "STEP(x) STEP(x + 1)",
+            "AGAIN() AGAIN",
+        ]);
+        assert_eq!(m.expand("PASS(LOOP)"), "LOOP + 1");
+        assert_eq!(m.expand("PASS(LEFT) LEFT"), "LEFT LEFT");
+        assert_eq!(m.expand("PASS(STEP(3))"), "STEP(3 + 1)");
+        assert_eq!(m.expand("PASS(AGAIN())()"), "AGAIN()");
+    }
+
+    #[test]
+    fn rescanning_expires_enclosing_aliases_and_does_not_revisit_emitted_names() {
+        let m = definitions(&["ALIAS APPLY", "APPLY(x) ALIAS", "OPEN (", "PASS(x) x"]);
+        // The invocation ends in the caller, after ALIAS's replacement has ended.
+        assert_eq!(m.expand("ALIAS(3)"), "APPLY");
+        // OPEN has not expanded when APPLY is checked for an opening parenthesis.
+        assert_eq!(m.expand("APPLY OPEN 3)"), "APPLY ( 3)");
+        assert_eq!(m.expand("PASS(APPLY) (3)"), "APPLY");
+        let nested = definitions(&["START APPLY(", "APPLY(x) (x)", "FINISH(x) START x)"]);
+        assert_eq!(nested.expand("FINISH(4)"), "(4)");
+    }
+
+    #[test]
+    fn expansion_preserves_token_boundaries_except_at_pastes() {
+        let m = definitions(&[
+            "VALUE 1",
+            "NAME() item",
+            "PLUS +",
+            "SLASH /",
+            "CAT(a,b) a ## b",
+        ]);
+        assert_eq!(
+            m.expand("VALUE.5 NAME()0 PLUS+ SLASH*"),
+            "1 .5 item 0 + + / *"
+        );
+        assert_eq!(
+            m.expand("VALUE + i++ == j && k<<=2"),
+            "1 + i++ == j && k<<=2"
+        );
+        assert_eq!(
+            m.expand("CAT(item, 0) CAT(1, .5) CAT(+, +)"),
+            "item0 1.5 ++"
+        );
+        assert_eq!(m.expand("CAT(,) CAT(, value) CAT(value,)"), " value value");
+    }
+
+    #[test]
+    fn unfinished_alias_calls_follow_expansion_and_suppression() {
+        let m = definitions(&[
+            "APPLY(x) (x)",
+            "ALIAS APPLY",
+            "RETURN() ALIAS",
+            "AGAIN(x) AGAIN(",
+        ]);
+        for (text, next) in [
+            ("ALIAS(", "1)"),
+            ("RETURN()(1,", "2)"),
+            ("ALIAS", "(2)"),
+            ("APPLY  ", ""),
+        ] {
+            assert!(m.unfinished_call(text, next), "{text}");
+        }
+        for (text, next) in [
+            ("ALIAS(2)", "(3)"),
+            ("ALIAS + 2", "(3)"),
+            ("AGAIN(2)", "3)"),
+            ("ALIAS", "[3]"),
+        ] {
+            assert!(!m.unfinished_call(text, next), "{text}");
+        }
     }
 }

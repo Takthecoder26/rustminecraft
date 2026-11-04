@@ -121,22 +121,23 @@ impl Run<'_> {
                 line.push_str(lines[n]);
             }
             n += 1;
+            let origin = Origin {
+                file,
+                line: first as u32 + 1,
+            };
             // A macro call's arguments may span lines: they join the line the call starts on.
             if !line.trim_start().starts_with('#') && self.conditionals.active() {
+                self.macros.define("__LINE__", origin.line.to_string());
                 while n < lines.len()
                     && n - first < MAX_CALL_LINES
                     && !lines[n].trim_start().starts_with('#')
-                    && self.macros.unfinished_call(&line)
+                    && self.macros.unfinished_call(&line, lines[n])
                 {
                     line.push(' ');
                     line.push_str(lines[n]);
                     n += 1;
                 }
             }
-            let origin = Origin {
-                file,
-                line: first as u32 + 1,
-            };
             self.line(&line, origin, path, depth);
             for k in first + 1..n {
                 self.emit(
@@ -398,6 +399,39 @@ mod tests {
             ]
         );
         assert_eq!(p.lines.len(), p.code.split('\n').count());
+    }
+
+    #[test]
+    fn macro_alias_calls_span_lines_and_keep_origins() {
+        let p = run(&[(
+            "program/final.fsh",
+            "#define APPLY(x) (x + 2)\n#define ALIAS APPLY\n#define RETURN() ALIAS\n\
+             float a = ALIAS(\n4\n);\nfloat b = RETURN()\n(5);\nint line = __LINE__;\n\
+             #if ALIAS(1) == 3\nfloat enabled;\n#endif\nfloat ALIAS\n[__LINE__];\n",
+        )]);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        assert_eq!(
+            code_lines(&p),
+            [
+                ("float a = (4 + 2);", "program/final.fsh:4".into()),
+                ("float b = (5 + 2);", "program/final.fsh:7".into()),
+                ("int line = 9;", "program/final.fsh:9".into()),
+                ("float enabled;", "program/final.fsh:11".into()),
+                ("float APPLY", "program/final.fsh:13".into()),
+                ("[14];", "program/final.fsh:14".into()),
+            ]
+        );
+        assert_eq!(p.lines.len(), p.code.split('\n').count());
+
+        let line_named = run(&[(
+            "program/final.fsh",
+            "#define JOIN(a,b) a ## b\n#define EXPAND_JOIN(a,b) JOIN(a,b)\n\
+             #define HERE EXPAND_JOIN(F, __LINE__)\n#define F5(x) (x)\nfloat x = HERE(\n9\n);\n",
+        )]);
+        assert_eq!(
+            code_lines(&line_named),
+            [("float x = (9);", "program/final.fsh:5".into())]
+        );
     }
 
     #[test]
