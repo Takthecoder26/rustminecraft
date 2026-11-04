@@ -141,6 +141,7 @@ impl super::Device {
                 raw: glow::NativeTexture(name),
                 target: super::Texture::get_info_from_desc(desc),
             },
+            resource_id: super::next_texture_id(),
             drop_guard: crate::DropGuard::from_option(drop_callback),
             mip_level_count: desc.mip_level_count,
             array_layer_count: desc.array_layer_count(),
@@ -167,6 +168,7 @@ impl super::Device {
             inner: super::TextureInner::Renderbuffer {
                 raw: glow::NativeRenderbuffer(name),
             },
+            resource_id: super::next_texture_id(),
             drop_guard: crate::DropGuard::from_option(drop_callback),
             mip_level_count: desc.mip_level_count,
             array_layer_count: desc.array_layer_count(),
@@ -1094,6 +1096,7 @@ impl crate::Device for super::Device {
 
         Ok(super::Texture {
             inner,
+            resource_id: super::next_texture_id(),
             drop_guard: None,
             mip_level_count: desc.mip_level_count,
             array_layer_count: desc.array_layer_count(),
@@ -1141,6 +1144,7 @@ impl crate::Device for super::Device {
         Ok(super::TextureView {
             //TODO: use `conv::map_view_dimension(desc.dimension)`?
             inner: texture.inner.clone(),
+            resource_id: texture.resource_id,
             aspects: crate::FormatAspects::new(texture.format, desc.range.aspect),
             mip_levels: desc.range.mip_range(texture.mip_level_count),
             array_layers: desc.range.layer_range(texture.array_layer_count),

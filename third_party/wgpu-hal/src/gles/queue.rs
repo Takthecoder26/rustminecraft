@@ -23,6 +23,142 @@ enum DrawFramebuffer {
     External,
 }
 
+const COLOR_ATTACHMENT_SLOTS: usize = 32;
+const FRAMEBUFFER_ATTACHMENT_SLOTS: usize = COLOR_ATTACHMENT_SLOTS + 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FramebufferAttachmentKey {
+    resource_id: u32,
+    kind: u8,
+    target: u32,
+    mip_level: u32,
+    layer: u32,
+    layer_count: u32,
+    sample_count: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FramebufferAttachmentState {
+    slots: [Option<FramebufferAttachmentKey>; FRAMEBUFFER_ATTACHMENT_SLOTS],
+}
+
+impl Default for FramebufferAttachmentState {
+    fn default() -> Self {
+        Self {
+            // Queue::new creates draw_fbo without attachments, and this queue
+            // is the only code that mutates its attachment points.
+            slots: [None; FRAMEBUFFER_ATTACHMENT_SLOTS],
+        }
+    }
+}
+
+impl FramebufferAttachmentState {
+    /// Keep attachments that the next pass uses, replacing changed ones later
+    /// in its BindAttachment commands and detaching only unused old slots.
+    /// This state persists because only queue replay mutates `draw_fbo`;
+    /// reset_state changes the binding, and copy operations use `copy_fbo`.
+    unsafe fn prepare(
+        &mut self,
+        gl: &glow::Context,
+        attachment_mask: u64,
+    ) {
+        for index in 0..FRAMEBUFFER_ATTACHMENT_SLOTS {
+            if self.slots[index].is_some() && attachment_mask & (1 << index) == 0 {
+                unsafe { Self::detach(gl, index) };
+                self.slots[index] = None;
+            }
+        }
+    }
+
+    fn slot(&self, attachment: u32) -> Option<usize> {
+        framebuffer_attachment_slot(attachment)
+    }
+
+    unsafe fn detach(gl: &glow::Context, index: usize) {
+        let attachment = match index {
+            0..COLOR_ATTACHMENT_SLOTS => glow::COLOR_ATTACHMENT0 + index as u32,
+            32 => glow::DEPTH_ATTACHMENT,
+            33 => glow::STENCIL_ATTACHMENT,
+            34 => glow::DEPTH_STENCIL_ATTACHMENT,
+            _ => unreachable!(),
+        };
+        unsafe {
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                attachment,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            )
+        };
+    }
+}
+
+fn framebuffer_attachment_slot(attachment: u32) -> Option<usize> {
+    if let Some(index) = attachment.checked_sub(glow::COLOR_ATTACHMENT0) {
+        if index < COLOR_ATTACHMENT_SLOTS as u32 {
+            return Some(index as usize);
+        }
+    }
+    match attachment {
+        glow::DEPTH_ATTACHMENT => Some(32),
+        glow::STENCIL_ATTACHMENT => Some(33),
+        glow::DEPTH_STENCIL_ATTACHMENT => Some(34),
+        _ => None,
+    }
+}
+
+fn framebuffer_attachment_key(
+    view: &super::TextureView,
+    depth_slice: Option<u32>,
+    sample_count: u32,
+) -> Option<FramebufferAttachmentKey> {
+    let base = |kind, target, mip_level, layer, layer_count| FramebufferAttachmentKey {
+        resource_id: view.resource_id,
+        kind,
+        target,
+        mip_level,
+        layer,
+        layer_count,
+        sample_count,
+    };
+    match &view.inner {
+        super::TextureInner::Renderbuffer { .. } => Some(base(0, 0, 0, 0, 0)),
+        super::TextureInner::Texture { target, .. } => {
+            let num_layers = view.array_layers.end - view.array_layers.start;
+            if num_layers > 1 {
+                Some(base(
+                    1,
+                    *target,
+                    view.mip_levels.start,
+                    view.array_layers.start,
+                    num_layers,
+                ))
+            } else if is_layered_target(*target) {
+                let layer = if *target == glow::TEXTURE_3D {
+                    depth_slice.unwrap()
+                } else {
+                    view.array_layers.start
+                };
+                Some(base(2, *target, view.mip_levels.start, layer, 1))
+            } else {
+                Some(base(
+                    3,
+                    get_2d_target(*target, view.array_layers.start),
+                    view.mip_levels.start,
+                    0,
+                    1,
+                ))
+            }
+        }
+        super::TextureInner::DefaultRenderbuffer => panic!("Unexpected default RBO"),
+        #[cfg(webgl)]
+        super::TextureInner::ExternalFramebuffer { .. } => None,
+        #[cfg(native)]
+        super::TextureInner::ExternalNativeFramebuffer { .. } => None,
+    }
+}
+
 fn extract_marker<'a>(data: &'a [u8], range: &core::ops::Range<u32>) -> &'a str {
     core::str::from_utf8(&data[range.start as usize..range.end as usize]).unwrap()
 }
@@ -99,9 +235,10 @@ impl super::Queue {
         }
     }
 
-    unsafe fn reset_state(&self, gl: &glow::Context) {
+    unsafe fn reset_state(&self, gl: &glow::Context, framebuffer: &mut DrawFramebuffer) {
         unsafe { gl.use_program(None) };
         unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, None) };
+        *framebuffer = DrawFramebuffer::Default;
         unsafe { gl.disable(glow::DEPTH_TEST) };
         unsafe { gl.disable(glow::STENCIL_TEST) };
         unsafe { gl.disable(glow::SCISSOR_TEST) };
@@ -126,7 +263,22 @@ impl super::Queue {
         view: &super::TextureView,
         depth_slice: Option<u32>,
         sample_count: u32,
+        framebuffer: &mut DrawFramebuffer,
+        attachment_state: &mut FramebufferAttachmentState,
+        track_attachment: bool,
     ) {
+        let slot = if track_attachment {
+            attachment_state.slot(attachment)
+        } else {
+            None
+        };
+        let key = slot.and_then(|_| framebuffer_attachment_key(view, depth_slice, sample_count));
+        if let (Some(slot), Some(key)) = (slot, key) {
+            if attachment_state.slots[slot] == Some(key) {
+                return;
+            }
+        }
+
         match view.inner {
             super::TextureInner::Renderbuffer { raw } => {
                 unsafe {
@@ -195,11 +347,17 @@ impl super::Queue {
             #[cfg(webgl)]
             super::TextureInner::ExternalFramebuffer { ref inner } => unsafe {
                 gl.bind_external_framebuffer(glow::FRAMEBUFFER, inner);
+                *framebuffer = DrawFramebuffer::External;
             },
             #[cfg(native)]
             super::TextureInner::ExternalNativeFramebuffer { ref inner } => unsafe {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*inner));
+                *framebuffer = DrawFramebuffer::External;
             },
+        }
+
+        if let (Some(slot), Some(key)) = (slot, key) {
+            attachment_state.slots[slot] = Some(key);
         }
     }
 
@@ -210,6 +368,7 @@ impl super::Queue {
         #[cfg_attr(target_arch = "wasm32", allow(unused))] data_bytes: &[u8],
         queries: &[glow::Query],
         framebuffer: &mut DrawFramebuffer,
+        attachment_state: &mut FramebufferAttachmentState,
     ) {
         match *command {
             C::Draw {
@@ -1129,7 +1288,10 @@ impl super::Queue {
                     }
                 }
             }
-            C::ResetFramebuffer { is_default } => {
+            C::ResetFramebuffer {
+                is_default,
+                attachment_mask,
+            } => {
                 let desired = if is_default {
                     DrawFramebuffer::Default
                 } else {
@@ -1153,27 +1315,7 @@ impl super::Queue {
                     *framebuffer = desired;
                 }
                 if !is_default {
-                    unsafe {
-                        gl.framebuffer_texture_2d(
-                            glow::DRAW_FRAMEBUFFER,
-                            glow::DEPTH_STENCIL_ATTACHMENT,
-                            glow::TEXTURE_2D,
-                            None,
-                            0,
-                        )
-                    };
-                    for i in 0..self.shared.limits.max_color_attachments {
-                        let target = glow::COLOR_ATTACHMENT0 + i;
-                        unsafe {
-                            gl.framebuffer_texture_2d(
-                                glow::DRAW_FRAMEBUFFER,
-                                target,
-                                glow::TEXTURE_2D,
-                                None,
-                                0,
-                            )
-                        };
-                    }
+                    unsafe { attachment_state.prepare(gl, attachment_mask) };
                 }
                 unsafe { gl.color_mask(true, true, true, true) };
                 unsafe { gl.depth_mask(true) };
@@ -1188,6 +1330,7 @@ impl super::Queue {
                 depth_slice,
                 sample_count,
             } => {
+                let track_attachment = *framebuffer == DrawFramebuffer::Owned;
                 unsafe {
                     self.set_attachment(
                         gl,
@@ -1196,16 +1339,11 @@ impl super::Queue {
                         view,
                         depth_slice,
                         sample_count,
+                        framebuffer,
+                        attachment_state,
+                        track_attachment,
                     )
                 };
-                #[cfg(webgl)]
-                if matches!(&view.inner, super::TextureInner::ExternalFramebuffer { .. }) {
-                    *framebuffer = DrawFramebuffer::External;
-                }
-                #[cfg(native)]
-                if matches!(&view.inner, super::TextureInner::ExternalNativeFramebuffer { .. }) {
-                    *framebuffer = DrawFramebuffer::External;
-                }
             }
             C::ResolveAttachment {
                 attachment,
@@ -1223,6 +1361,9 @@ impl super::Queue {
                         dst,
                         None,
                         1,
+                        framebuffer,
+                        attachment_state,
+                        false,
                     )
                 };
                 unsafe {
@@ -1961,13 +2102,13 @@ impl crate::Queue for super::Queue {
     ) -> Result<(), crate::DeviceError> {
         let shared = Arc::clone(&self.shared);
         let gl = &shared.context.lock();
+        let mut attachment_state = self.attachment_state.lock();
         for cmd_buf in command_buffers.iter() {
-            // The command encoder assumes a default state when encoding the command buffer.
-            // Always reset the state between command_buffers to reflect this assumption. Do
-            // this at the beginning of the loop in case something outside of wgpu modified
-            // this state prior to commit.
-            unsafe { self.reset_state(gl) };
+            // The command encoder assumes default context state. Reset bindings
+            // at each command-buffer boundary, but keep the shadow of draw_fbo's
+            // attachments: that FBO is private and only queue replay mutates it.
             let mut framebuffer = DrawFramebuffer::Default;
+            unsafe { self.reset_state(gl, &mut framebuffer) };
             if let Some(ref label) = cmd_buf.label {
                 if self
                     .shared
@@ -1992,6 +2133,7 @@ impl crate::Queue for super::Queue {
                         &cmd_buf.data_bytes,
                         &cmd_buf.queries,
                         &mut framebuffer,
+                        &mut attachment_state,
                     )
                 };
             }

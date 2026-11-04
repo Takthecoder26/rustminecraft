@@ -1127,6 +1127,7 @@ impl crate::Adapter for super::Adapter {
                     .map_err(|_| crate::DeviceError::OutOfMemory)?,
                 copy_fbo: unsafe { gl.create_framebuffer() }
                     .map_err(|_| crate::DeviceError::OutOfMemory)?,
+                attachment_state: Mutex::new(Default::default()),
                 shader_clear_program,
                 zero_buffer,
                 temp_query_results: Mutex::new(Vec::new()),
