@@ -1,6 +1,6 @@
 //! Entities, block entities, translucent entity parts and particles drawn by a shader pack's
 //! `gbuffers_entities`, `gbuffers_block`, `gbuffers_entities_translucent` and
-//! `gbuffers_particles` (spec 2.3, 5.3, 5.4): the runs of `Frame::entities` the game marked (`EntitySpan`), each its
+//! `gbuffers_particles` and their material variants: the runs of `Frame::entities` the game marked (`EntitySpan`), each its
 //! own draw with its `entityId` or `blockEntityId` and `entityColor` in a per-draw slot of
 //! `HzDraw` (set 2). Horizon draws whatever the pack does not.
 
@@ -218,7 +218,7 @@ impl Casters {
     pub fn cast(&self, span: &EntitySpan, program: usize) -> bool {
         match program {
             ENTITY => self.entities && (!self.only_player || span.player),
-            BLOCK => self.blocks && (!self.only_lit || span.emissive),
+            BLOCK | BLOCK_TRANSLUCENT => self.blocks && (!self.only_lit || span.emissive),
             _ => false,
         }
     }
@@ -386,13 +386,15 @@ impl PackEntities {
         let first = spans.first().map_or(entities.len(), |s| s.start as usize);
         extend_without_portals(rest, &entities[..first.min(entities.len())]);
         let (mut other, mut portal_faces, mut beam_faces) = (Vec::new(), Vec::new(), Vec::new());
-        for (span, range) in runs(entities.len(), spans) {
-            let whole = &entities[range];
+        for (span, whole) in runs(entities.len(), spans)
+            .flat_map(|(span, range)| material_runs(span, &entities[range]))
+        {
             // A block entity's run can hold End portal faces and beams beside plain parts (an End
             // gateway: its cube and its beam): each goes to its own program.
             // Beacon beams come in a run of their own, at stage NONE (game.rs: no stage of 5.4
             // is theirs), for gbuffers_beaconbeam.
-            let split = (program_of(&span) == Some(BLOCK) || span.stage == render_stage("NONE"))
+            let split = (span.stage == render_stage("BLOCK_ENTITIES")
+                || span.stage == render_stage("NONE"))
                 && whole
                     .chunks(4)
                     .any(|q| matches!(q[0].layer & 0xffff, 6 | 9 | 10));
@@ -511,7 +513,7 @@ impl PackEntities {
         portal: bool,
     ) {
         let (entity_id, block_id) = match program {
-            BLOCK => (0, span.id),
+            BLOCK | BLOCK_TRANSLUCENT => (0, span.id),
             _ => (span.id, 0),
         };
         let mut bytes = [0u8; SLOT as usize];
@@ -658,7 +660,63 @@ pub const PARTICLE: usize = 3;
 pub const DESTROY: usize = 4;
 /// Beacon and End gateway beams (`gbuffers_beaconbeam`).
 pub const BEAM: usize = 5;
-pub const PROGRAMS: usize = 6;
+pub const BLOCK_TRANSLUCENT: usize = 6;
+pub const PARTICLE_TRANSLUCENT: usize = 7;
+pub const PROGRAMS: usize = 8;
+
+/// The ordinary entity/block shadow program also draws its translucent block materials.
+pub fn shadow_program(program: usize) -> Option<usize> {
+    match program {
+        ENTITY => Some(ENTITY),
+        BLOCK | BLOCK_TRANSLUCENT => Some(BLOCK),
+        _ => None,
+    }
+}
+
+/// Material identity comes from the render type, never a vertex's instantaneous alpha.
+fn translucent_material(program: Option<usize>, layer: u32) -> bool {
+    match program {
+        Some(BLOCK) => {
+            layer & super::entity_batch::OIT_ENTITY != 0
+                || matches!(
+                    layer & 0xffff,
+                    super::TRANSLUCENT_ITEM_OVERLAY | super::TRANSLUCENT_GLINT_ITEM_OVERLAY
+                )
+        }
+        Some(PARTICLE) => layer & 0xffff == super::TRANSLUCENT_PARTICLE_OVERLAY,
+        _ => false,
+    }
+}
+
+/// Consecutive quads of one material keep their source order and subject identity.
+fn material_runs(
+    span: EntitySpan,
+    vertices: &[Vertex],
+) -> impl Iterator<Item = (EntitySpan, &[Vertex])> {
+    let program = program_of(&span);
+    let split = !span.translucent && matches!(program, Some(BLOCK | PARTICLE));
+    let mut rest = vertices;
+    std::iter::from_fn(move || {
+        let first = rest.first()?;
+        let translucent = span.translucent || translucent_material(program, first.layer);
+        let end = if split {
+            rest.chunks(4)
+                .position(|q| translucent_material(program, q[0].layer) != translucent)
+                .map_or(rest.len(), |q| q * 4)
+        } else {
+            rest.len()
+        };
+        let (run, next) = rest.split_at(end);
+        rest = next;
+        Some((
+            EntitySpan {
+                translucent,
+                ..span
+            },
+            run,
+        ))
+    })
+}
 
 /// Which program draws `span`'s run, given which of them (or their fallbacks) the pack has;
 /// `None`: Horizon draws it.
@@ -676,9 +734,17 @@ pub fn program_of(span: &EntitySpan) -> Option<usize> {
             ENTITY
         }
     } else if span.stage == render_stage("BLOCK_ENTITIES") {
-        BLOCK
+        if span.translucent {
+            BLOCK_TRANSLUCENT
+        } else {
+            BLOCK
+        }
     } else if span.stage == render_stage("PARTICLES") {
-        PARTICLE
+        if span.translucent {
+            PARTICLE_TRANSLUCENT
+        } else {
+            PARTICLE
+        }
     } else if span.stage == render_stage("DESTROY") {
         DESTROY
     } else {
@@ -697,6 +763,10 @@ pub fn runs(
         (*s, start..end.clamp(start, len))
     })
 }
+
+#[cfg(test)]
+#[path = "pack_entities_material_tests.rs"]
+mod material_tests;
 
 #[cfg(test)]
 mod tests {
@@ -735,11 +805,11 @@ mod tests {
         assert_eq!(drawn_by_pack(&spans[0], all), Some(ENTITY));
         assert_eq!(drawn_by_pack(&spans[1], all), Some(PARTICLE));
         assert_eq!(
-            drawn_by_pack(&spans[1], [true, true, true, false, true, true]),
+            drawn_by_pack(&spans[1], [true, true, true, false, true, true, true, true]),
             None
         );
         assert_eq!(
-            drawn_by_pack(&spans[2], [true, false, true, true, true, true]),
+            drawn_by_pack(&spans[2], [true, false, true, true, true, true, true, true]),
             None
         );
         assert_eq!(drawn_by_pack(&spans[2], all), Some(BLOCK));
@@ -941,6 +1011,11 @@ fn skin_runs(skin: &super::entity_skin::SkinFrame) -> Vec<(EntitySpan, Range<u32
             }
             let Some(&span) = skin.spans.get(span_index) else {
                 break;
+            };
+            let span = EntitySpan {
+                translucent: span.translucent
+                    || translucent_material(program_of(&span), job.overlay),
+                ..span
             };
             let stop = end.min(skin.spans.get(span_index + 1).map_or(end, |s| s.start));
             if stop <= at {

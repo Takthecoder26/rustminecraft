@@ -2187,6 +2187,8 @@ impl PackPost {
             post.particles,
             post.damaged_block,
             post.beacon_beam,
+            post.block_translucent,
+            post.particles_translucent,
         ];
         let late = [
             false,
@@ -2195,6 +2197,8 @@ impl PackPost {
             post.particles_late,
             false,
             true,
+            post.translucent_late,
+            post.particles_translucent_late,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
         let shadow_programs = [post.shadow_entities, post.shadow_block];
@@ -2363,6 +2367,10 @@ impl PackPost {
             "block entities",
             "translucent entities",
             "particles",
+            "damaged blocks",
+            "beacon beams",
+            "translucent block entities",
+            "translucent particles",
         ];
         if let Some(l) = &lines {
             notes.push(format!("the block outline draws with {}", l.name));
@@ -3366,7 +3374,9 @@ impl PackPost {
                 continue;
             };
             let mut draws = (geometry.draws.iter())
-                .filter(|d| d.shadow && d.program == program)
+                .filter(|d| {
+                    d.shadow && super::pack_entities::shadow_program(d.program) == Some(program)
+                })
                 .peekable();
             if draws.peek().is_none() {
                 continue;
@@ -3378,7 +3388,11 @@ impl PackPost {
                 encoder,
                 pass,
                 size,
-                (geometry.draws.iter()).any(|d| d.shadow && d.program == program && d.portal),
+                (geometry.draws.iter()).any(|d| {
+                    d.shadow
+                        && super::pack_entities::shadow_program(d.program) == Some(program)
+                        && d.portal
+                }),
             );
             let mut on_portal = false;
             let mut rp = self.begin(encoder, pass);
@@ -3454,9 +3468,10 @@ impl PackPost {
     /// Every stage a posable subject can use must have a compiled fallback.
     /// Special models, player and eye/tagged layers retain their CPU paths.
     pub fn skins_entities(&self) -> bool {
-        self.entities
-            .as_ref()
-            .is_some_and(|e| e.passes[..3].iter().all(Option::is_some))
+        self.entities.as_ref().is_some_and(|e| {
+            e.passes[..3].iter().all(Option::is_some)
+                && e.passes[super::pack_entities::BLOCK_TRANSLUCENT].is_some()
+        })
     }
 
     pub fn skin_target(&self) -> Option<&wgpu::Buffer> {
@@ -4694,6 +4709,10 @@ mod snorm_tests;
 #[cfg(test)]
 #[path = "pack_post/depth_test.rs"]
 mod depth_test;
+
+#[cfg(test)]
+#[path = "pack_post/material_program_tests.rs"]
+mod material_program_tests;
 
 #[cfg(test)]
 mod tests {
