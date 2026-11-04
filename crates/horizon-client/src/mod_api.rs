@@ -22,6 +22,7 @@ pub use crate::game::{
     NativeFalling, NativeHeightmap, NativeHeldItem, NativeHit, NativeMapDecoration, NativeMapInfo,
     NativeMobRender, NativeModEvent, NativePlayerRender, NativeShake,
 };
+pub use crate::gamerules::Value as GameRuleValue;
 pub use crate::gfx::native_render::{
     BlockSpriteArrays, RenderHooks, RenderNeeds, RenderNeedsEvent, WorldDrawn, WorldDrawnEvent,
     wgpu,
