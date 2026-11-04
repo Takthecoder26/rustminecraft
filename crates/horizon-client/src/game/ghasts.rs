@@ -13,12 +13,15 @@ impl Game<'_> {
     /// Client `EntityGetter.getEntityCollisions` for the player: the
     /// entities that `canBeCollidedWith` it, solid happy ghasts, living
     /// shulkers (`Shulker.canBeCollidedWith`) and boats
-    /// (`AbstractBoat.canBeCollidedWith`), except the player's own vehicle.
+    /// (`AbstractBoat.canBeCollidedWith`), except the player's own vehicle,
+    /// and the boxes mods give the interaction entities they carry things on
+    /// (`native_entity_collisions`).
     pub(super) fn player_entity_collisions(&self) -> Vec<Aabb> {
         let Some(p) = &self.player else {
             return Vec::new();
         };
-        self.mobs
+        let mut boxes: Vec<Aabb> = self
+            .mobs
             .iter()
             .filter(|m| {
                 (m.species() == horizon_client::mobs::Species::HappyGhast
@@ -33,7 +36,56 @@ impl Game<'_> {
                     .filter(|b| Some(b.id) != self.riding)
                     .map(super::boats::Boat::bounds),
             )
-            .collect()
+            .collect();
+        self.mod_carrier_collisions(p.position, &mut boxes);
+        boxes
+    }
+    /// `native_entity_collisions` for each interaction entity within 64
+    /// blocks of `near`: this client's copies, or the server's own. Nothing is
+    /// asked with no native mod.
+    fn mod_carrier_collisions(&self, near: Vec3, out: &mut Vec<Aabb>) {
+        const REACH: f64 = 64.0;
+        if horizon_client::mod_api::mods().is_empty() {
+            return;
+        }
+        let close = |at: Vec3| {
+            (at.x - near.x).powi(2) + (at.y - near.y).powi(2) + (at.z - near.z).powi(2)
+                < REACH * REACH
+        };
+        let mut carriers: Vec<(u32, Vec3)> = self
+            .interactions
+            .iter()
+            .map(|(&id, e)| (id as u32, e.position))
+            .chain(
+                self.others
+                    .iter()
+                    .filter(|e| e.kind == "minecraft:interaction")
+                    .map(|e| (e.id, e.position)),
+            )
+            .filter(|&(_, at)| close(at))
+            .collect();
+        carriers.sort_unstable_by_key(|&(id, _)| id);
+        let mut boxes = Vec::new();
+        for (id, at) in carriers {
+            boxes.clear();
+            self.native_entity_collisions(
+                id,
+                "minecraft:interaction",
+                [at.x, at.y, at.z],
+                &mut boxes,
+            );
+            out.extend(
+                boxes
+                    .iter()
+                    .filter(|b| b.iter().all(|v| v.is_finite()))
+                    .map(|b| {
+                        Aabb::new(
+                            Vec3::new(at.x + b[0], at.y + b[1], at.z + b[2]),
+                            Vec3::new(at.x + b[3], at.y + b[4], at.z + b[5]),
+                        )
+                    }),
+            );
+        }
     }
     /// `EntityGetter.getEntityCollisions` for a dropped item: the entities whose
     /// `canBeCollidedWith(item)` is true. A boat and a minecart always, a living shulker,

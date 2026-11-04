@@ -2890,6 +2890,21 @@ one custom payload channel `horizon:mod_net`. A vanilla client never gets them, 
 - A player's message reaches the server's hook in the tick after it arrives, when the helpers can reach every player;
   a message to a player leaves at the end of the tick, from any server hook.
 
+### Carriers: what a mod moves through the world
+
+An invisible `minecraft:interaction` entity carries what a mod moves (a contraption, a train, a seat). The server summons
+it (`native_summon`), moves it each tick (`native_move_entity`), and keeps what it carries in a synced attachment
+(`Holder::Entity(id)`). Two hooks then make it visible and solid:
+
+- `native_entity_submit(id, kind, position, draw)` (client) draws it once a frame within 128 blocks, under a block
+  entity's frame posed at its position; `spin` parts turn as in a block entity.
+- `native_entity_collisions(id, kind, position, boxes)` (both sides) adds boxes, in blocks from its position, that
+  players collide with and stand on, as a boat's. It is asked on the server and on the player's client: answer alike on
+  both, from the synced attachment.
+
+Not yet: a moving carrier doesn't carry the players standing on it, players can't ride one, and there are no entity
+types of a mod's own with their own tick and saving beyond the snowball template.
+
 ### Scenes in screens
 
 `native_draw_scene(batch, rect, blocks, view)` (client, `crates/horizon-client/src/game/native_scene.rs`) draws a small
