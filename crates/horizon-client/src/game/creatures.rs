@@ -6889,6 +6889,10 @@ impl Game<'_> {
         let scale = self.view_scale();
         self.rendered_mobs.set(0);
         let skinning = self.skinning();
+        // `native_mob_submit` and `native_player_submit` cost a render state and a
+        // draw batch for every mob in view, even with nothing hooked: without a
+        // mod loaded nobody can hook them, so skip the offer entirely.
+        let mods_loaded = !horizon_client::mod_api::mods().is_empty();
         // What custom entity model animations read of the frame.
         horizon_client::mobs::cem_anim::set_frame(horizon_client::mobs::cem_anim::Frame {
             time: self.world.game_time as f64 + alpha,
@@ -6995,7 +6999,7 @@ impl Game<'_> {
                 .then(|| self.remote_player_name(mob.id))
                 .flatten()
                 .map(|name| NativePlayerRender { name, local: false });
-            let modded = if layers_only {
+            let modded = if layers_only || !mods_loaded {
                 false
             } else if let Some(who) = who {
                 self.mod_player_geometry(mob, who, alpha as f32, camera, packed, out)
