@@ -11,12 +11,14 @@ depend on world generation.
 """
 
 
-def cmd(command, record=True, expect_result=None):
+def cmd(command, record=True, expect_result=None, comparison=None):
     op = {'op': 'cmd', 'cmd': command}
     if not record:
         op['record'] = False
     if expect_result is not None:
         op['expect_result'] = expect_result
+    if comparison is not None:
+        op['comparison'] = comparison
     return op
 
 
@@ -53,6 +55,58 @@ def group_setup():
         # /random reset * to count. Every run starts the script without them.
         *setup('/random reset *'),
     ]
+
+
+def allay_pocket_inventory():
+    """The one-slot pocket stores full stacks independently of the held filter."""
+    stone = '{id:"minecraft:stone",count:2}'
+    diamond = '{id:"minecraft:diamond",count:1}'
+    named = '{id:"minecraft:stone",count:2,components:{"minecraft:custom_name":"Pocket"}}'
+    cases = [
+        ('bare', [stone], None, stone),
+        ('different', [stone], diamond, stone),
+        ('filter_only', [], diamond, None),
+        ('same', [stone], '{id:"minecraft:stone",count:1}', stone),
+        ('merge', [stone, '{id:"minecraft:stone",count:3}'], None,
+         '{id:"minecraft:stone",count:5}'),
+        ('occupied', [stone, diamond], None, stone),
+        ('empty', [], None, None),
+        ('components', [named], '{id:"minecraft:stone",count:1,components:{"minecraft:custom_name":"Filter"}}', named),
+        ('distinct', [named, stone], None, named),
+        ('component_merge', [named, named], None,
+         '{id:"minecraft:stone",count:4,components:{"minecraft:custom_name":"Pocket"}}'),
+        ('stack_limit', ['{id:"minecraft:stone",count:99}'], None,
+         '{id:"minecraft:stone",count:64}'),
+        ('tool_limit', ['{id:"minecraft:diamond_sword",count:99}'], None,
+         '{id:"minecraft:diamond_sword",count:1}'),
+        ('invalid_count', ['{id:"minecraft:stone",count:100}'], None,
+         '{id:"minecraft:stone",count:1}'),
+        ('override', ['{id:"minecraft:stone",count:12,components:{"minecraft:max_stack_size":10}}'], None,
+         '{id:"minecraft:stone",count:10,components:{"minecraft:max_stack_size":10}}'),
+    ]
+    ops = setup('/fill 0 199 0 15 199 15 stone')
+    for i, (name, pocket, hand, expected) in enumerate(cases):
+        uuid = f'[I;139,0,0,{i + 1}]'
+        fields = f'UUID:{uuid},Tags:["h139_{name}"],NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Health:14f,Inventory:[{",".join(pocket)}]'
+        if hand:
+            fields += f',equipment:{{mainhand:{hand}}}'
+        ops += setup(f'/summon allay 10.5 200 10.5 {{{fields}}}')
+    for tick in range(2):
+        if tick:
+            ops.append({'op': 'tick', 'n': 1})
+        for i, (name, pocket, hand, expected) in enumerate(cases):
+            target = f'@e[tag=h139_{name},limit=1]'
+            guard = f'@e[tag=h139_{name},nbt={{UUID:[I;139,0,0,{i + 1}],Health:14f,NoAI:1b}},limit=1]'
+            ops.append(cmd(f'/execute if entity {guard}', expect_result=1))
+            inv = f'[{expected}]' if expected else '[]'
+            # The full getter also detects extra slots: list predicates alone do not.
+            ops.append(cmd(f'/data get entity {target} Inventory'))
+            ops.append(cmd(f'/execute if entity @e[tag=h139_{name},nbt={{Inventory:{inv}}},limit=1]', expect_result=1))
+            if hand:
+                ops.append(cmd(f'/execute if entity @e[tag=h139_{name},nbt={{equipment:{{mainhand:{hand}}}}},limit=1]', expect_result=1))
+            else:
+                ops.append(cmd(f'/execute unless data entity {target} equipment.mainhand', expect_result=1))
+    return ops
 
 
 def client_commands():
@@ -1457,6 +1511,45 @@ def progression():
     ]
 
 
+def function_return_fixtures(group_names):
+    if 'function return feedback' not in group_names:
+        return {}
+    return {'parity:fail': 'return fail\n', 'parity:zero': 'return 0\n',
+            'parity:value': 'return 7\n', 'parity:empty': '# no commands\n',
+            'parity:add': 'scoreboard players add #count audit 1\n'}
+
+
+def function_return_feedback():
+    # No ticks between calls: distinguish failure from a successful zero,
+    # and both explicit returns from functions that leave callbacks untouched.
+    lines = [cmd('/datapack list enabled'),
+             cmd('/scoreboard objectives add audit dummy', expect_result=1),
+             cmd('/scoreboard players set #count audit 0', expect_result=0),
+             cmd('/execute store result score #clock audit run time query gametime', False)]
+    count = 0
+    for name, result, success in [('fail', 0, 0), ('zero', 0, 1),
+                                  ('value', 7, 1), ('empty', 31, 17),
+                                  ('add', 31, 17)]:
+        lines.append(cmd(f'/function parity:{name}'))
+        count += name == 'add'
+        lines.extend([
+            cmd(f'/execute if score #count audit matches {count}', expect_result=1),
+            cmd('/scoreboard players set #r audit 31', expect_result=31),
+            cmd('/scoreboard players set #s audit 17', expect_result=17),
+            cmd(f'/execute store result score #r audit store success score #s audit run function parity:{name}'),
+            cmd('/scoreboard players get #r audit', expect_result=result),
+            cmd('/scoreboard players get #s audit', expect_result=success),
+            cmd(f'/execute if score #r audit matches {result}', expect_result=1),
+            cmd(f'/execute if score #s audit matches {success}', expect_result=1),
+        ])
+        count += name == 'add'
+        lines.append(cmd(f'/execute if score #count audit matches {count}', expect_result=1))
+    lines.extend([cmd('/execute store result score #after audit run time query gametime', False),
+                  cmd('/execute if score #clock audit = #after audit', expect_result=1),
+                  cmd('/scoreboard objectives remove audit')])
+    return lines
+
+
 def functions_and_packs():
     return [
         cmd('/function minecraft:nonexistent'),
@@ -1734,6 +1827,62 @@ def test_command():
         cmd('/execute positioned 1 2 3 run kill @e[tag=nothing]'),
         *setup('/kill @e[tag=tp]'),
     ]
+
+
+def end_clock_commands():
+    """No observation ticks: independent built-in clocks and command callbacks."""
+    ops = [*setup('/tick freeze', '/gamerule advance_time false',
+                  '/scoreboard objectives add audit_time dummy',
+                  '/execute store result score before audit_time run time query gametime')]
+    for dimension in ('overworld', 'the_nether', 'the_end'):
+        ops += [cmd(f'/execute in minecraft:{dimension} if dimension minecraft:{dimension}', expect_result=1)]
+    ops += [cmd('/time of minecraft:the_end set 333', expect_result=333),
+            cmd('/time of minecraft:overworld set 30000', expect_result=30000),
+            cmd('/time of minecraft:the_end query time', expect_result=333),
+            cmd('/time of minecraft:overworld query time', expect_result=30000),
+            cmd('/execute in minecraft:the_end run time query time', expect_result=333),
+            cmd('/execute in minecraft:the_nether run time query time'),
+            cmd('/execute in minecraft:the_nether run time of minecraft:overworld query time', expect_result=30000)]
+    commands = [
+        '/time of minecraft:overworld query time', '/time of minecraft:the_end query time',
+        '/time of minecraft:the_end set 900', '/time of minecraft:the_end set 900',
+        '/time of minecraft:the_end add -1000', '/time of minecraft:the_end set day',
+        '/time of minecraft:the_end pause', '/time of minecraft:the_end pause',
+        '/time of minecraft:the_end resume', '/time of minecraft:the_end resume',
+        '/time of minecraft:the_end rate 2', '/time of minecraft:the_end rate 2',
+        '/time of minecraft:the_end rate 1', '/execute in minecraft:the_nether run time query time',
+        '/execute in minecraft:the_end run time query time',
+        '/execute in minecraft:the_nether run time of minecraft:overworld query time',
+        '/time query time', '/time of minecraft:the_end set 777']
+    expected = [(30000, 1, 333), (333, 1, 333), (900, 1, 900), (0, 0, 900),
+                (0, 1, 0), (0, 0, 0), (1, 1, 0), (0, 0, 0), (1, 1, 0),
+                (0, 0, 0), (1, 1, 0), (0, 0, 0), (1, 1, 0), (0, 0, 0),
+                (0, 1, 0), (30000, 1, 0), (30000, 1, 0), (777, 1, 777)]
+    for command, (result, success, end_time) in zip(commands, expected):
+        ops += [*setup('/scoreboard players set result audit_time -99',
+                       '/scoreboard players set success audit_time -99'),
+                cmd('/execute store result score result audit_time store success score success audit_time run '+command.lstrip('/')),
+                cmd('/scoreboard players get result audit_time', expect_result=result),
+                cmd('/scoreboard players get success audit_time', expect_result=success),
+                cmd('/time of minecraft:overworld query time', expect_result=30000),
+                cmd('/time of minecraft:the_end query time', expect_result=end_time)]
+        if command == '/time of minecraft:the_end pause' and success:
+            ops += [cmd('/time of minecraft:overworld pause', expect_result=1),
+                    cmd('/time of minecraft:overworld resume', expect_result=1)]
+        if command == '/time of minecraft:the_end rate 2' and success:
+            ops += [cmd('/time of minecraft:overworld rate 2', expect_result=1),
+                    cmd('/time of minecraft:overworld rate 1', expect_result=1)]
+    ops += [cmd('/time of minecraft:the_end query minecraft:day'),
+            cmd('/time of minecraft:the_moon query time'),
+            # End pause/rate operations must leave the Overworld state alone.
+            cmd('/time pause'), cmd('/time pause'), cmd('/time resume'),
+            cmd('/time rate 2'), cmd('/time rate 2'), cmd('/time rate 1'),
+            cmd('/time set day'), cmd('/time query minecraft:day'),
+            *setup('/execute store result score elapsed audit_time run time query gametime',
+                   '/scoreboard players operation elapsed audit_time -= before audit_time'),
+            cmd('/scoreboard players get elapsed audit_time', expect_result=0),
+            *setup('/scoreboard objectives remove audit_time', '/tick unfreeze')]
+    return ops
 
 
 def server_clock():
@@ -2962,6 +3111,1151 @@ def axolotl_hunting_memory():
                        '/forceload remove 0 0')
 
 
+def mannequin_pose_anchors():
+    """Saved mannequin pose -> existing live dimensions -> exact eye anchor."""
+    ops = setup('/tp @s 40.5 230 8.5', '/forceload add 32 0 63 31')
+    ops += [{'op': 'settle'}]
+    ops += [cmd(f'/execute if loaded {x} 200 {z}', expect_result=1)
+            for x, z in ((32, 0), (48, 0), (32, 16), (48, 16))]
+    ops += setup('/tick freeze', '/fill 32 200 0 47 204 15 air')
+    # Raw pose getter normalization is separate; this gate pins live anchors.
+    # Java 26.3 scale-1 eye positions, independent of Horizon's pose math.
+    cases = ((None, '201.62000000476837'), ('standing', '201.62000000476837'),
+             ('crouching', '201.2699999809265'), ('swimming', '200.40000000596046'),
+             ('fall_flying', '200.40000000596046'), ('sleeping', '200.20000000298023'),
+             ('spin_attack', '201.62000000476837'), ('dying', '201.62000000476837'),
+             ('unknown', '201.62000000476837'), ('CROUCHING', '201.62000000476837'))
+    for index, (pose, eye_y) in enumerate(cases):
+        tag = f'mannequin_pose_{index}'
+        target = f'@e[tag={tag},limit=1]'
+        uuid = f'0,0,217,{index + 1}'
+        pose_nbt = f',pose:"{pose}"' if pose is not None else ''
+        ops += setup(f'/summon mannequin 36.5 200 4.5 {{UUID:[I;{uuid}],Tags:["mannequin_pose_actor","{tag}"],NoAI:1b,NoGravity:1b,immovable:1b{pose_nbt}}}')
+        for tick in (0, 1):
+            if tick:
+                ops += setup('/tick step 1')
+                ops += [{'op': 'tick', 'n': 1}]
+            ops += setup('/kill @e[tag=mannequin_pose_eye]')
+            eye_tag = f'mannequin_eye_{index}_{tick}'
+            eye = f'@e[tag={eye_tag},limit=1]'
+            ops += [cmd(f'/execute if entity {target}', expect_result=1),
+                    cmd(f'/execute if entity @e[tag={tag},nbt={{UUID:[I;{uuid}]}}]', expect_result=1),
+                    cmd(f'/data get entity {target} Pos'),
+                    cmd(f'/execute if entity @e[tag={tag},nbt={{Pos:[36.5d,200d,4.5d]}}]', expect_result=1),
+                    cmd(f'/execute as {target} at @s anchored eyes positioned ^ ^ ^ run summon marker ~ ~ ~ {{Tags:["mannequin_pose_eye","{eye_tag}"]}}', expect_result=1),
+                    cmd(f'/execute if entity {eye}', expect_result=1),
+                    cmd(f'/data get entity {eye} Pos'),
+                    cmd(f'/execute if entity @e[tag={eye_tag},nbt={{Pos:[36.5d,{eye_y}d,4.5d]}}]', expect_result=1)]
+        ops += setup('/kill @e[tag=mannequin_pose_eye]', '/kill @e[tag=mannequin_pose_actor]', '/tick step 25')
+        ops += [{'op': 'tick', 'n': 25}]
+    return ops + setup('/tick unfreeze', '/tp @s 8.5 230 8.5')
+
+
+def primed_tnt_block_state():
+    """PrimedTnt decodes block_state and saves its canonical live state."""
+    cases = [None, '"minecraft:tnt"', '"minecraft:tnt[unstable=true]"',
+             '"minecraft:stone"', '{id:"minecraft:tnt",properties:{unstable:"true"}}',
+             '{id:"minecraft:oak_log",properties:{axis:"x"}}', '"audit_missing:block"']
+    expected = ['"minecraft:tnt"', '"minecraft:tnt"', '"minecraft:tnt"',
+                '"minecraft:stone"', cases[4], cases[5], '"minecraft:tnt"']
+    ops = setup('/forceload add 0 16 15 31')
+    ops.append(cmd('/execute if loaded 0 206 28', expect_result=1))
+    for i, state in enumerate(cases):
+        fields = f'UUID:[I;221,0,0,{i + 1}],Tags:["h221_{i}"],NoGravity:1b,fuse:400s'
+        if state is not None:
+            fields += f',block_state:{state}'
+        ops += setup(f'/summon tnt {i + 1}.5 206 28.5 {{{fields}}}')
+        target = f'@e[tag=h221_{i},limit=1]'
+        ops.append(cmd(f'/execute if entity @e[tag=h221_{i},nbt={{UUID:[I;221,0,0,{i + 1}],fuse:400s}},limit=1]', expect_result=1))
+        ops.append(cmd(f'/data get entity {target} block_state'))
+        ops.append(cmd(f'/execute if entity @e[tag=h221_{i},nbt={{block_state:{expected[i]}}},limit=1]', expect_result=1))
+    return ops
+
+
+def hurting_projectile_float_inertia():
+    """Float inertia widens before double motion multiplication; no impacts."""
+    ops = setup('/forceload add 16 0 47 31', '/fill 16 199 0 47 199 31 stone',
+                '/fill 16 200 0 47 213 31 air',
+                '/fill 25 203 20 38 211 28 glass hollow',
+                '/fill 26 204 21 37 210 27 water')
+    # Finish terrain work before introducing the measured projectiles.
+    ops.append({'op': 'settle'})
+    ops.append(cmd('/execute if loaded 30 207 24', expect_result=1))
+    ops.append(cmd('/execute if block 30 207 24 water', expect_result=1))
+    cases = [('dry', 4.5, '.1'), ('custom', 14.5, '.2'), ('water', 24.5, '.1')]
+    for i, (name, z, acceleration) in enumerate(cases):
+        ops += setup(f'/summon fireball 30.5 207 {z} {{UUID:[I;222,0,0,{i + 1}],Tags:["h222_{name}"],ExplosionPower:1b,Motion:[.1d,0d,0d],acceleration_power:{acceleration}d}}')
+        ops.append(cmd(f'/data get entity @e[tag=h222_{name},limit=1] acceleration_power'))
+    dry = [(30.689999997615814, .1899999976158142),
+           (30.96549999189377, .27549999427795413),
+           (31.322224981981517, .35672499008774766)]
+    for tick in range(3):
+        ops.append({'op': 'tick', 'n': 1})
+        for i, (name, z, acceleration) in enumerate(cases):
+            target = f'@e[tag=h222_{name},limit=1]'
+            ops.append(cmd(f'/execute as 000000de-0000-0000-0000-{i + 1:012x} if entity @s[tag=h222_{name}]', expect_result=1))
+            ops.append(cmd(f'/data get entity {target} Pos'))
+            ops.append(cmd(f'/data get entity {target} Motion'))
+        x, vx = dry[tick]
+        ops.append(cmd(f'/execute if entity @e[tag=h222_dry,nbt={{Pos:[{x}d,207d,4.5d],Motion:[{vx}d,0d,0d]}},limit=1]', expect_result=1))
+        ops.append(cmd('/execute if block 31 207 24 water', expect_result=1))
+    return ops
+
+
+def allay_invalid_brain_retention():
+    """Live failed Brain loads retain LIKED_PLAYER; valid empty memories clear it."""
+    ops = setup('/setblock 6 199 6 stone', '/scoreboard objectives add h226 dummy',
+                '/execute store result score before h226 run time query gametime')
+    ops.append(cmd('/execute if loaded 6 200 6', expect_result=1))
+    edits = [
+        ('remove', 'Brain', True),
+        ('modify', 'Brain set value 0', True),
+        ('modify', 'Brain set value "bad"', True),
+        ('modify', 'Brain set value {}', True),
+        ('remove', 'Brain.memories', True),
+        ('modify', 'Brain.memories set value 0', True),
+        ('remove', 'Brain.memories."minecraft:liked_player"', False),
+        ('modify', 'Brain set value {memories:{}}', False),
+        ('modify', 'Brain.memories set value {}', False),
+    ]
+    memory = '{memories:{"minecraft:liked_player":{value:[I;1,2,3,4]}}}'
+    for i, (mode, edit, retain) in enumerate(edits):
+        target = f'000000e2-0000-0000-0000-{i + 1:012x}'
+        tag = f'h226_{i}'
+        ops += setup(f'/summon allay 6.5 200.5 6.5 {{UUID:[I;226,0,0,{i + 1}],Tags:["{tag}"],NoAI:1b,NoGravity:1b}}')
+        ops.append(cmd(f'/data modify entity {target} Brain set value {memory}', expect_result=1))
+        guard = f'/execute as {target} if entity @s[tag={tag},nbt={{Pos:[6.5d,200.5d,6.5d],Health:20f,NoAI:1b,NoGravity:1b}}]'
+        ops.append(cmd(guard, expect_result=1))
+        ops.append(cmd(f'/execute as {target} if entity @s[nbt={{Brain:{memory}}}]', expect_result=1))
+        ops.append(cmd(f'/data {mode} entity {target} {edit}', expect_result=1))
+        ops.append(cmd(guard, expect_result=1))
+        # A valid empty map is success with result 0; a missing key is failure 0.
+        for path, result, success in [
+            ('Brain.memories', int(retain), 1),
+            ('Brain.memories."minecraft:liked_player"', int(retain), int(retain)),
+        ]:
+            ops.append(cmd(f'/execute store result score result h226 store success score success h226 run data get entity {target} {path}'))
+            ops.append(cmd('/scoreboard players get result h226', expect_result=result))
+            ops.append(cmd('/scoreboard players get success h226', expect_result=success))
+    ops += setup('/execute store result score after h226 run time query gametime')
+    ops.append(cmd('/execute if score after h226 = before h226', expect_result=1))
+    return ops
+
+
+def large_fireball_fire():
+    """LargeFireball.onHit fire eligibility, not random fire count/positions."""
+    ops = setup('/gamerule random_tick_speed 0', '/gamerule fire_spread_radius_around_player 0',
+                '/gamemode spectator', '/tp @s 40.5 230 16.5', '/forceload add 0 0 95 31',
+                '/scoreboard objectives add fire_probe dummy')
+    # Two bounded entity-ticking settle windows cover all six chunk columns;
+    # no fixed startup sleeps. Return to the middle and verify all twelve.
+    ops += setup('/tp @s 24.5 230 16.5')
+    ops += [{'op': 'settle'}]
+    ops += setup('/tp @s 72.5 230 16.5')
+    ops += [{'op': 'settle'}]
+    ops += setup('/tp @s 40.5 230 16.5')
+    ops += [{'op': 'settle'}]
+    ops += [cmd(f'/execute if loaded {x} 200 {z}', expect_result=1)
+            for x in range(0, 96, 16) for z in (0, 16)]
+    ops += setup('/tick freeze', '/fill 0 196 0 95 199 31 stone',
+                 '/fill 0 200 0 95 208 31 air')
+    for index, (label, x, griefing, tnt) in enumerate((('enabled', 40, True, False),
+                                                     ('disabled', 60, False, False),
+                                                     ('tnt', 80, True, True))):
+        tag = f'fireball_fire_{label}'
+        uuid = f'0,0,223,{index + 1}'
+        kind = 'tnt' if tnt else 'fireball'
+        y = '200' if tnt else '201.5'
+        data = 'fuse:1s' if tnt else 'ExplosionPower:3,Motion:[0d,-0.5d,0d],acceleration_power:0.1d'
+        target = f'@e[tag={tag},limit=1]'
+        ops += setup(f'/gamerule mob_griefing {str(griefing).lower()}',
+                     f'/summon {kind} {x + 0.5} {y} 16.5 {{UUID:[I;{uuid}],Tags:["fireball_fire_actor","{tag}"],{data}}}')
+        # Projectile UUID serialization is a separate view defect. Resolve
+        # the actual fixed UUID and require its unique tag, without that getter.
+        identity = (f'/execute if entity @e[tag={tag},nbt={{UUID:[I;{uuid}]}}]' if tnt else
+                    f'/execute as 00000000-0000-0000-0000-00df{index + 1:08x} if entity @s[tag={tag}]')
+        ops += [cmd(f'/execute if entity {target}', expect_result=1),
+                cmd(identity, expect_result=1),
+                cmd(f'/data get entity {target} Pos', expect_result=3),
+                cmd(f'/execute if block {x} 199 16 stone', expect_result=1)]
+        ticks = 10 if tnt else 40
+        ops += setup(f'/tick step {ticks}')
+        ops += [{'op': 'tick', 'n': ticks}]
+        ops += [cmd(f'/execute unless entity {target}', expect_result=1),
+                cmd(f'/execute if loaded {x - 8} 200 8', expect_result=1),
+                cmd(f'/execute if loaded {x + 8} 200 24', expect_result=1)]
+        sign = 'unless' if griefing or tnt else 'if'
+        ops += [cmd(f'/execute {sign} block {x} 199 16 stone', expect_result=1)]
+        ops += setup('/scoreboard players set #fire fire_probe 0')
+        # Preserve unmodified counts in both raw records and the report, but
+        # compare only presence: explosion random streams/geometry are separate.
+        ops += [cmd(f'/execute store result score #fire fire_probe run fill {x - 8} 197 8 {x + 8} 206 24 air replace fire',
+                    comparison='positive_result'),
+                cmd(f'/execute if score #fire fire_probe matches {"1.." if griefing and not tnt else "0"}', expect_result=1)]
+    return ops + setup('/kill @e[tag=fireball_fire_actor]', '/scoreboard objectives remove fire_probe',
+                       '/gamerule mob_griefing true', '/gamerule fire_spread_radius_around_player 128',
+                       '/gamerule random_tick_speed 3', '/tick unfreeze',
+                       '/gamemode creative', '/tp @s 8.5 230 8.5')
+
+
+def mob_partial_block_suffocation():
+    """Real base ticks: suffocation predicates plus the actual shape at the eye."""
+    ops = setup('/gamerule random_tick_speed 0', '/gamerule mob_griefing false',
+                '/fill 8 198 8 12 199 12 stone')
+    ops.append(cmd('/execute if loaded 10 201 10', expect_result=1))
+    blocks = ['stone', 'glass', 'red_stained_glass', 'oak_leaves[persistent=true]',
+              'copper_grate', 'farmland', 'mud']
+    for i, block in enumerate(blocks):
+        target = f'000000e1-0000-0000-0000-{i + 1:012x}'
+        tag = f'h225_{i}'
+        ops += setup('/fill 8 200 8 12 205 12 air', f'/setblock 10 201 10 {block}',
+                     f'/summon cow 10.5 200 10.5 {{UUID:[I;225,0,0,{i + 1}],Tags:["{tag}"],NoAI:1b,Silent:1b,PersistenceRequired:1b}}')
+        guard = f'/execute as {target} if entity @s[tag={tag},nbt={{Pos:[10.5d,200d,10.5d],NoAI:1b,Silent:1b,PersistenceRequired:1b}}]'
+        ops.append(cmd(guard, expect_result=1))
+        ops.append(cmd(f'/data get entity {target} Health', expect_result=10))
+        for ticks, n in [(1, 1), (21, 20)]:
+            ops.append({'op': 'tick', 'n': n})
+            ops.append(cmd(guard, expect_result=1))
+            ops.append(cmd(f'/data get entity {target} Pos'))
+            eye = f'h225_eye_{i}_{ticks}'
+            ops += setup(f'/execute as {target} at @s anchored eyes run summon marker ^ ^ ^ {{Tags:["{eye}"]}}')
+            ops.append(cmd(f'/execute if entity @e[tag={eye},nbt={{Pos:[10.5d,201.29999995231628d,10.5d]}},limit=1]', expect_result=1))
+            ops.append(cmd(f'/data get entity @e[tag={eye},limit=1] Pos'))
+            ops.append(cmd(f'/execute at @e[tag={eye},limit=1] if block ~ ~ ~ {block}', expect_result=1))
+            hurts = block in ('stone', 'farmland', 'mud')
+            health = (9 if ticks == 1 else 7) if hurts else 10
+            ops.append(cmd(f'/data get entity {target} Health', expect_result=health))
+            ops += setup(f'/kill @e[tag={eye}]')
+        ops += setup(f'/kill {target}')
+        ops.append({'op': 'tick', 'n': 25})
+    return ops
+
+
+
+def mob_baby_attribute_reads():
+    """Effective/transient command reads, with raw-base and permanent controls."""
+    ops = setup('/fill 0 199 0 6 199 6 stone', '/scoreboard objectives add h227 dummy',
+                '/execute store result score before h227 run time query gametime')
+    ops.append(cmd('/execute if loaded 2 200 2', expect_result=1))
+    next_id = 0
+    def spawn(kind, baby):
+        nonlocal next_id
+        next_id += 1
+        target = f'000000e3-0000-0000-0000-{next_id:012x}'
+        tag = f'h227_{next_id}'
+        ops.extend(setup(f'/summon {kind} 2.5 200 2.5 {{UUID:[I;227,0,0,{next_id}],Tags:["{tag}"],NoAI:1b,IsBaby:{int(baby)}b}}'))
+        return target, tag
+    def reads(subject, baby, effective=None, modifier=None):
+        target, tag = subject
+        ops.append(cmd(f'/execute as {target} if entity @s[tag={tag},nbt={{Pos:[2.5d,200d,2.5d],Health:20f,NoAI:1b,IsBaby:{int(baby)}b}}]', expect_result=1))
+        ops.append(cmd(f'/attribute {target} movement_speed base get 1000000', expect_result=230000))
+        ops.append(cmd(f'/attribute {target} movement_speed get 1000000', expect_result=effective if effective is not None else (345000 if baby else 230000)))
+        ops.append(cmd(f'/attribute {target} movement_speed modifier value get minecraft:baby 1000000', expect_result=modifier if modifier is not None else (500000 if baby else None)))
+    for kind in ['zombie', 'husk', 'drowned', 'zombie_villager', 'zombified_piglin']:
+        adult = spawn(kind, False)
+        reads(adult, False)
+        baby = spawn(kind, True)
+        reads(baby, True)
+        for state in (True, False):
+            ops.append(cmd(f'/data merge entity {adult[0]} {{IsBaby:{int(state)}b}}', expect_result=1))
+            reads(adult, state)
+    # A distinct permanent modifier remains visible beside the transient one.
+    for baby in (False, True):
+        subject = spawn('zombie', baby)
+        target = subject[0]
+        ops.append(cmd(f'/attribute {target} movement_speed modifier add h227:permanent 0.125 add_value', expect_result=1))
+        reads(subject, baby, 532500 if baby else 355000)
+        ops.append(cmd(f'/attribute {target} movement_speed modifier value get h227:permanent 1000000', expect_result=125000))
+        ops.append(cmd(f'/attribute {target} movement_speed modifier remove h227:permanent', expect_result=1))
+        reads(subject, baby)
+    # The same identifier is a valid permanent modifier on an adult.
+    subject = spawn('zombie', False)
+    target = subject[0]
+    ops.append(cmd(f'/attribute {target} movement_speed modifier add minecraft:baby 0.125 add_value', expect_result=1))
+    reads(subject, False, 355000, 125000)
+    ops.append(cmd(f'/attribute {target} movement_speed modifier remove minecraft:baby', expect_result=1))
+    reads(subject, False)
+    ops.extend(setup('/execute store result score after h227 run time query gametime'))
+    ops.append(cmd('/execute if score after h227 = before h227', expect_result=1))
+    return ops
+
+
+
+def cube_saved_age():
+    """Age is absent for live cubes, including supplied raw values (#8985)."""
+    ops = setup('/fill 0 199 0 15 199 15 stone')
+    ops.append(cmd('/execute if loaded 10 200 10', expect_result=1))
+    subjects = []
+    for row, kind in enumerate(('slime', 'magma_cube')):
+        for col, age in enumerate((None, 0, -24000, 37)):
+            n = row * 4 + col + 1
+            target = f'000000e4-0000-0000-0000-{n:012x}'
+            x, z = 2.5 + col * 4, 2.5 + row * 8
+            extra = '' if age is None else f',Age:{age}'
+            ops += setup(f'/summon minecraft:{kind} {x} 200 {z} '
+                         f'{{UUID:[I;228,0,0,{n}],Tags:["h228_{n}"],NoAI:1b,Silent:1b,PersistenceRequired:1b,Size:3{extra}}}')
+            subjects.append((target, n, x, z))
+    pig = '000000e4-0000-0000-0000-000000000009'
+    ops += setup(f'/summon pig 6.5 200 6.5 {{UUID:[I;228,0,0,9],Tags:["h228_pig"],NoAI:1b,Age:37}}')
+    for tick in (0, 1):
+        if tick:
+            ops.append({'op': 'tick', 'n': 1})
+        for target, n, x, z in subjects:
+            ops.append(cmd(f'/execute as {target} if entity @s[tag=h228_{n},nbt={{Pos:[{x}d,200d,{z}d],Health:16f,NoAI:1b,Silent:1b,PersistenceRequired:1b,Size:3}}]', expect_result=1))
+            ops.append(cmd(f'/data get entity {target} Age'))
+        ops.append(cmd(f'/execute as {pig} if entity @s[tag=h228_pig,nbt={{Health:10f,NoAI:1b}}]', expect_result=1))
+        ops.append(cmd(f'/data get entity {pig} Age', expect_result=37 - tick))
+    return ops
+
+
+
+def villager_wake_rotation():
+    """Use the occupied bed through the live player route, then observe pose."""
+    ops = setup('/fill 0 199 3 6 199 9 stone', '/gamemode survival', '/tp @s 4.5 200 4.5', '/time set noon')
+    ops.append({'op': 'settle'})
+    target = None
+    for n, pitch in enumerate((0, 23)):
+        if n:
+            ops += setup(f'/kill {target}')
+            ops.append({'op': 'tick', 'n': 2})
+        target = f'000000e7-0000-0000-0000-{n + 1:012x}'
+        ops += setup('/setblock 2 200 7 red_bed[facing=north,part=foot,occupied=true] strict',
+                     '/setblock 2 200 6 red_bed[facing=north,part=head,occupied=true] strict')
+        ops.append({'op': 'settle'})
+        ops += setup(f'/summon villager 2.5 200.6875 6.5 {{UUID:[I;231,0,0,{n + 1}],Tags:["h231"],NoAI:1b,Health:20f,sleeping_pos:[I;2,200,6],Rotation:[0f,{pitch}f]}}')
+        ops.append(cmd(f'/execute as {target} if entity @s[tag=h231,nbt={{Health:20f,NoAI:1b,Pos:[2.5d,200.6875d,6.5d]}}]', expect_result=1))
+        ops.append(cmd('/execute if entity @s[gamemode=survival,nbt={Pos:[4.5d,200d,4.5d]}]', expect_result=1))
+        for z in (6, 7):
+            ops.append(cmd(f'/execute if block 2 200 {z} red_bed[occupied=true]', expect_result=1))
+        ops.append(cmd(f'/data get entity {target} Rotation'))
+        ops.append({'op': 'use_block', 'pos': [2, 200, 6], 'face': 1})
+        ops.append({'op': 'tick', 'n': 1})
+        ops.append(cmd(f'/execute as {target} if entity @s[tag=h231,nbt={{Health:20f,NoAI:1b,Pos:[3.5d,200d,6.5d]}}]', expect_result=1))
+        ops.append(cmd(f'/data get entity {target} Rotation'))
+        for z in (6, 7):
+            ops.append(cmd(f'/execute if block 2 200 {z} red_bed[occupied=false]', expect_result=1))
+        ops.append(cmd('/execute unless data entity @s sleeping_pos', expect_result=1))
+    ops += setup('/kill @e[tag=h231]', '/setblock 2 200 6 air strict',
+                 '/setblock 2 200 7 air strict', '/gamemode creative',
+                 '/tp @s 8.5 230 8.5', '/time set 1000')
+    ops.append({'op': 'settle'})
+    return ops
+
+
+
+def awake_villager_saved_position():
+    """A real bed-use wake clears stale saved sleeping_pos, with live guards."""
+    ops = setup('/fill 0 199 3 6 199 9 stone', '/gamemode survival',
+                '/tp @s 4.5 200 4.5', '/time set noon',
+                '/setblock 2 200 7 red_bed[facing=north,part=foot,occupied=true] strict',
+                '/setblock 2 200 6 red_bed[facing=north,part=head,occupied=true] strict')
+    ops.append({'op': 'settle'})
+    target = '000000e8-0000-0000-0000-000000000001'
+    ops += setup('/summon villager 2.5 200.6875 6.5 {UUID:[I;232,0,0,1],Tags:["h232"],NoAI:1b,Health:20f,sleeping_pos:[I;2,200,6]}')
+    ops.append(cmd(f'/execute as {target} if entity @s[tag=h232,nbt={{Health:20f,NoAI:1b,Pos:[2.5d,200.6875d,6.5d]}}]', expect_result=1))
+    ops.append(cmd('/execute if entity @s[gamemode=survival,nbt={Pos:[4.5d,200d,4.5d]}]', expect_result=1))
+    for z in (6, 7):
+        ops.append(cmd(f'/execute if block 2 200 {z} red_bed[occupied=true]', expect_result=1))
+    ops.append(cmd(f'/data get entity {target} sleeping_pos', expect_result=3))
+    ops += [{'op': 'use_block', 'pos': [2, 200, 6], 'face': 1}, {'op': 'tick', 'n': 1}]
+    ops.append(cmd(f'/execute as {target} if entity @s[tag=h232,nbt={{Health:20f,NoAI:1b,Pos:[3.5d,200d,6.5d]}}]', expect_result=1))
+    for z in (6, 7):
+        ops.append(cmd(f'/execute if block 2 200 {z} red_bed[occupied=false]', expect_result=1))
+    ops.append(cmd('/execute unless data entity @s sleeping_pos', expect_result=1))
+    ops.append(cmd(f'/data get entity {target} sleeping_pos'))
+    ops.append(cmd(f'/execute unless data entity {target} sleeping_pos', expect_result=1))
+    # A live villager without supplied sleep data is already saved awake.
+    awake = '000000e8-0000-0000-0000-000000000002'
+    ops += setup('/summon villager 5.5 200 7.5 {UUID:[I;232,0,0,2],Tags:["h232"],NoAI:1b,Health:20f}')
+    ops.append(cmd(f'/execute as {awake} if entity @s[tag=h232,nbt={{Health:20f,NoAI:1b,Pos:[5.5d,200d,7.5d]}}]', expect_result=1))
+    ops.append(cmd(f'/data get entity {awake} sleeping_pos'))
+    ops.append(cmd(f'/execute unless data entity {awake} sleeping_pos', expect_result=1))
+    ops += setup('/kill @e[tag=h232]', '/setblock 2 200 6 air strict',
+                 '/setblock 2 200 7 air strict', '/gamemode creative',
+                 '/tp @s 8.5 230 8.5', '/time set 1000')
+    ops.append({'op': 'settle'})
+    return ops
+
+
+
+def projectile_saved_uuid():
+    """Direct identity guards are separate from repeated saved UUID views."""
+    from uuid import UUID
+    ops = setup('/scoreboard objectives add h240 dummy',
+                '/execute store result score before h240 run time query gametime')
+    ops.append(cmd('/execute if loaded 2 200 2', expect_result=1))
+    kinds = ['arrow', 'spectral_arrow', 'fireball', 'small_fireball',
+             'wind_charge', 'breeze_wind_charge', 'snowball', 'egg',
+             'ender_pearl', 'splash_potion', 'lingering_potion',
+             'experience_bottle',
+             'minecart', 'evoker_fangs', 'marker']
+    for n, kind in enumerate(kinds, 1):
+        target = str(UUID(int=(240 << 96) | (0xffffffff << 64) | (n << 32) | 0x80000000))
+        array = f'[I;240,-1,{n},-2147483648]'
+        tag = f'h240_{n}'
+        x, z = 2.5 + (n % 4) * 3, 2.5 + (n // 4) * 3
+        ops += setup(f'/summon minecraft:{kind} {x} 200 {z} {{UUID:{array},Tags:["{tag}"],NoGravity:1b,HasBeenShot:1b}}')
+        guard = f'/execute as {target} if entity @s[tag={tag}]'
+        ops.append(cmd(guard, expect_result=1))
+        for _ in range(2):
+            if kind == 'spectral_arrow':
+                # Its separate display-name gap must not mask the UUID value.
+                ops += setup('/data remove storage h240:reads current',
+                             f'/data modify storage h240:reads current set from entity {target} UUID')
+                ops.append(cmd('/data get storage h240:reads current', expect_result=4))
+            else:
+                ops.append(cmd(f'/data get entity {target} UUID', expect_result=4))
+            ops.append(cmd(f'/execute as {target} if entity @s[nbt={{UUID:{array}}}]', expect_result=1))
+        ops.append(cmd(guard, expect_result=1))
+    ops += setup('/execute store result score after h240 run time query gametime')
+    ops.append(cmd('/execute if score after h240 = before h240', expect_result=1))
+    ops += setup('/kill @e[tag=h240_1]')
+    # Only our fixed, tagged subjects are removed, without advancing the world.
+    for n in range(2, len(kinds) + 1):
+        ops += setup(f'/kill @e[tag=h240_{n}]')
+    ops += setup('/data remove storage h240:reads current',
+                 '/scoreboard objectives remove h240')
+    return ops
+
+
+
+def sulfur_cube_loaded_health():
+    # Size is saved as physical size minus one. Babies age even with NoAI.
+    cases = [(0, None, -24000, 4), (1, None, 0, 8),
+             (3, None, -24000, 16), (0, 2.5, -24000, 2.5),
+             (1, 6, 0, 6), (3, 12, -24000, 12),
+             (None, None, 0, 4)]
+    lines = [cmd('/forceload add 0 0 31 31'), {'op': 'settle'}]
+    for x, z in [(0, 0), (16, 0), (0, 16), (16, 16)]:
+        lines.append(cmd(f'/execute if loaded {x} 200 {z}', expect_result=1))
+    lines.extend(setup('/fill 0 199 0 31 208 31 air'))
+    lines.append(cmd('/fill 0 199 0 31 199 31 stone', expect_result=1024))
+    for i, (size, saved_health, age, health) in enumerate(cases):
+        tag = f'cube_health_{i}'
+        uuid = f'00000000-0000-0000-0000-00e60000000{i + 1}'
+        x, z = 4.5 + 6 * (i % 4), 4.5 + 10 * (i // 4)
+        nbt = (f'UUID:[I;0,0,230,{i + 1}],Tags:["cube_loaded_health","{tag}"],NoAI:1b,'
+               f'NoGravity:1b,Silent:1b,PersistenceRequired:1b,Age:{age}')
+        if size is not None:
+            nbt += f',Size:{size}'
+        if saved_health is not None:
+            nbt += f',Health:{saved_health}f'
+        lines.append(cmd(f'/summon sulfur_cube {x} 200 {z} {{{nbt}}}', expect_result=1))
+        for tick in range(2):
+            if tick:
+                lines.append({'op': 'tick', 'n': 1})
+            lines.extend([
+                cmd(f'/execute if entity @e[type=sulfur_cube,tag={tag}]', expect_result=1),
+                cmd(f'/execute as {uuid} if entity @s[tag={tag},nbt={{NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b}}]', expect_result=1),
+                cmd(f'/data get entity {uuid} UUID', expect_result=4),
+                cmd(f'/data get entity {uuid} Pos', expect_result=3),
+                cmd(f'/data get entity {uuid} Size', expect_result=size or 0),
+                cmd(f'/data get entity {uuid} Health 100', expect_result=int(health * 100)),
+                cmd(f'/data get entity {uuid} Age', expect_result=age + (tick if age < 0 else 0)),
+            ])
+    # No NBT invokes spawn finalization: an adult starts at physical size 2.
+    selector = '@e[type=sulfur_cube,tag=!cube_loaded_health]'
+    lines.append(cmd('/summon sulfur_cube 26.5 200 26.5', expect_result=1))
+    for tick in range(2):
+        if tick:
+            lines.append({'op': 'tick', 'n': 1})
+        lines.extend([
+            cmd(f'/execute if entity {selector}', expect_result=1),
+            cmd(f'/data get entity {selector[:-1]},limit=1] Size', expect_result=1),
+            cmd(f'/data get entity {selector[:-1]},limit=1] Health 100', expect_result=800),
+        ])
+    lines.extend(setup('/kill @e[type=sulfur_cube]', '/forceload remove 0 0 31 31'))
+    return lines
+
+
+
+def numeric_array_edits(include_storage_side_effects=False):
+    """Replay list/string controls before the finite numeric-array edit cases."""
+    ops = setup('/tick freeze', '/scoreboard objectives add audit dummy',
+                '/execute store result score clockBefore audit run time query gametime')
+    def edit(initial, suffix, result, source=None):
+        ops.extend(setup('/data remove storage audit:edit value',
+                         f'/data modify storage audit:edit value set value {initial}',
+                         '/scoreboard players set result audit 17',
+                         '/scoreboard players set success audit 17'))
+        if source is not None:
+            ops.extend(setup(f'/data modify storage audit:source value set value {source}'))
+        ops.append(cmd('/execute store result score result audit store success score success audit run data ' + suffix))
+        ops.append(cmd('/scoreboard players get result audit', expect_result=result))
+        ops.append(cmd('/scoreboard players get success audit', expect_result=int(result > 0)))
+        ops.append(cmd('/data get storage audit:edit value'))
+    def modify(initial, tail, result=1):
+        edit(initial, 'modify storage audit:edit ' + tail, result)
+    # The audit's original 22 edit actions, including heterogeneous lists.
+    for tail, result in [('value append value 4', 1), ('value append value "four"', 1),
+                         ('value prepend value 4b', 1), ('value[] set value 9', 3)]:
+        modify('[1,2,3]', tail, result)
+    for path, result in [('value[-1]', 1), ('value[9]', 0), ('value[]', 3)]:
+        edit('[1,2,3]', 'remove storage audit:edit ' + path, result)
+    modify('[1,2,3]', 'value[1] set value 2', 0)
+    for index, result in [(0, 1), (3, 1), (4, 0), (-1, 1), (-4, 1), (-5, 0)]:
+        modify('[1,2,3]', f'value insert {index} value 8', result)
+    modify('[B;1b,2b]', 'value append value 257')
+    modify('[I;1,2]', 'value append value 3.5d')
+    modify('[L;1L,2L]', 'value append value 3')
+    modify('[B;1b,2b]', 'value[0] set value 7b')
+    edit('[I;1,2]', 'remove storage audit:edit value[0]', 1)
+    modify('[[1,2],[3,4]]', 'value[0] append value 5')
+    modify('[[1,2],[3,4]]', 'value[] append value 5', 2)
+    modify('[[1,2],[3,4]]', 'value[-1] prepend value 5')
+    # The original 13 string actions use UTF-16 boundaries without lone surrogates.
+    strings = [('"abcd"', '1 3', 1), ('"abcd"', '-3 -1', 1),
+               ('"abcd"', '2 2', 1), ('"abcd"', '3 1', 0), ('"abcd"', '0 5', 0),
+               ('"AéB"', '1 2', 1), ('"A😀B"', '1 3', 1), ('"A😀B"', '3 4', 1),
+               ('"A😀B"', '-3 -1', 1), ('"A😀B"', '-1', 1),
+               ('3.0f', '', 1), ('3.0d', '', 1), ('1.0E20d', '', 1)]
+    for source, indices, result in strings:
+        suffix = 'modify storage audit:edit value set string storage audit:source value'
+        edit('"unchanged"', suffix + (' ' + indices if indices else ''), result, source)
+    # Destination-specific negative rounding, admission and raw-tag change counts.
+    for kind, initial, empty in [('B', '[B;1b,2b]', '[B;]'),
+                                 ('I', '[I;1,2]', '[I;]'), ('L', '[L;1L,2L]', '[L;]')]:
+        for value in ('3.5f', '-3.5f', '3.5d', '-3.5d', '"bad"'):
+            modify(initial, f'value append value {value}', int(value != '"bad"'))
+        for value in ('-3.5d', '"bad"'):
+            modify(initial, f'value prepend value {value}', int(value != '"bad"'))
+        for value in ('-3.5f', '"bad"'):
+            modify(initial, f'value insert 1 value {value}', int(value != '"bad"'))
+        for value in ('-3.5f', '-3.5d', '"bad"'):
+            modify(initial, f'value[0] set value {value}', int(value != '"bad"'))
+            if value != '"bad"' or include_storage_side_effects:
+                modify(initial, f'value[] set value {value}', 0 if value == '"bad"' else 2)
+        modify(initial, 'value[0] set value 1.0f')
+        modify(initial, 'value[] set value 1', 1 if kind == 'I' else 2)
+        # AllElementsNode's empty collection branch returns 1 even on rejection.
+        modify(empty, 'value[] set value "bad"')
+        modify(empty, 'value[] set value -3.5f')
+        modify(empty, 'value append value "bad"', 0)
+    ops.extend(setup('/execute store result score clockAfter audit run time query gametime'))
+    ops.append(cmd('/execute if score clockAfter audit = clockBefore audit', expect_result=1))
+    ops.extend(setup('/data remove storage audit:edit value', '/data remove storage audit:source value',
+                     '/scoreboard objectives remove audit', '/tick unfreeze'))
+    return ops
+
+
+
+def sulfur_cube_fuse_ticks(immediate_power=False):
+    """SulfurCube.tickFuse runs with NoAI; customServerAiStep timers do not (#9018)."""
+    ops = setup('/forceload add 0 0 79 15',
+                '/fill 0 199 0 79 199 15 stone', '/fill 0 200 0 79 206 15 air',
+                '/gamerule tnt_explodes false')
+    ops.append({'op': 'settle'})
+    ops.append(cmd('/execute if loaded 68 200 4', expect_result=1))
+
+    def target(n):
+        return f'000000f3-0000-0000-0000-{n:012x}'
+
+    def summon(n, x, ai, body, extra=''):
+        # Explicit Health isolates the separate absent-Health load issue (#8983).
+        ops.extend(setup(f'/summon sulfur_cube {x}.5 200 4.5 '
+                         f'{{UUID:[I;243,0,0,{n}],Tags:["sulfur_fuse"],Size:1,Health:4f,'
+                         f'NoAI:{ai}b,NoGravity:1b,Silent:1b,PersistenceRequired:1b,'
+                         f'equipment:{{body:{{id:"minecraft:{body}"}}}}{extra}}}'))
+        ops.append(cmd(f'/execute if entity {target(n)}', expect_result=1))
+        if immediate_power:
+            # Keep the original 76-observation H249 diagnostic byte-for-byte.
+            ops.append(cmd(f'/execute if entity @e[nbt={{UUID:[I;243,0,0,{n}],Health:4f,'
+                           f'NoGravity:1b,Size:1,Tags:["sulfur_fuse"]}}]', expect_result=1))
+        else:
+            ops.append(cmd(f'/execute if entity @e[nbt={{UUID:[I;243,0,0,{n}],Health:4f,'
+                           f'NoGravity:1b,Silent:1b,PersistenceRequired:1b,Size:1,'
+                           f'equipment:{{body:{{id:"minecraft:{body}"}}}},Tags:["sulfur_fuse"]}}]',
+                           expect_result=1))
+            mode = 'if' if ai else 'unless'
+            ops.append(cmd(f'/execute {mode} entity @e[nbt={{UUID:[I;243,0,0,{n}],NoAI:1b}}]',
+                           expect_result=1))
+
+    # Loaded short fuses pin both AI modes, including exact expiry, without a blast.
+    # The default short-fuse/cooldown actors share the observer's loaded chunk.
+    # The diagnostic retains its original distant positions and readiness guards.
+    summon(1, 4 if immediate_power else 2, 1, 'tnt', ',fuse:3')
+    summon(2, 16 if immediate_power else 5, 0, 'tnt', ',fuse:3')
+    summon(3, 28 if immediate_power else 8, 1, 'tnt')
+    summon(4, 40 if immediate_power else 11, 1, 'white_wool', ',pickup_timer:100')
+    summon(5, 52 if immediate_power else 14, 0, 'white_wool', ',pickup_timer:100')
+    for n in (1, 2, 3):
+        ops.append(cmd(f'/data get entity {target(n)} fuse'))
+    for tick in (1, 2, 3):
+        ops.append({'op': 'tick', 'n': 1})
+        for n in (1, 2):
+            ops.append(cmd(f'/execute if entity {target(n)}',
+                           expect_result=1 if tick < 3 else None))
+            if tick < 3:
+                ops.append(cmd(f'/data get entity {target(n)} fuse', expect_result=3 - tick))
+        ops.append(cmd(f'/data get entity {target(3)} fuse'))
+        for n in (4, 5):
+            ops.append(cmd(f'/execute if entity {target(n)}', expect_result=1))
+            ops.append(cmd(f'/data get entity {target(n)} pickup_timer',
+                           expect_result=100 if n == 4 else 100 - tick))
+    ops.extend(setup('/kill @e[tag=sulfur_fuse]', '/gamerule tnt_explodes true',
+                     '/gamerule mob_griefing true'))
+    if immediate_power:
+        ops.extend(setup('/setblock 28 199 4 redstone_block'))
+    ops.extend(setup('/setblock 6 200 4 dirt'))
+    # Actual damage/power priming, a nonexplosive body, and an idle TNT control.
+    summon(6, 4, 1, 'tnt')
+    summon(7, 16, 1, 'tnt')
+    summon(8, 28, 1, 'tnt')
+    summon(9, 52, 1, 'tnt')
+    summon(10, 68, 1, 'oak_planks')
+    if not immediate_power:
+        ops.append(cmd(f'/data get entity {target(8)} fuse', expect_result=-1))
+    ops.append({'op': 'tick', 'n': 2})
+    # Let the loaded body initialize before applying power: first-load equipment
+    # collection vs priming order is a separate diagnostic from fuse dispatch.
+    if not immediate_power:
+        ops.append(cmd(f'/execute if entity {target(8)}', expect_result=1))
+        ops.append(cmd(f'/data get entity {target(8)} fuse', expect_result=-1))
+        ops.extend(setup('/setblock 28 199 4 redstone_block'))
+        ops.append({'op': 'tick', 'n': 1})
+        ops.append(cmd(f'/data get entity {target(8)} fuse', expect_result=120))
+    ops.append(cmd(f'/damage {target(6)} 1 in_fire'))
+    ops.append(cmd(f'/damage {target(7)} 1 explosion', expect_result=1))
+    ops.append(cmd(f'/damage {target(10)} 1 in_fire', expect_result=1))
+    ops.append({'op': 'tick', 'n': 1})
+    for n in (6, 7, 8, 9, 10):
+        ops.append(cmd(f'/execute if entity {target(n)}', expect_result=1))
+        ops.append(cmd(f'/data get entity {target(n)} Health'))
+    for n in (6, 8, 9, 10):
+        ops.append(cmd(f'/data get entity {target(n)} fuse'))
+    # The explosion primes a random short fuse; assert the independent boundary only.
+    ops.append(cmd(f'/execute if entity @e[nbt={{UUID:[I;243,0,0,7],Invulnerable:1b}}]',
+                   expect_result=1))
+    ops.append({'op': 'tick', 'n': 118})
+    ops.append(cmd(f'/execute if entity {target(6)}', expect_result=1))
+    ops.append(cmd(f'/data get entity {target(6)} fuse', expect_result=1))
+    ops.append(cmd('/execute if block 6 200 4 dirt', expect_result=1))
+    ops.append({'op': 'tick', 'n': 2})
+    ops.append(cmd(f'/execute if entity {target(6)}'))
+    ops.append(cmd('/execute if block 6 200 4 air', expect_result=1))
+    for n in (9, 10):
+        ops.append(cmd(f'/execute if entity {target(n)}', expect_result=1))
+        ops.append(cmd(f'/data get entity {target(n)} fuse'))
+    return ops + setup('/kill @e[tag=sulfur_fuse]', '/forceload remove 0 0 79 15')
+
+
+
+def mob_full_resistance_hits():
+    lines = [cmd('/forceload add 0 0 31 31'), {'op': 'settle'}]
+    for x, z in [(0, 0), (16, 0), (0, 16), (16, 16)]:
+        lines.append(cmd(f'/execute if loaded {x} 200 {z}', expect_result=1))
+    lines.extend(setup('/fill 0 199 0 31 208 31 air'))
+    lines.extend([cmd('/fill 0 199 0 31 199 31 stone', expect_result=1024),
+                  cmd('/scoreboard objectives add hitstate dummy', expect_result=1)])
+    serial = 0
+
+    def pig(resistance=None, health=40, invulnerable=False):
+        nonlocal serial
+        serial += 1
+        tag = f'resisted_hit_{serial}'
+        uuid = f'00000000-0000-0000-0000-00f1000000{serial:02x}'
+        x, z = 4.5 + 6 * ((serial - 1) % 5), 4.5 + 6 * ((serial - 1) // 5)
+        nbt = (f'UUID:[I;0,0,241,{serial}],Tags:["resisted_hit","{tag}"],'
+               f'NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b,'
+               f'attributes:[{{id:"minecraft:max_health",base:40.0d}}],Health:{health}f')
+        if invulnerable:
+            nbt += ',Invulnerable:1b'
+        lines.extend([
+            cmd(f'/summon pig {x} 200 {z} {{{nbt}}}', expect_result=1),
+            cmd(f'/execute if entity @e[type=pig,tag={tag}]', expect_result=1),
+            cmd(f'/execute as {uuid} if entity @s[tag={tag},nbt={{NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b}}]', expect_result=1),
+            cmd(f'/data get entity {uuid} UUID', expect_result=4),
+            cmd(f'/data get entity {uuid} Pos', expect_result=3),
+            cmd(f'/attribute {uuid} minecraft:max_health base get', expect_result=40),
+        ])
+        if resistance is not None:
+            lines.append(cmd(f'/effect give {uuid} resistance 10 {resistance} true', expect_result=1))
+            if resistance:
+                lines.append(cmd(f'/data get entity {uuid} active_effects[{{id:"minecraft:resistance"}}].amplifier',
+                                 expect_result=resistance if resistance < 128 else resistance - 256))
+        state(uuid, health, 0)
+        return uuid
+
+    def state(uuid, health, hurt):
+        lines.extend([
+            cmd(f'/execute if entity {uuid}', expect_result=1),
+            cmd(f'/data get entity {uuid} Health', expect_result=int(health)),
+            cmd(f'/execute as {uuid} if entity @s[nbt={{Health:{health}f}}]', expect_result=1),
+            cmd(f'/data get entity {uuid} HurtTime', expect_result=hurt),
+        ])
+
+    def damage(uuid, amount, accepted):
+        lines.extend([
+            cmd('/scoreboard players set #r hitstate 31', expect_result=31),
+            cmd('/scoreboard players set #s hitstate 17', expect_result=17),
+            cmd(f'/execute store result score #r hitstate store success score #s hitstate run damage {uuid} {amount} generic'),
+            cmd('/scoreboard players get #r hitstate', expect_result=accepted),
+            cmd('/scoreboard players get #s hitstate', expect_result=accepted),
+            cmd(f'/execute if score #r hitstate matches {accepted}', expect_result=1),
+            cmd(f'/execute if score #s hitstate matches {accepted}', expect_result=1),
+        ])
+
+    for amp, health in [(None, 39), (0, 39.2), (3, 39.8),
+                        (4, 40), (5, 40), (6, 40), (50, 40),
+                        (51, 40), (254, 40), (255, 40)]:
+        uuid = pig(amp)
+        damage(uuid, 1, 1)
+        state(uuid, health, 10)
+    uuid = pig(4)
+    lines.append(cmd(f'/damage {uuid} 1 generic', expect_result=1))
+    state(uuid, 40, 10)
+    uuid = pig()
+    damage(uuid, 0, 1)
+    state(uuid, 40, 10)
+    uuid = pig(4, invulnerable=True)
+    damage(uuid, 1, 0)
+    state(uuid, 40, 0)
+    for initial, resistance, after, hurt in [(40, 4, 40, 10), (40, None, 39, 10),
+                                             (1, 4, 1, 0), (0.5, 4, 0.5, 0)]:
+        uuid = pig(resistance, initial)
+        lines.append(cmd(f'/effect give {uuid} poison 10 5 true', expect_result=1))
+        lines.append({'op': 'tick', 'n': 1})
+        state(uuid, after, hurt)
+    for resistance in [None, 4]:
+        uuid = pig(resistance)
+        damage(uuid, 1, 1)
+        state(uuid, 40 if resistance else 39, 10)
+        damage(uuid, 1, 0)
+        state(uuid, 40 if resistance else 39, 10)
+        # Stronger fully resisted hits have a separate cooldown-ordering defect;
+        # retain that case in the full audit diagnostic, outside this focused gate.
+        if resistance is None:
+            damage(uuid, 2, 1)
+            state(uuid, 38, 10)
+        lines.append({'op': 'tick', 'n': 21})
+        damage(uuid, 1, 1)
+        state(uuid, 40 if resistance else 37, 10)
+    lines.extend(setup('/kill @e[tag=resisted_hit]', '/forceload remove 0 0 31 31',
+                       '/scoreboard objectives remove hitstate'))
+    return lines
+
+
+
+def sulfur_cube_mob_contact():
+    """Actual mob ticks deliver hot-body contact damage, including NoAI (#9028)."""
+    ops = setup('/forceload add 0 0 15 15', '/fill 0 199 0 15 199 15 stone',
+                '/fill 0 200 0 15 206 15 air')
+    ops.append({'op': 'settle'})
+    ops.append(cmd('/execute if loaded 8 200 8', expect_result=1))
+    # Explicit cube size/health exclude the separate absent-Health loader issue.
+    cases = [(1, 2.5, 2.5, 'magma_block', 2.5),
+             (2, 10.5, 2.5, 'white_concrete_powder', 10.5),
+             (3, 2.5, 10.5, 'magma_block', 5.5),
+             (4, 10.5, 10.5, None, 10.5)]
+
+    def uuid(n):
+        return f'000000f4-0000-0000-0000-{n:012x}'
+
+    def guard(n, kind, x, z, health, body=None):
+        ops.append(cmd(f'/execute if entity {uuid(n)}', expect_result=1))
+        fields = (f'UUID:[I;244,0,0,{n}],Pos:[{x}d,200d,{z}d],Health:{health}f,'
+                  'NoAI:1b,Silent:1b,PersistenceRequired:1b,Tags:["sulfur_contact"]')
+        if body:
+            fields += f',equipment:{{body:{{id:"minecraft:{body}"}}}}'
+        ops.append(cmd(f'/execute if entity @e[type=minecraft:{kind},nbt={{{fields}}}]',
+                       expect_result=1))
+
+    for n, x, z, body, pig_x in cases:
+        equipment = f',equipment:{{body:{{id:"minecraft:{body}"}}}}' if body else ''
+        ops.extend(setup(f'/summon sulfur_cube {x} 200 {z} '
+                         f'{{UUID:[I;244,0,0,{n}],Tags:["sulfur_contact"],NoAI:1b,'
+                         f'Silent:1b,PersistenceRequired:1b,Size:1,Health:4f{equipment}}}',
+                         f'/summon pig {pig_x} 200 {z} '
+                         f'{{UUID:[I;244,0,0,{n + 10}],Tags:["sulfur_contact"],'
+                         'NoAI:1b,Silent:1b,PersistenceRequired:1b}'))
+        guard(n, 'sulfur_cube', x, z, 4, body)
+        guard(n + 10, 'pig', pig_x, z, 10)
+        ops.append(cmd(f'/data get entity {uuid(n + 10)} Health', expect_result=10))
+    ops.append({'op': 'tick', 'n': 3})
+    for n, x, z, body, pig_x in cases:
+        guard(n, 'sulfur_cube', x, z, 4, body)
+        # Guard identity/position independently of the observed health change.
+        ops.append(cmd(f'/execute if entity {uuid(n + 10)}', expect_result=1))
+        ops.append(cmd(f'/execute if entity @e[type=pig,nbt={{UUID:[I;244,0,0,{n + 10}],'
+                       f'Pos:[{pig_x}d,200d,{z}d],NoAI:1b,Tags:["sulfur_contact"]}}]',
+                       expect_result=1))
+        ops.append(cmd(f'/data get entity {uuid(n + 10)} Health',
+                       expect_result=9 if n == 1 else 10))
+    return ops + setup('/kill @e[tag=sulfur_contact]', '/forceload remove 0 0 15 15')
+
+
+
+def nautilus_saved_sitting():
+    """TamableAnimal's ordered Sitting flag survives nautilus NBT edits (#9055).
+
+    Only the saved flag is covered: no sitting AI, pose, riding or reload claim.
+    All measured operations run frozen, with an independent zero-tick witness.
+    """
+    out = []
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    def observe(uid, kind, tag, sitting, owner):
+        check(f'/execute as {uid} if entity @s[type=minecraft:{kind},tag={tag}]')
+        check(f'/data get entity {uid} UUID', 4)
+        check(f'/data get entity {uid} Pos', 3)
+        check(f'/data get entity {uid} Health', 15)
+        check(f'/execute as {uid} if entity @s[nbt={{NoAI:1b,Silent:1b,'
+              'PersistenceRequired:1b,Health:15f,Pos:[10.5d,200d,10.5d]}]')
+        if owner:
+            check(f'/data get entity {uid} Owner', 4)
+        else:
+            check(f'/execute unless data entity {uid} Owner')
+        check(f'/data get entity {uid} Sitting', sitting)
+        check(f'/execute as {uid} if entity @s[nbt={{Sitting:{sitting}b}}]')
+
+    check('/tick freeze')
+    check('/gamerule spawn_mobs', 0)
+    check('/time set midnight', 18000)
+    check('/scoreboard objectives add saved_sit dummy')
+    out += setup('/kill @e[type=!player]', '/forceload add 0 0 15 15')
+    out.append({'op': 'settle'})
+    check('/execute if loaded 0 200 0')
+    check('/fill 0 199 0 15 199 15 stone', 256)
+    out += setup('/execute store result score #before saved_sit run time query gametime')
+    serial = 0
+    for kind in ('nautilus', 'zombie_nautilus'):
+        for owner in (True, False):
+            for sitting in (None, 0, 1):
+                serial += 1
+                uid = f'00000000-0000-0000-0000-00fd{serial:08x}'
+                tag = f'saved_sit_{serial}'
+                saved = (f'{{UUID:[I;0,0,253,{serial}],Tags:["saved_sit","{tag}"],'
+                         'NoAI:1b,Silent:1b,PersistenceRequired:1b,Health:15f')
+                if owner:
+                    saved += ',Owner:[I;1,2,3,4]'
+                if sitting is not None:
+                    saved += f',Sitting:{sitting}b'
+                check(f'/summon minecraft:{kind} 10.5 200 10.5 {saved}}}')
+                observe(uid, kind, tag, sitting or 0, owner)
+                if owner and sitting == 1:
+                    for value in (0, 1):
+                        check(f'/data merge entity {uid} {{Sitting:{value}b}}')
+                        observe(uid, kind, tag, value, True)
+                    check(f'/data remove entity {uid} Owner')
+                    observe(uid, kind, tag, 1, False)
+                out += setup(f'/kill {uid}')
+    out += setup('/execute store result score #after saved_sit run time query gametime')
+    check('/scoreboard players operation #after saved_sit -= #before saved_sit', 0)
+    check('/execute if score #after saved_sit matches 0')
+    out += setup('/tick unfreeze')
+    out.append({'op': 'tick', 'n': 25})
+    out += setup('/kill @e[tag=saved_sit]', '/kill @e[type=item]',
+                 '/fill 0 199 0 15 199 15 air', '/time set 1000',
+                 '/scoreboard objectives remove saved_sit', '/forceload remove 0 0 15 15')
+    return out
+
+
+
+def zombie_nautilus_ignored_age():
+    """Ignored zombie-nautilus age keys must not survive raw NBT (#9082).
+
+    Zombie probes are zero-tick saved-data checks. A normal nautilus is an
+    independent positive age-codec control, with one observed tick only.
+    """
+    out = []
+
+    def check(command, result=1):
+        out.append(cmd(command, expect_result=result))
+
+    def subject(uid, kind, tag):
+        check(f'/execute as {uid} if entity @s[type=minecraft:{kind},tag={tag}]')
+        check(f'/data get entity {uid} UUID', 4)
+        check(f'/data get entity {uid} Pos', 3)
+        check(f'/data get entity {uid} Health', 15)
+        check(f'/execute as {uid} if entity @s[nbt={{NoAI:1b,NoGravity:1b,'
+              'Silent:1b,PersistenceRequired:1b,Health:15f}]')
+
+    def ignored(uid, tag):
+        subject(uid, 'zombie_nautilus', tag)
+        for field in ('Age', 'ForcedAge', 'AgeLocked'):
+            out.append(cmd(f'/data get entity {uid} {field}'))
+            check(f'/execute unless data entity {uid} {field}')
+
+    check('/tick freeze')
+    check('/gamerule spawn_mobs', 0)
+    check('/time set midnight', 18000)
+    check('/scoreboard objectives add ignored_age dummy')
+    out += setup('/kill @e[type=!player]', '/forceload add 0 0 15 15')
+    out.append({'op': 'settle'})
+    check('/execute if loaded 0 200 0')
+    check('/fill 0 199 0 15 199 15 stone', 256)
+    out += setup('/execute store result score #before ignored_age run time query gametime')
+    for serial, age in enumerate((None, -24000, 0, 37), 1):
+        uid = f'000000fe-0000-0000-0000-{serial:012x}'
+        tag = f'ignored_age_{serial}'
+        saved = (f'{{UUID:[I;254,0,0,{serial}],Tags:["ignored_age","{tag}"],'
+                 'NoAI:1b,NoGravity:1b,Silent:1b,PersistenceRequired:1b,Health:15f')
+        if age is not None:
+            saved += f',Age:{age},ForcedAge:12,AgeLocked:1b'
+        check(f'/summon minecraft:zombie_nautilus 10.5 200 10.5 {saved}}}')
+        ignored(uid, tag)
+        for merged in (0, -24000, 37):
+            check(f'/data merge entity {uid} {{Age:{merged},ForcedAge:12,AgeLocked:1b}}')
+            ignored(uid, tag)
+        out += setup(f'/kill {uid}')
+    out += setup('/execute store result score #after ignored_age run time query gametime')
+    check('/scoreboard players operation #after ignored_age -= #before ignored_age', 0)
+    check('/execute if score #after ignored_age matches 0')
+
+    uid = '000000fe-0000-0000-0000-000000000005'
+    check('/summon minecraft:nautilus 10.5 200 10.5 '
+          '{UUID:[I;254,0,0,5],Tags:["ignored_age","normal_age"],NoAI:1b,NoGravity:1b,'
+          'Silent:1b,PersistenceRequired:1b,Health:15f,Age:-24000,ForcedAge:12,AgeLocked:0b}')
+    for expected in (-24000, -23999):
+        if expected == -23999:
+            out += setup('/execute store result score #before ignored_age run time query gametime',
+                         '/tick step 1')
+            out.append({'op': 'tick', 'n': 1})
+            out += setup('/execute store result score #after ignored_age run time query gametime')
+            check('/scoreboard players operation #after ignored_age -= #before ignored_age', 1)
+            check('/execute if score #after ignored_age matches 1')
+        subject(uid, 'nautilus', 'normal_age')
+        check(f'/data get entity {uid} Age', expected)
+        check(f'/data get entity {uid} ForcedAge', 12)
+        check(f'/data get entity {uid} AgeLocked', 0)
+        check(f'/execute as {uid} if entity @s[nbt={{Age:{expected},ForcedAge:12,AgeLocked:0b}}]')
+    out += setup('/kill @e[tag=ignored_age]', '/tick unfreeze')
+    out.append({'op': 'tick', 'n': 25})
+    out += setup('/kill @e[type=item]', '/fill 0 199 0 15 199 15 air',
+                 '/time set 1000', '/scoreboard objectives remove ignored_age',
+                 '/forceload remove 0 0 15 15')
+    return out
+
+
+
+def structured_item_slots():
+    range3 = '{type:"minecraft:slot_range",slots:"container.3"}'
+    range5 = '{type:"minecraft:slot_range",slots:"container.5"}'
+    group = '[' + range3 + ',' + range5 + ']'
+    all_slots = '{type:"minecraft:slot_range",slots:"container.*"}'
+    limit = '{type:"minecraft:limit_slots",limit:2,slot_source:' + all_slots + '}'
+    filtered = '{type:"minecraft:filtered",item_filter:{items:"minecraft:apple"},slot_source:' + all_slots + '}'
+    ops = [*setup('/setblock 4 200 4 chest', '/setblock 6 200 4 chest'),
+           cmd('/execute if block 4 200 4 chest', expect_result=1)]
+    def state():
+        return [cmd('/data get block 4 200 4 Items'), cmd('/data get block 6 200 4 Items')]
+    def clear():
+        return setup('/item override block 4 200 4 container.* with air')
+    ops += clear() + [cmd('/item fill block 4 200 4 ' + group + ' with apple')] + state()
+    ops += [cmd('/item fill block 4 200 4 ' + limit + ' with gold_ingot')] + state()
+    ops += [cmd('/item fill block 4 200 4 ' + filtered + ' with diamond')] + state()
+    ops += [cmd('/item fill block 4 200 4 ' + filtered + ' with emerald')] + state()
+    ops += clear() + [cmd('/item replace block 4 200 4 ' + group + ' with apple')] + state()
+    ops += [cmd('/item override block 4 200 4 ' + group + ' with gold_ingot')] + state()
+    ops += [cmd('/item fill block 4 200 4 ' + group + ' with apple'),
+            cmd('/item modify block 4 200 4 ' + group + ' {type:"minecraft:set_count",count:3}')] + state()
+    ops += [cmd('/item replace block 6 200 4 container.0 from block 4 200 4 ' + group)] + state()
+    ops += [cmd('/execute if slots block 4 200 4 ' + group),
+            cmd('/execute if items block 4 200 4 ' + group + ' apple'),
+            cmd('/item fill block 4 200 4 {type:"minecraft:empty"} with diamond'),
+            cmd('/item fill block 4 200 4 [] with diamond'),
+            cmd('/item fill block 4 200 4 audit_missing:no_source with diamond')]
+    for i, x in enumerate((4.5, 8.5), 1):
+        ops += [cmd(f'/summon zombie {x} 200 8.5 {{UUID:[I;247,0,0,{i}],NoAI:1b,NoGravity:1b,Tags:["h247"]}}'),
+                cmd(f'/execute if entity 000000f7-0000-0000-0000-{i:012x}', expect_result=1)]
+    feet = '{type:"minecraft:limit_slots",limit:1,slot_source:{type:"minecraft:slot_range",slots:"armor.feet"}}'
+    ops += [cmd('/item fill entity @e[tag=h247,sort=nearest] ' + feet + ' with iron_boots')]
+    for i in (1, 2):
+        ops += [cmd(f'/execute if items entity 000000f7-0000-0000-0000-{i:012x} armor.feet iron_boots')]
+    # Named controls and composition boundaries; all expected replies come
+    # from the same fresh official server, including rejection callbacks.
+    ops += clear() + [cmd('/item fill block 4 200 4 container.3 with apple'),
+                      cmd('/item replace block 4 200 4 container.5 with apple')]
+    explicit_group = '{type:"minecraft:group",terms:' + group + '}'
+    ops += [cmd('/item fill block 4 200 4 ' + explicit_group + ' with emerald')] + state()
+    ops += clear() + setup('/item fill block 4 200 4 container.5 with apple')
+    limited_filter = '{type:"minecraft:limit_slots",limit:1,slot_source:' + filtered + '}'
+    ops += [cmd('/item modify block 4 200 4 ' + limited_filter + ' {type:"minecraft:set_count",count:7}')] + state()
+    # The repeated filtered slot stops matching after its first write.
+    repeated_filter = '{type:"minecraft:filtered",item_filter:{items:"minecraft:apple"},slot_source:[' + range5 + ',' + range5 + ']}'
+    ops += [cmd('/item fill block 4 200 4 ' + repeated_filter + ' with diamond')] + state()
+    ops += [cmd('/item fill block 4 200 4 container.99 with diamond'),
+            cmd('/item replace block 6 200 4 container.0 from block 4 200 4 {type:"minecraft:empty"}')]
+    return ops
+
+
+
+def hopper_empty_slot_limits():
+    """Real item/hopper ticks: setItem clamps an empty slot and consumes the input.
+
+    The harness holds time between operations; only the explicit ticks below run.
+    Keep the owner far away so these are hopper transfers, not player pickups.
+    """
+    apple = '00000110-0000-0000-0000-000000000001'
+    stick = '00000110-0000-0000-0000-000000000002'
+    pearl = '00000110-0000-0000-0000-000000000003'
+    ops = setup('/forceload add 0 0 15 15',
+                '/fill 0 99 0 3 99 3 stone', '/fill 0 100 0 3 104 3 air',
+                '/setblock 0 100 0 hopper',
+                '/scoreboard objectives add hopper_clock dummy',
+                '/execute store result score before hopper_clock run time query gametime')
+    ops += [cmd('/execute if loaded 0 100 0', expect_result=1),
+            cmd('/execute if block 0 100 0 minecraft:hopper', expect_result=1),
+            cmd('/data get block 0 100 0 id'),
+            cmd('/data get block 0 100 0 Items'),
+            cmd('/execute positioned 0.5 101 0.5 unless entity @a[distance=..8]', expect_result=1)]
+    for number, item, count in ((1, 'apple', 70), (2, 'stick', 3)):
+        target = (apple, stick)[number - 1]
+        ops += setup('/summon item 0.5 101 0.5 '
+                     f'{{UUID:[I;272,0,0,{number}],Item:{{id:"minecraft:{item}",count:{count}}},'
+                     'PickupDelay:0s,Motion:[0d,0d,0d]}')
+        ops += [cmd(f'/execute if entity @e[type=item,nbt={{UUID:[I;272,0,0,{number}]}}]', expect_result=1)]
+        for field in ('UUID', 'Item.id', 'Item.count', 'Pos', 'Motion', 'PickupDelay'):
+            ops.append(cmd(f'/data get entity {target} {field}',
+                           expect_result=count if field == 'Item.count' else None))
+    elapsed = 0
+    for tick in (1, 2, 10, 18, 48):
+        ops.append({'op': 'tick', 'n': tick - elapsed})
+        ops += setup('/execute store result score elapsed hopper_clock run time query gametime',
+                     '/scoreboard players operation elapsed hopper_clock -= before hopper_clock')
+        ops += [cmd('/scoreboard players get elapsed hopper_clock', expect_result=tick),
+                cmd('/data get block 0 100 0 Items'),
+                cmd('/data get block 0 100 0 Items[{Slot:0b}].count', expect_result=64),
+                cmd(f'/execute if entity {apple}'),
+                cmd(f'/execute if entity {stick}')]
+        if tick <= 2:
+            ops.append(cmd(f'/data get entity {stick} Item.count', expect_result=3))
+        else:
+            ops.append(cmd('/data get block 0 100 0 Items[{Slot:1b}].count', expect_result=3))
+        elapsed = tick
+    # An ordinary stack limit other than 64 guards against a constant clamp.
+    ops += setup('/setblock 2 100 0 hopper',
+                 '/summon item 2.5 101 0.5 '
+                 '{UUID:[I;272,0,0,3],Item:{id:"minecraft:ender_pearl",count:20},'
+                 'PickupDelay:0s,Motion:[0d,0d,0d]}')
+    ops += [cmd('/execute if entity @e[type=item,nbt={UUID:[I;272,0,0,3]}]', expect_result=1),
+            cmd('/data get block 2 100 0 Items'),
+            cmd(f'/data get entity {pearl} Item.id'),
+            cmd(f'/data get entity {pearl} Item.count', expect_result=20),
+            {'op': 'tick', 'n': 1},
+            cmd('/data get block 2 100 0 Items'),
+            cmd('/data get block 2 100 0 Items[{Slot:0b}].count', expect_result=16),
+            cmd(f'/execute if entity {pearl}')]
+    return ops + setup('/scoreboard objectives remove hopper_clock')
+
+
+
+def comparator_output_data():
+    """ComparatorBlockEntity load/save through the live circuit output, without ticks."""
+    ops = setup('/forceload add 0 0 15 15', '/setblock 4 199 4 stone',
+                '/scoreboard objectives add comparator_data dummy',
+                '/execute store result score before comparator_data run time query gametime')
+    ops += [cmd('/execute if loaded 4 200 4', expect_result=1),
+            cmd('/execute if block 4 199 4 stone', expect_result=1)]
+    cases = [(str(n), 0, n) for n in
+             (-1, 0, 1, 2, 15, 16, 255, 256, 257, 2147483647, -2147483648)]
+    cases += [('2b', 0, 2), ('2s', 0, 2), ('2L', 0, 2), ('2.5f', 0, 2),
+              ('-2.5d', 0, -3), ('"bad"', 0, 0), ('{}', 0, 0),
+              ('"bad"', 7, 0), ('{}', 7, 0), (None, 7, 0), ('7', 7, 7)]
+    for value, before, after in cases:
+        # Reusing the coordinate also checks that a replacement is a fresh entity.
+        ops += setup('/setblock 4 200 4 air', '/setblock 4 200 4 comparator')
+        ops += [cmd('/execute if block 4 200 4 comparator', expect_result=1),
+                cmd('/data get block 4 200 4 id'),
+                cmd('/data get block 4 200 4 OutputSignal', expect_result=0)]
+        if before:
+            ops.append(cmd(f'/data modify block 4 200 4 OutputSignal set value {before}', expect_result=1))
+            ops.append(cmd('/data get block 4 200 4 OutputSignal', expect_result=before))
+        ops += setup('/scoreboard players set result comparator_data -99',
+                     '/scoreboard players set success comparator_data -99')
+        ops += [cmd('/scoreboard players get result comparator_data', expect_result=-99),
+                cmd('/scoreboard players get success comparator_data', expect_result=-99)]
+        edit = ('data remove block 4 200 4 OutputSignal' if value is None else
+                f'data modify block 4 200 4 OutputSignal set value {value}')
+        changed = int(value is None or value != str(before))
+        ops += [cmd('/execute store result score result comparator_data '
+                    f'store success score success comparator_data run {edit}'),
+                cmd('/scoreboard players get result comparator_data', expect_result=changed),
+                cmd('/scoreboard players get success comparator_data', expect_result=changed),
+                cmd('/data get block 4 200 4 OutputSignal', expect_result=after)]
+    # An ordinary block entity and an invalid block keep their existing routes.
+    ops += setup('/setblock 6 199 4 stone', '/setblock 6 200 4 chest')
+    ops += [cmd('/data get block 6 200 4 Items'),
+            cmd('/data modify block 6 200 4 CustomName set value "control"'),
+            cmd('/data get block 6 200 4 CustomName'),
+            cmd('/data get block 6 199 4 OutputSignal')]
+    ops += setup('/execute store result score elapsed comparator_data run time query gametime',
+                 '/scoreboard players operation elapsed comparator_data -= before comparator_data')
+    return ops + [cmd('/scoreboard players get elapsed comparator_data', expect_result=0)] + setup(
+        '/scoreboard objectives remove comparator_data')
+
+
+
+def decorated_pot_data(string_sherd=False):
+    """Pure DecoratedPotBlockEntity command NBT; no hopper or interaction ticks."""
+    ops = setup('/forceload add 0 0 15 15', '/setblock 4 199 4 stone',
+                '/scoreboard objectives add pot_data dummy',
+                '/execute store result score before pot_data run time query gametime')
+    ops += [cmd('/execute if loaded 4 200 4', expect_result=1),
+            cmd('/execute if block 4 199 4 stone', expect_result=1)]
+    for count in (None, 1, 3, 28):
+        ops += setup('/setblock 4 200 4 air')
+        nbt = '' if count is None else f'{{item:{{id:"minecraft:wheat",count:{count}}}}}'
+        ops += [cmd(f'/setblock 4 200 4 decorated_pot{nbt}', expect_result=1),
+                cmd('/execute if block 4 200 4 decorated_pot', expect_result=1),
+                cmd('/data get block 4 200 4 id'),
+                cmd('/data get block 4 200 4 item')]
+        if count is None:
+            ops.append(cmd('/data get block 4 200 4'))
+        else:
+            ops.append(cmd('/data get block 4 200 4 item.count', expect_result=count))
+    ops += setup('/setblock 4 200 4 air')
+    sherd = ('"minecraft:angler_pottery_sherd"' if string_sherd else
+             '{id:"minecraft:angler_pottery_sherd"}')
+    ops += [cmd('/setblock 4 200 4 decorated_pot{item:{id:"minecraft:wheat",count:3},'
+                f'sherds:{{front:{sherd}}}}}', expect_result=1),
+            cmd('/data get block 4 200 4 id'),
+            cmd('/data get block 4 200 4 item.count', expect_result=3),
+            cmd('/data get block 4 200 4 sherds')]
+    edits = [
+        ('data modify block 4 200 4 item.count set value 3', 0),
+        ('data modify block 4 200 4 item.count set value 5', 1),
+        ('data merge block 4 200 4 {item:{count:7}}', 1),
+        ('data modify block 4 200 4 item.id set value "minecraft:apple"', 1),
+        ('data remove block 4 200 4 item', 1),
+        ('data remove block 4 200 4 item', 0),
+        ('data modify block 4 200 4 item set value {id:"minecraft:stone",count:1}', 1),
+        ('data modify block 4 200 4 item set value {id:"minecraft:stone",count:1}', 0),
+    ]
+    for edit, changed in edits:
+        ops += setup('/scoreboard players set result pot_data -99',
+                     '/scoreboard players set success pot_data -99')
+        ops += [cmd('/scoreboard players get result pot_data', expect_result=-99),
+                cmd('/scoreboard players get success pot_data', expect_result=-99),
+                cmd('/execute store result score result pot_data '
+                    f'store success score success pot_data run {edit}'),
+                cmd('/scoreboard players get result pot_data', expect_result=changed),
+                cmd('/scoreboard players get success pot_data', expect_result=changed),
+                cmd('/data get block 4 200 4 id'),
+                cmd('/data get block 4 200 4 item'),
+                cmd('/data get block 4 200 4 sherds')]
+    # A data view must leave pending loot metadata pending, not call pot_tag's unpacker.
+    ops += setup('/setblock 4 200 4 air')
+    ops += [cmd('/setblock 4 200 4 decorated_pot{LootTable:"minecraft:chests/simple_dungeon",LootTableSeed:17L}', expect_result=1),
+            cmd('/data get block 4 200 4 id'),
+            cmd('/data get block 4 200 4 LootTable'),
+            cmd('/data get block 4 200 4 LootTableSeed', expect_result=17),
+            cmd('/data get block 4 200 4 item'),
+            cmd('/data modify block 4 200 4 LootTableSeed set value 19L', expect_result=1),
+            cmd('/data get block 4 200 4 LootTable'),
+            cmd('/data get block 4 200 4 LootTableSeed', expect_result=19)]
+    ops += setup('/setblock 6 200 4 chest')
+    ops += [cmd('/data get block 6 200 4 Items'),
+            cmd('/data get block 4 199 4 item')]
+    ops += setup('/execute store result score elapsed pot_data run time query gametime',
+                 '/scoreboard players operation elapsed pot_data -= before pot_data')
+    return ops + [cmd('/scoreboard players get elapsed pot_data', expect_result=0)] + setup(
+        '/scoreboard objectives remove pot_data')
+
+
+
 def mining_efficiency_9021():
     """Exercise Player.getDestroySpeed through actual block destroy progress."""
     probe = {'op': 'destroy_progress', 'pos': [8, 229, 9]}
@@ -3011,11 +4305,22 @@ def mining_efficiency_9021():
     return operations
 
 
+
 def groups():
+    try:
+        from .loaded_cloud_corpus import loaded_clouds
+    except ImportError:
+        from loaded_cloud_corpus import loaded_clouds
     return [
         ('setup', group_setup()),
         ('mining_efficiency_9021', mining_efficiency_9021()),
+        ('structured item slots', structured_item_slots()),
+        ('loaded potion clouds', loaded_clouds(cmd, setup)),
         ('server clock', server_clock()),
+        ('decorated pot data', decorated_pot_data()),
+        ('comparator output data', comparator_output_data()),
+        ('hopper empty slot limits', hopper_empty_slot_limits()),
+        ('End clock commands', end_clock_commands()),
         ('client commands', client_commands()),
         ('game state', game_state()),
         ('player state', player_state()),
@@ -3024,6 +4329,8 @@ def groups():
         ('setblock destroy air', setblock_destroy_air()),
         ('forceload query order', forceload_query_order()),
         ('entities', entities()),
+        ('zombie nautilus ignored age', zombie_nautilus_ignored_age()),
+        ('nautilus saved Sitting', nautilus_saved_sitting()),
         ('axolotl hunting memory', axolotl_hunting_memory()),
         ('marker data mutation', marker_data_mutation()),
         ('mob effect update result', mob_effect_update_result()),
@@ -3036,21 +4343,14 @@ def groups():
         ('aquatic FromBucket', aquatic_from_bucket()),
         ('villager command names', villager_command_names()),
         ('item lifetime counters', item_lifetime_counters()),
-
-
-
         ('animal signed InLove', animal_signed_in_love()),
         ('mob fire resistance damage', mob_fire_resistance_damage()),
-
-
         ('armor stand climbing', armor_stand_climbing()),
-
-
-
         ('mob armor damage', mob_armor_damage()),
-
         ('mob max health bounds', mob_max_health_bounds()),
         ('creeper custom fuse', creeper_custom_fuse()),
+        ('sulfur cube mob contact', sulfur_cube_mob_contact()),
+        ('sulfur cube fuse ticks', sulfur_cube_fuse_ticks()),
         ('wither spawn', wither_spawn()),
         ('riding teleport', riding_teleport()),
         ('mob riding', mob_riding()),
@@ -3058,6 +4358,8 @@ def groups():
         ('camel riders', camel_riders()),
         ('scores, teams and bossbars', scores()),
         ('bossbar list order', bossbar_list_order()),
+        ('large fireball fire', large_fireball_fire()),
+        ('mannequin pose anchors', mannequin_pose_anchors()),
         ('item command damage', item_command_damage()),
         ('execute', execute()),
         ('projectile origin', projectile_origin()),
@@ -3065,22 +4367,31 @@ def groups():
         ('levels', levels()),
         ('end portal entities', end_portal_entities()),
         ('items and loot', items_and_loot()),
+        ('numeric array edits', numeric_array_edits()),
+        ('projectile saved UUID', projectile_saved_uuid()),
+        ('awake villager saved position', awake_villager_saved_position()),
+        ('villager wake rotation', villager_wake_rotation()),
+        ('cube saved Age', cube_saved_age()),
+        ('mob baby attribute reads', mob_baby_attribute_reads()),
+        ('mob partial block suffocation', mob_partial_block_suffocation()),
+        ('allay invalid Brain retention', allay_invalid_brain_retention()),
+        ('hurting projectile float inertia', hurting_projectile_float_inertia()),
+        ('primed TNT block state', primed_tnt_block_state()),
+        ('allay pocket inventory', allay_pocket_inventory()),
         ('summoned fangs lifetime', summoned_fangs_lifetime()),
         ('summoned fangs edits', summoned_fangs_edits()),
         ('summoned fangs levels', summoned_fangs_levels()),
         ('bird flap sensors', bird_flap_sensors()),
         ('entity landing sensors', entity_landing_sensors()),
-
         ('loot set damage', loot_set_damage()),
-
-
-
         ('item NBT count bounds', item_nbt_count_bounds()),
-
         ('world', world_misc()),
         ('recipe special arguments', recipe_special_arguments()),
         ('progression', progression()),
         ('functions and packs', functions_and_packs()),
+        ('mob full resistance hits', mob_full_resistance_hits()),
+        ('sulfur cube loaded health', sulfur_cube_loaded_health()),
+        ('function return feedback', function_return_feedback()),
         ('ticking and random', ticking()),
         ('compute', compute()),
         ('social and scoreboard', social()),

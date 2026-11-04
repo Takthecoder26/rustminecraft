@@ -534,9 +534,18 @@ pub fn mob_to_nbt(
         if species != crate::mobs::Species::Tadpole {
             map.insert("ForcedAge".into(), Tag::Int(m.extra.forced_age));
         }
-    } else if species == crate::mobs::Species::Parrot {
-        // Parrot.canBeABaby is false: a raw input Age must not leak into the save.
-        map.remove(&"Age".into());
+    } else if matches!(
+        species,
+        crate::mobs::Species::Parrot
+            | crate::mobs::Species::Slime
+            | crate::mobs::Species::MagmaCube
+            | crate::mobs::Species::ZombieNautilus
+    ) {
+        // AgeableMob.addAdditionalSaveData writes nothing when canBeABaby is
+        // false: drop the ignored values a raw input compound carried.
+        for key in ["Age", "ForcedAge", "AgeLocked"] {
+            map.remove(&key.into());
+        }
     }
     // Animal.addAdditionalSaveData: the love ticks left, whatever the save had.
     if is_animal(id) {
@@ -896,15 +905,10 @@ pub fn mob_to_nbt(
         }
         "minecraft:allay" => {
             // InventoryCarrier: the fetched stack; the liked player memory.
-            let mut inv = Vec::new();
-            if let (Some(item), n) = (&m.extra.main_hand, m.extra.ints[1])
-                && n > 0
-            {
-                inv.push(Tag::compound([
-                    ("id", Tag::String(item.as_ref().into())),
-                    ("count", Tag::Int(n)),
-                ]));
-            }
+            let inv = crate::mobs::allay::inventory(m)
+                .map(item_to_nbt)
+                .into_iter()
+                .collect();
             map.insert("Inventory".into(), Tag::List(inv));
             if let Some(st) = &m.extra.allay {
                 map.insert("listener".into(), st.vibration.to_nbt());
@@ -1582,9 +1586,18 @@ pub fn mob_from_nbt(
         }
     }
     // `Mannequin.readAdditionalSaveData`: the profile comes back with the skin, then
-    // `immovable`, `hide_description` and `description` (`updateDescription`).
+    // validated pose, `immovable`, `hide_description` and `description` (`updateDescription`).
     if m.species() == crate::mobs::Species::Mannequin {
         m.profile = tag.get("profile").and_then(profile_from_nbt);
+        // Mannequin.POSE_CODEC accepts only these Avatar poses; an invalid
+        // or absent value defaults to standing before the live dimensions read it.
+        m.extra.avatar_pose = match text(tag.get("pose")).as_deref() {
+            Some("crouching") => crate::pose::Pose::Crouching,
+            Some("swimming") => crate::pose::Pose::Swimming,
+            Some("fall_flying") => crate::pose::Pose::FallFlying,
+            Some("sleeping") => crate::pose::Pose::Sleeping,
+            _ => crate::pose::Pose::Standing,
+        };
         m.extra.immovable = flag(tag, "immovable");
         m.extra.description = if flag(tag, "hide_description") {
             crate::mobs::MannequinDescription::Hidden
@@ -1874,10 +1887,13 @@ pub fn mob_from_nbt(
     m.fire_ticks = number(tag.get("Fire")).unwrap_or(0) as i32;
     m.air = number(tag.get("Air")).unwrap_or(300) as i32;
     if m.species() == crate::mobs::Species::Allay {
-        if let Some(Tag::List(inv)) = tag.get("Inventory")
-            && let Some(first) = inv.first()
-        {
-            m.extra.ints[1] = number(first.get("count")).unwrap_or(1) as i32;
+        if let Some(Tag::List(inv)) = tag.get("Inventory") {
+            for stack in inv.iter().filter_map(item_from_nbt) {
+                let max = m.kind.inventory_stack_limit(&stack);
+                if let Some(st) = m.extra.allay.as_mut() {
+                    st.add(stack, max);
+                }
+            }
         }
         m.extra.egg_time = number(tag.get("DuplicationCooldown")).unwrap_or(0) as i32;
         if let (Some(st), Some(listener)) = (m.extra.allay.as_mut(), tag.get("listener")) {
@@ -2163,13 +2179,15 @@ pub fn tnt_power(tag: &Tag) -> f32 {
 }
 
 /// `PrimedTnt.addAdditionalSaveData`: its `fuse` and, when it is not the
-/// default, its `explosion_power`.
+/// default, its `explosion_power`, and the encoded live block state.
+#[allow(clippy::too_many_arguments)]
 pub fn tnt_to_nbt(
     position: Vec3,
     motion: Vec3,
     on_ground: bool,
     fuse: i32,
     power: f32,
+    block_state: Tag,
     uuid: [i32; 4],
     raw: Option<&Tag>,
 ) -> Tag {
@@ -2187,10 +2205,7 @@ pub fn tnt_to_nbt(
     if power != 4.0 {
         put(&mut tag, "explosion_power", Tag::Float(power.to_bits()));
     }
-    // PrimedTnt writes its block state (a summoned `block_state` is kept).
-    if tag.get("block_state").is_none() {
-        put(&mut tag, "block_state", string("minecraft:tnt"));
-    }
+    put(&mut tag, "block_state", block_state);
     tag
 }
 /// `EvokerFangs.addAdditionalSaveData`: always save the live warmup counter.
@@ -3527,9 +3542,27 @@ mod tnt_power_tests {
         assert_eq!(tnt_power(&with(Some(-3.0))), 0.0);
         // And it round-trips through the save, which writes it only when it is
         // not the default.
-        let saved = tnt_to_nbt(Vec3::ZERO, Vec3::ZERO, false, 20, 10.0, [1, 2, 3, 4], None);
+        let saved = tnt_to_nbt(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            false,
+            20,
+            10.0,
+            string("minecraft:tnt"),
+            [1, 2, 3, 4],
+            None,
+        );
         assert_eq!(tnt_power(&saved), 10.0);
-        let plain = tnt_to_nbt(Vec3::ZERO, Vec3::ZERO, false, 20, 4.0, [1, 2, 3, 4], None);
+        let plain = tnt_to_nbt(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            false,
+            20,
+            4.0,
+            string("minecraft:tnt"),
+            [1, 2, 3, 4],
+            None,
+        );
         assert!(plain.get("explosion_power").is_none());
     }
 }
@@ -3538,6 +3571,82 @@ mod tnt_power_tests {
 mod tests {
     use super::*;
     use crate::items::ItemStack;
+
+    #[test]
+    fn cubes_omit_supplied_age_and_pigs_keep_modeled_age() {
+        use crate::mobs::Species;
+        for (species, id) in [
+            (Species::Slime, "minecraft:slime"),
+            (Species::MagmaCube, "minecraft:magma_cube"),
+            (Species::Pig, "minecraft:pig"),
+        ] {
+            let mut kind = crate::mobs::sensor_scan_tests::kind();
+            let ty = Arc::make_mut(&mut kind);
+            ty.species = species;
+            ty.id = id.into();
+            let mut mob = Mob::new(1, kind, Vec3::ZERO, 0.0);
+            mob.extra.age = -37;
+            let expected = (species == Species::Pig).then_some(Tag::Int(-37));
+            for age in [None, Some(0), Some(-24000), Some(37)] {
+                let mut raw = Tag::compound([("h228_control", Tag::Int(42))]);
+                if let Some(age) = age
+                    && let Tag::Compound(map) = &mut raw
+                {
+                    map.insert("Age".into(), Tag::Int(age));
+                }
+                let saved = mob_to_nbt(&mob, [0; 4], Some(&raw), None);
+                assert_eq!(saved.get("Age"), expected.as_ref(), "{species:?}, {age:?}");
+                assert_eq!(saved.get("h228_control"), Some(&Tag::Int(42)));
+            }
+            let saved = mob_to_nbt(&mob, [0; 4], None, None);
+            assert_eq!(
+                saved.get("Age"),
+                expected.as_ref(),
+                "{species:?}, no raw tag"
+            );
+        }
+    }
+
+    #[test]
+    fn zombie_nautilus_save_omits_ignored_age_fields() {
+        use crate::mobs::Species;
+        for (id, species) in [
+            ("minecraft:zombie_nautilus", Species::ZombieNautilus),
+            ("minecraft:nautilus", Species::Nautilus),
+        ] {
+            let mut kind = crate::mobs::sensor_scan_tests::kind();
+            let def = Arc::make_mut(&mut kind);
+            def.id = id.into();
+            def.species = species;
+            let mut mob = Mob::new(1, kind, Vec3::ZERO, 0.0);
+            mob.extra.age = -123;
+            mob.extra.forced_age = 19;
+            mob.extra.age_locked = true;
+            let raw = Tag::compound([
+                ("Age", Tag::Int(37)),
+                ("ForcedAge", Tag::Int(99)),
+                ("AgeLocked", Tag::Byte(0)),
+                ("audit:unrelated", Tag::Int(7)),
+            ]);
+            for base in [None, Some(&raw)] {
+                let saved = mob_to_nbt(&mob, [0; 4], base, None);
+                for (key, expected) in [
+                    ("Age", Tag::Int(-123)),
+                    ("ForcedAge", Tag::Int(19)),
+                    ("AgeLocked", Tag::Byte(1)),
+                ] {
+                    if species == Species::ZombieNautilus {
+                        assert!(saved.get(key).is_none(), "{id}: {key}");
+                    } else {
+                        assert_eq!(saved.get(key), Some(&expected), "{id}: {key}");
+                    }
+                }
+                if base.is_some() {
+                    assert_eq!(saved.get("audit:unrelated"), Some(&Tag::Int(7)));
+                }
+            }
+        }
+    }
 
     /// A mount keeps its body armour and a helmet (say
     /// `/item replace entity <horse> armor.head with minecraft:iron_helmet`)
