@@ -1006,6 +1006,9 @@ impl Launcher {
                     Err(e @ (Error::ClaimClosed | Error::SignedOut)) => {
                         // The window moved or the session ended: ask the service where it
                         // stands now.
+                        if let Some(w) = this.wardrobe.as_mut() {
+                            w.claim_refused();
+                        }
                         this.open_wardrobe(cx);
                         if let Some(w) = this.wardrobe.as_mut() {
                             w.toast = Some((e.message(), Instant::now()));

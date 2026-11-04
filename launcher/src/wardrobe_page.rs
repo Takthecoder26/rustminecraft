@@ -68,6 +68,18 @@ pub(super) struct Wardrobe {
     toast: Option<(String, Instant)>,
 }
 
+impl Wardrobe {
+    /// A trip is out for this account: a visit leaves it to answer instead of starting another.
+    fn on_trip(&self, uuid: &str) -> bool {
+        self.uuid == uuid && self.busy
+    }
+
+    /// The service refused the claim: that trip is over, so asking again isn't turned away.
+    fn claim_refused(&mut self) {
+        self.busy = false;
+    }
+}
+
 /// What a background trip to the service brings back.
 struct Trip {
     saved: Saved,
@@ -228,7 +240,7 @@ impl Launcher {
         if self
             .wardrobe
             .as_ref()
-            .is_some_and(|w| w.uuid == account.uuid && w.busy)
+            .is_some_and(|w| w.on_trip(&account.uuid))
         {
             return;
         }
@@ -337,6 +349,11 @@ impl Launcher {
         let Some(w) = self.wardrobe.as_mut() else {
             return;
         };
+        Self::wardrobe_landed(w, trip, done);
+        self.restyle = true;
+    }
+
+    fn wardrobe_landed(w: &mut Wardrobe, trip: Trip, done: Option<String>) {
         w.busy = false;
         if !trip.items.is_empty() {
             w.items = trip.items;
@@ -370,8 +387,11 @@ impl Launcher {
             }
             (_, None) => None,
         };
-        w.toast = said.map(|s| (s, Instant::now()));
-        self.restyle = true;
+        // With nothing to say, a line already showing stays: a refused claim's reason outlives
+        // the trip it starts.
+        if let Some(s) = said {
+            w.toast = Some((s, Instant::now()));
+        }
     }
 
     /// Wear `item` in `slot` (None: nothing there), or turn Show my cosmetics on or off: at once
@@ -1132,5 +1152,63 @@ impl Launcher {
                     ..prefs
                 })),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mid-claim, as `shop_claim` leaves it.
+    fn claiming() -> Wardrobe {
+        Wardrobe {
+            uuid: "me".into(),
+            saved: Saved::default(),
+            items: HashMap::new(),
+            session: None,
+            skin: None,
+            status: Status::Ready,
+            busy: true,
+            slot: "head",
+            turn: 0,
+            seen: None,
+            toast: None,
+        }
+    }
+
+    /// The re-ask comes back with nothing to say.
+    fn answered() -> Trip {
+        Trip {
+            saved: Saved::default(),
+            items: HashMap::new(),
+            session: None,
+            result: Ok(()),
+        }
+    }
+
+    #[test]
+    fn a_refused_claim_frees_the_wardrobe_and_its_reason_outlives_the_re_ask() {
+        let mut w = claiming();
+        assert!(w.on_trip("me"), "a visit mid-claim waits for the answer");
+        w.claim_refused();
+        assert!(!w.on_trip("me"), "the re-ask has to get past the guard");
+
+        // The re-ask is out, with the reason on the Wardrobe it left.
+        w.busy = true;
+        let reason = ("Refused".to_owned(), Instant::now());
+        w.toast = Some(reason.clone());
+        Launcher::wardrobe_landed(&mut w, answered(), None);
+
+        assert!(!w.busy, "Claim and Try again work again");
+        // The same line and the same clock: it still goes after its usual time.
+        assert_eq!(w.toast, Some(reason));
+    }
+
+    #[test]
+    fn a_finished_change_replaces_the_line_showing() {
+        let mut w = claiming();
+        w.toast = Some(("Old".to_owned(), Instant::now()));
+        Launcher::wardrobe_landed(&mut w, answered(), Some("Equipped.".to_owned()));
+        assert_eq!(w.toast.map(|(s, _)| s).as_deref(), Some("Equipped."));
     }
 }
