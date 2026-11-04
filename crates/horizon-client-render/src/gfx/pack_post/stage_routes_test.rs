@@ -282,6 +282,7 @@ fn entity_routes(specialized: bool, ordering: &str, deferred: bool) {
         &vertices,
         &spans,
         [0.; 4],
+        [0.; 4],
         &mut rest,
         None,
     );
