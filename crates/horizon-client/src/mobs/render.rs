@@ -1446,16 +1446,6 @@ fn draw_normals(
 }
 /// A part's matrix under `base` for its pose (`ModelPart.translateAndRotate`
 /// and its scale), as `draw` and the GPU path (`super::skin`) both use it.
-pub(super) fn posed(base: glam::Mat4, p: [f32; 9]) -> glam::Mat4 {
-    base * glam::Mat4::from_translation(glam::Vec3::new(p[0], p[1], p[2]) / 16.0)
-        * glam::Mat4::from_quat(glam::Quat::from_euler(
-            glam::EulerRot::ZYX,
-            p[5],
-            p[4],
-            p[3],
-        ))
-        * glam::Mat4::from_scale(glam::Vec3::new(p[6], p[7], p[8]))
-}
 /// `draw_scrolled` through the GPU path when the mob takes it (`skin`), on
 /// the CPU otherwise.
 #[allow(clippy::too_many_arguments)]
