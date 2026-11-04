@@ -627,7 +627,7 @@ impl Game<'_> {
             state: None,
             at,
             spread,
-            speed,
+            speed: [speed; 3],
             count: count as i32,
             randomization: 0,
         });
@@ -876,6 +876,7 @@ impl Game<'_> {
                 h.velocity = Vec3::ZERO;
             }
         }
+        self.entity_powder_snow_particles(h.previous, h.position, h.bounds(), h.velocity, false);
         h.velocity = Vec3::new(
             h.velocity.x * 0.92,
             h.velocity.y * 0.92,

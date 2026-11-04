@@ -337,12 +337,58 @@ impl<'a> PlayerDirectory<'a> {
             |at, targeting, bound| self.choose(owner, at, targeting, bound),
         )
     }
+    /// A controlling rider is independent of the player selected as an AI target.
+    pub fn controlling_movement(&self, mob: &Mob) -> Option<Vec3> {
+        if !super::equine::controlled(mob) {
+            return None;
+        }
+        self.host
+            .filter(|player| player.riding_vehicle == Some(mob.id))
+            .or_else(|| {
+                self.guests
+                    .iter()
+                    .map(|(_, player)| player)
+                    .find(|player| player.riding_vehicle == Some(mob.id))
+            })
+            .map(|player| player.velocity)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{sensor_scan_tests::kind, world::test_player};
     use super::*;
+
+    #[test]
+    fn controlling_rider_is_found_across_regions_with_host_precedence() {
+        let mut kind = kind();
+        std::sync::Arc::make_mut(&mut kind).species = Species::Horse;
+        let mut mount = Mob::new(42, kind, Vec3::ZERO, 0.0);
+        mount.rider = Some(Default::default());
+        mount.extra.saddled = true;
+        let mut host = test_player(Vec3::ZERO);
+        host.velocity = Vec3::new(0.1, 0.0, 0.0);
+        let near = test_player(Vec3::ZERO);
+        let mut rider = test_player(Vec3::new(8192.0, 0.0, 0.0));
+        rider.riding_vehicle = Some(mount.id);
+        rider.velocity = Vec3::new(0.3, 0.0, 0.0);
+        let guests = [(1, near), (2, rider)];
+        assert_eq!(
+            PlayerDirectory::new(Some(&host), &guests).controlling_movement(&mount),
+            Some(Vec3::new(0.3, 0.0, 0.0))
+        );
+        host.riding_vehicle = Some(mount.id);
+        assert_eq!(
+            PlayerDirectory::new(Some(&host), &guests).controlling_movement(&mount),
+            Some(Vec3::new(0.1, 0.0, 0.0))
+        );
+        mount.extra.saddled = false;
+        assert!(
+            PlayerDirectory::new(Some(&host), &guests)
+                .controlling_movement(&mount)
+                .is_none()
+        );
+    }
 
     #[test]
     fn indexed_selection_matches_ordered_scan_across_regions_and_modes() {

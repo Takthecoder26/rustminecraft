@@ -2283,7 +2283,7 @@ impl Game<'_> {
     /// The authoritative server tick's phases: `ServerTickStart` before any
     /// level is ticked (NeoForge's `ServerTickEvent.Pre`), `ServerTickEnd`
     /// after the last (`.Post`). Read blocks with `native_server_block`, by
-    /// dimension: which level `self.world` holds here is not defined. A paused
+    /// dimension: which level `self.simulation.world` holds here is not defined. A paused
     /// pass fires nothing; a frozen world carries `world_running` false except
     /// during a requested step.
     pub(super) fn native_server_tick(
@@ -7989,7 +7989,7 @@ impl GameLevel<'_> {
                 state,
                 at,
                 spread,
-                speed,
+                speed: [speed; 3],
                 count,
                 randomization: 0,
             });
@@ -10621,6 +10621,8 @@ mod tests {
         let hunger_hooks = free_hooks(include_str!("../hunger.rs"));
         let landing_hooks = free_hooks(include_str!("../landing.rs"));
         let motion_hooks = free_hooks(include_str!("../motion.rs"));
+        // The chat relay's (`horizon_client_lib::lan::hub::chat`).
+        let chat_hooks = free_hooks(include_str!("../lan/hub/chat.rs"));
         let declared: BTreeSet<_> = section
             .lines()
             .chain(level_section.lines())
@@ -10639,6 +10641,7 @@ mod tests {
             .chain(hunger_hooks.iter().copied())
             .chain(landing_hooks.iter().copied())
             .chain(motion_hooks.iter().copied())
+            .chain(chat_hooks.iter().copied())
             .collect();
         let mut names = BTreeSet::new();
         let mut contracts = BTreeSet::new();
@@ -10666,6 +10669,8 @@ mod tests {
                 format!("horizon_client_lib::landing::native_{name}")
             } else if motion_hooks.contains(name) {
                 format!("horizon_client_lib::motion::native_{name}")
+            } else if chat_hooks.contains(name) {
+                format!("horizon_client_lib::lan::hub::chat::native_{name}")
             } else if menu_hooks.contains(name) {
                 // menu.rs compiles into horizon-client-lib (#5446's
                 // split): horizon-mixins resolves the crate by its package.

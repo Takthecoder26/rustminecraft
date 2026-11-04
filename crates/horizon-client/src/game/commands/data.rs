@@ -494,9 +494,15 @@ impl Game<'_> {
                     .get(&key)
                     .ok_or_else(|| err("commands.data.block.invalid", &[]))?;
                 // BlockEntity.saveWithFullMetadata: no chunk-only keepPacked,
-                // and the lock the model does not hold.
+                // and the lock and custom name the model does not hold.
                 let mut tag =
                     save::block_entity_data(key, e, &name, self.simulation.world.block_lock(key));
+                if let (Some(custom), Tag::Compound(map)) =
+                    (self.simulation.world.block_names.get(&key), &mut tag)
+                {
+                    map.entry("CustomName".into())
+                        .or_insert_with(|| Tag::String(custom.as_str().into()));
+                }
                 self.restore_loot_table(key, &mut tag);
                 Ok(tag)
             }
@@ -510,6 +516,7 @@ impl Game<'_> {
                 let key = (p[0], p[1], p[2]);
                 if let Some((_, mut new)) = save::decode_block_entity(&tag) {
                     self.take_loot_table(key, &tag, &mut new);
+                    self.load_block_name(key, &new, &tag);
                     self.simulation.world.block_entities.insert(key, new);
                     self.simulation.world.set_block_lock(key, &tag);
                     self.update_spawner_display(key);

@@ -879,6 +879,16 @@ impl Game<'_> {
                 self.armor_stand_location_effects(i, true);
             }
             self.armor_stand_turtle_eggs(i, landed)?;
+            let a = &self.simulation.armor_stands[i];
+            if !a.marker && !a.no_gravity {
+                self.entity_powder_snow_particles(
+                    a.previous,
+                    a.position,
+                    a.bounds(),
+                    a.velocity,
+                    true,
+                );
+            }
             let a = &mut self.simulation.armor_stands[i];
             if !a.environment_tick(
                 &self.simulation.world,

@@ -1554,15 +1554,15 @@ mod join_order_tests {
             EntityLists {
                 mobs: &[],
                 dropped: &[],
-                boats: &self.boats,
+                boats: &self.simulation.boats,
                 carts: &[],
                 armor_stands: &self.stands,
                 tnts: &[],
                 falling: &[],
                 orbs: &[],
                 projectiles: &[],
-                rockets: &self.rockets,
-                tridents: &self.tridents,
+                rockets: &self.simulation.rockets,
+                tridents: &self.simulation.tridents,
             }
         }
         fn walk(&self) -> Result<Vec<EntityHandle>, JoinOrderError> {
@@ -1604,14 +1604,19 @@ mod join_order_tests {
             self.stands.push(ArmorStand::new(id, at(), 0.0));
         }
         fn trident(&mut self, id: u32) {
-            self.tridents
+            self.simulation
+                .tridents
                 .push(ThrownTrident::remote(id, at(), 0.0, 0.0));
         }
         fn rocket(&mut self, id: u32) {
-            self.rockets.push(Rocket::remote(id, at(), Vec3::ZERO));
+            self.simulation
+                .rockets
+                .push(Rocket::remote(id, at(), Vec3::ZERO));
         }
         fn boat(&mut self, id: u32) {
-            self.boats.push(Boat::new(id, "oak".into(), at(), 0.0));
+            self.simulation
+                .boats
+                .push(Boat::new(id, "oak".into(), at(), 0.0));
         }
     }
 

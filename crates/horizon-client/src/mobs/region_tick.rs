@@ -12,6 +12,7 @@ pub struct TickResources<'a> {
     pub collision: &'a BlockCollisionRegistry<'a>,
     pub data: &'a MobData,
     pub player: Option<PlayerView>,
+    pub controlling_player_movement: Option<Vec3>,
     pub nearest_player: Option<Vec3>,
     pub dragon: Option<(u32, TargetInfo)>,
     pub leash_boats: &'a [(u32, leash::HolderState)],
@@ -49,6 +50,7 @@ impl<'a> TickResources<'a> {
             collision: world.collision,
             data: world.data,
             player: world.player.clone(),
+            controlling_player_movement: world.controlling_player_movement,
             nearest_player: world.nearest_player,
             dragon: world.dragon,
             leash_boats: world.leash_boats,
@@ -95,6 +97,7 @@ impl<'a> TickResources<'a> {
             collision: self.collision,
             data: self.data,
             player: self.player.clone(),
+            controlling_player_movement: self.controlling_player_movement,
             nearest_player: self.nearest_player,
             dragon: self.dragon,
             leash_boats: self.leash_boats,
@@ -224,6 +227,7 @@ impl RegionTick<'_> {
                 world.player = conn
                     .and_then(|conn| self.players.guest(conn).cloned())
                     .or_else(|| self.resources.player.clone());
+                world.controlling_player_movement = self.players.controlling_movement(&mob);
                 world.nearest_player = context.nearest_player;
                 world.difficulty = context.difficulty;
                 mob.tick_with_order(&world, &mut random, &mut events, context.section_order)
