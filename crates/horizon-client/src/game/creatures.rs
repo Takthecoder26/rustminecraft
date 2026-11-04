@@ -883,34 +883,24 @@ impl Game<'_> {
     }
     /// `ServerLevel.getCurrentDifficultyAt`.
     pub(super) fn local_difficulty(&self, at: [f64; 3]) -> spawning::LocalDifficulty {
-        use horizon_world::food::Difficulty;
-        let base = match self.simulation.world.health_rules.difficulty {
-            Difficulty::Peaceful => 0,
-            Difficulty::Easy => 1,
-            Difficulty::Normal => 2,
-            Difficulty::Hard => 3,
-        };
-        let key = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
-        let (inhabited, moon) = if self.simulation.world.chunks.contains_key(&key) {
-            let phase = self
-                .simulation
-                .world
-                .day_time
-                .div_euclid(24000)
-                .rem_euclid(8) as usize;
-            (
-                self.simulation
-                    .world
-                    .inhabited
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(0),
-                spawning::MOON_BRIGHTNESS[phase],
-            )
-        } else {
-            (0, 0.0)
-        };
-        spawning::LocalDifficulty::new(base, self.simulation.world.day_time, inhabited, moon)
+        local_difficulty_in(&self.simulation.world, at)
+    }
+    /// The list slots of the mobs `pick` chooses, in order. Most scans find
+    /// next to nothing, and a walk costs a cache miss per mob: the region
+    /// workers take that when this level has them.
+    pub(super) fn mob_slots(&self, pick: impl Fn(&Mob) -> bool + Send + Sync) -> Vec<usize> {
+        let mobs = &self.simulation.mobs;
+        match self
+            .simulation_server
+            .executor(self.simulation.regions.regions().len(), mobs.len())
+        {
+            Some(executor) => executor.slots(mobs, pick),
+            None => mobs
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, m)| pick(m).then_some(slot))
+                .collect(),
+        }
     }
     /// Generation's animals for the chunks generated since, once lit: chunk
     /// generation places them whether the level ticks or not.
@@ -975,11 +965,9 @@ impl Game<'_> {
         // LivingEntity.die runs when the killing blow lands: mobs killed
         // since the last tick (by the player, explosions...) die first.
         let killed: Vec<Mob> = self
-            .simulation
-            .mobs
-            .iter()
-            .filter(|m| !m.alive() && !m.removed && !self.simulation.died.contains(&m.id))
-            .cloned()
+            .mob_slots(|m| !m.alive() && !m.removed && !self.simulation.died.contains(&m.id))
+            .into_iter()
+            .map(|slot| self.simulation.mobs[slot].clone())
             .collect();
         for m in killed {
             self.simulation.died.insert(m.id);
@@ -1022,7 +1010,7 @@ impl Game<'_> {
             .simulation_server
             .executor(self.simulation.regions.regions().len(), mob_count)
         {
-            Some(executor) => executor.map(&self.simulation.mobs, |m| seen(m, uuid)),
+            Some(executor) => executor.map(&self.simulation.mobs, |_, m| seen(m, uuid)),
             None => self.simulation.mobs.iter().map(|m| seen(m, uuid)).collect(),
         };
         let species_index = horizon_client::mobs::snapshot::SpeciesIndex::new(&snapshot);
@@ -1063,6 +1051,7 @@ impl Game<'_> {
         // The mobs whose bodies go this tick: (id, feet, width, height).
         let mut gone = Vec::new();
         let level_random;
+        let mut retired = Vec::new();
         {
             // The level random, lent to the mobs (brain behaviours draw from
             // it) and taken back after their ticks.
@@ -1119,22 +1108,34 @@ impl Game<'_> {
                 use horizon_client::mobs::region_tick::{
                     MobContext, RegionInput, RegionTick, TickResources, TickRound,
                 };
-                let contexts: Vec<_> = mobs
-                    .iter()
-                    .enumerate()
-                    .map(|(slot, mob)| MobContext {
-                        bound_player: bindings.get(&mob.id).copied(),
-                        nearest_player: nearest
-                            .nearest(mob.position.x, mob.position.y, mob.position.z)
-                            .map(|player| player.position),
-                        section_order: section_base.wrapping_add(slot as u64),
-                        difficulty: self.local_difficulty([
-                            mob.position.x,
-                            mob.position.y,
-                            mob.position.z,
-                        ]),
+                let world = &self.simulation.world;
+                // Each mob's context, whether its tick is due, and whether a
+                // region's run of mobs can go on past it.
+                let (contexts, gates): (Vec<_>, Vec<(bool, bool)>) = executor
+                    .map(&mobs, |slot, mob| {
+                        let (x, z) = (mob.position.x.floor() as i32, mob.position.z.floor() as i32);
+                        (
+                            MobContext {
+                                bound_player: bindings.get(&mob.id).copied(),
+                                nearest_player: nearest
+                                    .nearest(mob.position.x, mob.position.y, mob.position.z)
+                                    .map(|player| player.position),
+                                section_order: section_base.wrapping_add(slot as u64),
+                                difficulty: local_difficulty_in(
+                                    world,
+                                    [mob.position.x, mob.position.y, mob.position.z],
+                                ),
+                            },
+                            (
+                                world.loaded(x, z) && ticking(x, z),
+                                !horizon_client::mobs::raider::is_raider(mob.species())
+                                    && mob.extra.raider.is_none(),
+                            ),
+                        )
                     })
-                    .collect();
+                    .into_iter()
+                    .unzip();
+                let none_canceled = round.none_canceled();
                 let regions = self.simulation.regions.regions();
                 let mut owners = vec![regions.len(); mobs.len()];
                 let inputs: Vec<_> = regions
@@ -1149,17 +1150,9 @@ impl Game<'_> {
                             .iter()
                             .copied()
                             .filter(|&slot| {
-                                let m = &mobs[slot];
-                                let (x, z) =
-                                    (m.position.x.floor() as i32, m.position.z.floor() as i32);
-                                self.simulation.world.loaded(x, z)
-                                    && ticking(x, z)
-                                    && !round.canceled(m.id)
+                                gates[slot].0 && (none_canceled || !round.canceled(mobs[slot].id))
                             })
-                            .take_while(|&slot| {
-                                !horizon_client::mobs::raider::is_raider(mobs[slot].species())
-                                    && mobs[slot].extra.raider.is_none()
-                            })
+                            .take_while(|&slot| gates[slot].1)
                             .map(|slot| (slot, &mobs[slot]))
                             .collect();
                         RegionInput {
@@ -1364,8 +1357,8 @@ impl Game<'_> {
                     transaction.immediate_brain_write(i, &immediate, &index);
                 }
             }
-            if let (Some(transaction), Some(executor)) = (region_round.as_mut(), region_executor) {
-                executor.retire(transaction.take_predictions());
+            if let Some(transaction) = region_round.as_mut() {
+                retired = transaction.take_predictions();
             }
             laps.lap("mob_walk");
             let mut flags = keep.into_iter();
@@ -1407,6 +1400,7 @@ impl Game<'_> {
             self.death_poof(at, width, height);
         }
         laps.lap("mob_retain");
+        self.simulation_server.retiring.extend(retired);
         self.sync_riders();
         self.tick_skeleton_traps();
         self.tick_apparition();
@@ -1448,8 +1442,8 @@ impl Game<'_> {
         self.sulfur_cube_power_priming();
         // Hurt and death sounds of damage dealt outside the mob ticks.
         let mut queued = Vec::new();
-        for m in &mut self.simulation.mobs {
-            queued.append(&mut m.outbox);
+        for slot in self.mob_slots(|m| !m.outbox.is_empty()) {
+            queued.append(&mut self.simulation.mobs[slot].outbox);
         }
         self.handle_mob_events(queued)?;
         laps.lap("mob_rest");
@@ -7930,6 +7924,31 @@ fn mob_effect_instance(
     let mut instance = horizon_client::effects::EffectInstance::new(id, ticks, amplifier);
     instance.ambient = ambient;
     Some(instance)
+}
+
+/// `Level.getCurrentDifficultyAt`, from the level alone.
+fn local_difficulty_in(
+    world: &horizon_client::world::World,
+    at: [f64; 3],
+) -> spawning::LocalDifficulty {
+    use horizon_world::food::Difficulty;
+    let base = match world.health_rules.difficulty {
+        Difficulty::Peaceful => 0,
+        Difficulty::Easy => 1,
+        Difficulty::Normal => 2,
+        Difficulty::Hard => 3,
+    };
+    let key = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
+    let (inhabited, moon) = if world.chunks.contains_key(&key) {
+        let phase = world.day_time.div_euclid(24000).rem_euclid(8) as usize;
+        (
+            world.inhabited.get(&key).copied().unwrap_or(0),
+            spawning::MOON_BRIGHTNESS[phase],
+        )
+    } else {
+        (0, 0.0)
+    };
+    spawning::LocalDifficulty::new(base, world.day_time, inhabited, moon)
 }
 
 #[cfg(test)]

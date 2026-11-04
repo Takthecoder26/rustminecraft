@@ -61,10 +61,20 @@ impl Game<'_> {
     /// and let go when the vehicle dies or is gone.
     pub(super) fn sync_riders(&mut self) {
         // Entity.baseTick.
-        for m in &mut self.simulation.mobs {
-            if m.extra.boarding_cooldown > 0 {
-                m.extra.boarding_cooldown -= 1;
+        let mut seated = false;
+        for slot in self.mob_slots(|m| {
+            m.extra.boarding_cooldown > 0 || m.extra.mount.is_some() || m.extra.rider.is_some()
+        }) {
+            let extra = &mut self.simulation.mobs[slot].extra;
+            if extra.boarding_cooldown > 0 {
+                extra.boarding_cooldown -= 1;
             }
+            seated |= extra.mount.is_some() || extra.rider.is_some();
+        }
+        // Nobody rides or carries anyone: nothing below would change a mob.
+        if !seated {
+            self.position_riders();
+            return;
         }
         let boats: std::collections::HashSet<u32> =
             self.simulation.boats.iter().map(|b| b.id).collect();
@@ -119,16 +129,20 @@ impl Game<'_> {
         self.seat_boat_mobs();
         self.seat_cart_mobs();
         self.seat_tnt_mobs();
-        let index: HashMap<u32, usize> = self
-            .simulation
-            .mobs
-            .iter()
-            .enumerate()
-            .map(|(i, m)| (m.id, i))
-            .collect();
+        let mounted = self.mob_slots(|m| m.extra.mount.is_some());
+        let index: HashMap<u32, usize> = if mounted.is_empty() {
+            HashMap::new()
+        } else {
+            self.simulation
+                .mobs
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (m.id, i))
+                .collect()
+        };
         // Riders of riders settle over a few passes.
         for pass in 0..3 {
-            for i in 0..self.simulation.mobs.len() {
+            for &i in &mounted {
                 let Some(v) = self.simulation.mobs[i].extra.mount else {
                     continue;
                 };

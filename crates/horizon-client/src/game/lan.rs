@@ -139,6 +139,9 @@ impl SyncPreload {
     }
 }
 
+/// `hurt_time`, whether dead, and the swing time each mob had at a flush.
+type MobFlushState = horizon_client::fast_hash::FxHashMap<u32, (i32, bool, Option<i32>)>;
+
 /// The settings of the open world (WorldOptionsScreen's multiplayer section).
 #[derive(Clone, Copy, Debug)]
 pub struct LanSettings {
@@ -157,7 +160,9 @@ pub(super) struct LanHost {
     pub broken: Vec<[f64; 3]>,
     /// Hurt time, death and swing time (while swinging) of the mobs guests
     /// see; the players' hurt time by entity id.
-    mob_state: HashMap<super::Dim, HashMap<u32, (i32, bool, Option<i32>)>>,
+    mob_state: HashMap<super::Dim, MobFlushState>,
+    /// The last flush's table, kept to fill the next one without allocating.
+    mob_state_spare: MobFlushState,
     /// Each placed guest's pose as the mods last heard it
     /// (`native_entity_pose_change`), by connection.
     pub poses: HashMap<u32, horizon_client::pose::Pose>,
@@ -1391,6 +1396,7 @@ impl Game<'_> {
             play: HashMap::new(),
             broken: Vec::new(),
             mob_state: HashMap::new(),
+            mob_state_spare: MobFlushState::default(),
             poses: HashMap::new(),
             mob_players: Default::default(),
             owner: None,
@@ -1823,10 +1829,9 @@ impl Game<'_> {
     ) {
         out.clear();
         let mobs: Vec<&Mob> = self
-            .simulation
-            .mobs
-            .iter()
-            .filter(|m| !m.removed && m.id > after)
+            .mob_slots(|m| !m.removed && m.id > after)
+            .into_iter()
+            .map(|slot| &self.simulation.mobs[slot])
             .collect();
         let view = MobStates {
             sync: hub.sync_data(),
@@ -2344,12 +2349,11 @@ impl Game<'_> {
         }
         // An animal whose rider left the game (or the level) stops taking
         // its input.
-        for m in &mut self.simulation.mobs {
-            if m.rider.is_some()
-                && self.riding != Some(m.id)
-                && !host.hub.guests.iter().any(|g| g.vehicle == Some(m.id))
-            {
-                m.rider = None;
+        for slot in self.mob_slots(|m| m.rider.is_some()) {
+            let m = &self.simulation.mobs[slot];
+            let id = m.id;
+            if self.riding != Some(id) && !host.hub.guests.iter().any(|g| g.vehicle == Some(id)) {
+                self.simulation.mobs[slot].rider = None;
             }
         }
         // A guest whose file names the vehicle it rode rides it again.
@@ -2389,8 +2393,10 @@ impl Game<'_> {
                 }
             }
             // ServerEntity.sendChanges clears needsSync once it has looked.
-            for m in &mut self.simulation.mobs {
-                m.needs_sync = false;
+            // Most have nothing to clear, and a write would pull the mob's
+            // memory away from the worker that clones it next tick.
+            for slot in self.mob_slots(|m| m.needs_sync) {
+                self.simulation.mobs[slot].needs_sync = false;
             }
             for p in &mut self.simulation.projectiles {
                 p.needs_sync = false;
@@ -2416,10 +2422,22 @@ impl Game<'_> {
             // An entity that left the level since the last tick (a snowball
             // that hit) is dropped by the tracker below: its event goes out
             // first, as `Level.broadcastEntityEvent` precedes the discard.
+            let mut absent: horizon_client::fast_hash::FxHashSet<i32> = self
+                .simulation
+                .lan_entity_events
+                .iter()
+                .map(|(id, ..)| *id)
+                .collect();
+            for e in entities {
+                if absent.is_empty() {
+                    break;
+                }
+                absent.remove(&e.id);
+            }
             let (gone, later): (Vec<_>, Vec<_>) =
                 std::mem::take(&mut self.simulation.lan_entity_events)
                     .into_iter()
-                    .partition(|(id, ..)| !entities.iter().any(|e| e.id == *id));
+                    .partition(|(id, ..)| absent.contains(id));
             self.simulation.lan_entity_events = later;
             for (id, event, at) in gone {
                 host.hub.entity_event(id, event, at);
@@ -2908,14 +2926,12 @@ impl Game<'_> {
             return;
         }
         // Hurt and death animations of mobs.
-        let mut seen = HashMap::new();
+        let last = host.mob_state.remove(&self.dim).unwrap_or_default();
+        let mut seen = std::mem::take(&mut host.mob_state_spare);
+        seen.clear();
         for m in &self.simulation.mobs {
             let dead = !m.alive();
-            let old = host
-                .mob_state
-                .get(&self.dim)
-                .and_then(|s| s.get(&m.id))
-                .copied();
+            let old = last.get(&m.id).copied();
             let at = [m.position.x, m.position.y, m.position.z];
             // LivingEntity.hurtServer: a hurt that restarted the hurt time.
             if m.hurt_time > old.map_or(0, |o| o.0)
@@ -2964,11 +2980,7 @@ impl Game<'_> {
         if let Some(d) = self.simulation.dragon.as_ref().filter(|d| d.id != 0) {
             let id = d.id;
             let dead = !d.alive();
-            let old = host
-                .mob_state
-                .get(&self.dim)
-                .and_then(|s| s.get(&id))
-                .copied();
+            let old = last.get(&id).copied();
             let at = [d.position.x, d.position.y, d.position.z];
             if d.hurt_time > old.map_or(0, |o| o.0) && !dead {
                 let (kind, cause, direct) =
@@ -2978,6 +2990,7 @@ impl Game<'_> {
             seen.insert(id, (d.hurt_time, dead, None));
         }
         host.mob_state.insert(self.dim, seen);
+        host.mob_state_spare = last;
         // Level.broadcastEntityEvent(player, 2) of a spear's stab.
         for attacker in kinetic_hits {
             let hit = attacker

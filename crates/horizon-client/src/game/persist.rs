@@ -27,7 +27,7 @@ use std::{
 pub struct EntityMemory {
     /// UUIDs of entities by Horizon entity ID: the one each was loaded with,
     /// or made up once something needed it (a save, a native mod's attachment).
-    pub(super) uuids: HashMap<u32, [i32; 4]>,
+    pub(super) uuids: horizon_client::fast_hash::FxHashMap<u32, [i32; 4]>,
     /// The compound each mob or item entity was loaded with.
     pub(super) raw: HashMap<u32, Tag>,
     /// Entities of types Horizon does not simulate, kept per chunk and

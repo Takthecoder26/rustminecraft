@@ -139,7 +139,8 @@ impl Game<'_> {
         for &(vehicle, guest) in guests {
             riding.add(vehicle as i32, guest);
         }
-        for m in self.simulation.mobs.iter().filter(|m| !m.removed) {
+        for slot in self.mob_slots(|m| !m.removed && m.extra.mount.is_some()) {
+            let m = &self.simulation.mobs[slot];
             if let Some(vehicle) = m.extra.mount {
                 riding.add(vehicle as i32, m.id as i32);
             }
@@ -506,11 +507,9 @@ impl Game<'_> {
         // LeashFenceKnotEntity: one per fence post with a lead on it
         // (`notifyLeasheeRemoved` discards it once the last lead is gone).
         let knots: Vec<[i32; 3]> = self
-            .simulation
-            .mobs
-            .iter()
-            .filter(|m| !m.removed)
-            .filter_map(|m| match m.extra.leash {
+            .mob_slots(|m| !m.removed && m.extra.leash.is_some())
+            .into_iter()
+            .filter_map(|slot| match self.simulation.mobs[slot].extra.leash {
                 Some(horizon_client::mobs::leash::Holder::Knot(p)) => Some(p),
                 _ => None,
             })

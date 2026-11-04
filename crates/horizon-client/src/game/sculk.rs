@@ -1047,6 +1047,10 @@ impl Game<'_> {
     /// them is heard (or seen) every tick.
     fn sculk_step_on(&mut self) {
         self.sculk_step_on_player();
+        // `sculk_stand_on` only asks about the blocks in the index.
+        if self.sculk.index.set.is_empty() {
+            return;
+        }
         let mut standing: Vec<(Who, [f64; 3])> = Vec::new();
         for m in &self.simulation.mobs {
             if m.alive() && m.on_ground {
@@ -1833,11 +1837,10 @@ impl Game<'_> {
             u32,
             bool,
         )> = self
-            .simulation
-            .mobs
-            .iter()
-            .filter(|m| m.alive())
-            .map(|m| {
+            .mob_slots(|m| m.alive())
+            .into_iter()
+            .map(|slot| {
+                let m = &self.simulation.mobs[slot];
                 (
                     m.id,
                     [m.position.x, m.position.y, m.position.z],
@@ -1856,7 +1859,7 @@ impl Game<'_> {
                 self.step_on_redstone_ore(at, false, false);
             }
             // A mob first seen already riding raised its event when it spawned.
-            let seen = self.sculk.steps.contains_key(&Who::Mob(id));
+            let seen = vehicle.is_some() && self.sculk.steps.contains_key(&Who::Mob(id));
             self.mount_events(Who::Mob(id), vehicle, seen);
             let emits = !matches!(species, Species::Shulker);
             if emits {
@@ -1942,9 +1945,10 @@ impl Game<'_> {
             (Some(id), Some(at)) => {
                 self.sculk.mounts.insert(who, (id, at));
             }
-            _ => {
+            _ if last.is_some() => {
                 self.sculk.mounts.remove(&who);
             }
+            _ => {}
         }
     }
     fn in_water_at(&self, at: [f64; 3]) -> bool {

@@ -131,6 +131,9 @@ pub(super) struct ServerCoordination {
     execution: Execution,
     workers: usize,
     executor: std::sync::OnceLock<Option<horizon_client::mobs::region_tick::RegionExecutor>>,
+    /// This tick's replaced mobs, freed once the tick's phases that use the
+    /// workers are over (`RegionExecutor::retire`).
+    pub retiring: Vec<Vec<horizon_client::mobs::region_tick::TickPrediction>>,
     pub stats: TickStats,
     log_stats: bool,
 }
@@ -156,6 +159,7 @@ impl Default for ServerCoordination {
                 .unwrap_or_else(horizon_threads::worker_count)
                 .clamp(1, 8),
             executor: Default::default(),
+            retiring: Vec::new(),
             stats: Default::default(),
             log_stats: std::env::var_os("HORIZON_REGION_METRICS").is_some(),
         }
@@ -193,6 +197,17 @@ impl ServerCoordination {
                 }
             })
             .as_ref()
+    }
+    /// Hands this tick's replaced mobs to the workers to free.
+    pub fn retire_predictions(&mut self) {
+        if self.retiring.is_empty() {
+            return;
+        }
+        let predictions = std::mem::take(&mut self.retiring);
+        match self.executor.get().and_then(Option::as_ref) {
+            Some(executor) => executor.retire(predictions),
+            None => drop(predictions),
+        }
     }
     pub fn publish(&mut self, stats: TickStats) {
         self.stats = stats;

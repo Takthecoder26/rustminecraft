@@ -18,7 +18,7 @@ use horizon_core::{
     random::{LegacyRandom, RandomSource},
 };
 use horizon_world::registry::BlockStateId;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 type Pos = (i32, i32, i32);
 
@@ -34,7 +34,7 @@ pub(super) fn heart_signal(world: &horizon_client::world::World, pos: BlockPos) 
 struct Host<'a> {
     mobs: &'a mut Vec<Mob>,
     added: Vec<Mob>,
-    uuids: &'a mut HashMap<u32, [i32; 4]>,
+    uuids: &'a mut horizon_client::fast_hash::FxHashMap<u32, [i32; 4]>,
     creaking: Option<Arc<MobType>>,
     next_entity: &'a mut u32,
     spawning: bool,

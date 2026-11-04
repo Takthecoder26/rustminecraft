@@ -331,20 +331,43 @@ impl RegionExecutor {
     }
     /// Frees a finished round on the pool: its entries hold the mobs that were
     /// replaced, each with its own allocations, and nothing has to wait for
-    /// them. Runs detached, so it may overlap the coordinator's next phases.
+    /// them. One worker takes it all, so the coordinator's scans still find
+    /// the others free.
     pub fn retire(&self, predictions: Vec<Vec<TickPrediction>>) {
-        use rayon::prelude::*;
         match &self.pool {
-            Some(pool) => pool.spawn(move || predictions.into_par_iter().for_each(drop)),
+            Some(pool) => pool.spawn(move || drop(predictions)),
             None => drop(predictions),
         }
     }
-    /// `f` of every item, in order, on the workers.
-    pub fn map<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Send + Sync) -> Vec<R> {
+    /// `f` of every item and its slot, in order, on the workers.
+    pub fn map<T: Sync, R: Send>(
+        &self,
+        items: &[T],
+        f: impl Fn(usize, &T) -> R + Send + Sync,
+    ) -> Vec<R> {
         use rayon::prelude::*;
+        let each = |(slot, item)| f(slot, item);
         match &self.pool {
-            Some(pool) => pool.install(|| items.par_iter().with_min_len(64).map(f).collect()),
-            None => items.iter().map(f).collect(),
+            Some(pool) => {
+                pool.install(|| items.par_iter().enumerate().with_min_len(64).map(each).collect())
+            }
+            None => items.iter().enumerate().map(each).collect(),
+        }
+    }
+    /// The slots of the items `pick` chooses, in order, on the workers.
+    pub fn slots<T: Sync>(&self, items: &[T], pick: impl Fn(&T) -> bool + Send + Sync) -> Vec<usize> {
+        use rayon::prelude::*;
+        let chosen = |(slot, item)| pick(item).then_some(slot);
+        match &self.pool {
+            Some(pool) => pool.install(|| {
+                items
+                    .par_iter()
+                    .enumerate()
+                    .with_min_len(64)
+                    .filter_map(chosen)
+                    .collect()
+            }),
+            None => items.iter().enumerate().filter_map(chosen).collect(),
         }
     }
     /// `each` for every pair of `targets` and `sources`, with the scratch each
@@ -622,6 +645,16 @@ impl SectionOrder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_pool_keeps_slots_and_results_in_list_order() {
+        let executor = RegionExecutor::new(4).unwrap();
+        let items: Vec<u32> = (0..1000).collect();
+        let sevens: Vec<usize> = (0..1000).step_by(7).collect();
+        assert_eq!(executor.slots(&items, |n| n % 7 == 0), sevens);
+        let doubled: Vec<u32> = (0..1000).map(|n| n * 2).collect();
+        assert_eq!(executor.map(&items, |slot, n| slot as u32 + n), doubled);
+    }
+
     use super::*;
     use crate::fast_hash::FxHashMap;
     use std::sync::Arc;

@@ -622,7 +622,7 @@ impl Game<'_> {
         let mut ids: Vec<(u32, bool)> = Vec::new();
         let tracked = &self.portals.entities;
         for_each_entity!(entity_lists_of!(self), entity => {
-            if entity.portal_size().is_some() && entity.is_vehicle() == vehicles {
+            if entity.is_vehicle() == vehicles && entity.portal_size().is_some() {
                 if entity.portal_from().is_none() {
                     before.insert(entity.id(), entity.position());
                 }
@@ -712,7 +712,7 @@ impl Game<'_> {
         horizon_client::mobs::mob_can_use_portal(m)
             && m.extra.mount.is_none()
             && self.riding != Some(m.id)
-            && (!self.guest_rides(m.id) || self.carries_riders())
+            && (self.carries_riders() || !self.guest_rides(m.id))
     }
     /// `Entity.canUsePortal(false)` for a primed TNT: it carries no mob.
     pub(super) fn tnt_can_use_portal(&self, id: u32) -> bool {

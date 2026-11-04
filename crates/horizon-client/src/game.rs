@@ -7770,6 +7770,7 @@ impl Game<'_> {
         self.native_joins_flush(false, 0);
         self.native_leaves_flush();
         horizon_client::spans::time("tick_lan", || self.tick_lan(false));
+        self.simulation_server.retire_predictions();
         // Everything that has joined has had its spawn packet.
         self.ordered.announced = horizon_client::join_seq::JoinSeq::upcoming();
         self.tick_friends();
