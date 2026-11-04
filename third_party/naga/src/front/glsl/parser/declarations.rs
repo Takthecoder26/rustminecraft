@@ -237,6 +237,15 @@ impl ParsingContext<'_> {
                         ctx.ctx.implicit_conversion(&mut expr, init_meta, scalar)?;
                     }
 
+                    // `vec2[] a = vec2[4](...)`: an unsized array takes its initializer's size.
+                    if let TypeInner::Array {
+                        size: crate::ArraySize::Dynamic,
+                        ..
+                    } = ctx.ctx.module.types[ty].inner
+                    {
+                        ty = ctx.ctx.resolve_type_handle(expr, init_meta)?;
+                    }
+
                     ctx.ctx.is_const = prev_const;
 
                     meta.subsume(init_meta);

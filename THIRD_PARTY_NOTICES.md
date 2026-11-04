@@ -18,6 +18,8 @@ The GLSL frontend also resets the common type for each comma-separated declarato
 variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
+An unsized array declaration with an initializer (`const float[] w = float[3](...)`) takes the
+initializer's size, as GLSL sizes it, instead of staying a runtime-sized array.
 
 ## libmimalloc-sys and mimalloc
 
