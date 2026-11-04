@@ -5039,6 +5039,7 @@ impl Render for Launcher {
             Page::Settings => self.settings_page(cx),
         };
         self.sky.free_replaced(window);
+        self.shop.free_replaced(window);
         // The new page fades in and rises a few pixels, as the website's tabs do (`hzl-pop`).
         let content = div()
             .relative()

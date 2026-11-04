@@ -34,8 +34,21 @@ pub(crate) struct Shop {
     asked: bool,
     /// A redraw for the time left is due.
     ticking: bool,
-    /// Cards' pictures, baked at a window scale.
-    thumbs: HashMap<String, (f32, Arc<RenderImage>)>,
+    /// Cards' pictures, the shown ones only.
+    thumbs: Bakes<Arc<RenderImage>>,
+    /// Name tag styles' marks, for these cards and the Wardrobe's name tag.
+    pub(super) marks: Bakes<Arc<RenderImage>>,
+}
+
+impl Shop {
+    /// Frees the images replaced since the last frame (GPUI keeps them in the sprite atlas until
+    /// they are dropped there).
+    pub(crate) fn free_replaced(&mut self, window: &mut gpui::Window) {
+        let marks = self.marks.drain_replaced();
+        for image in self.thumbs.drain_replaced().chain(marks) {
+            let _ = window.drop_image(image);
+        }
+    }
 }
 
 /// Below this window width the founder panel stacks: its words over its cards.
@@ -242,6 +255,28 @@ fn fit(rgba: &[u8], w: usize, h: usize, side: usize) -> Option<Vec<[u8; 4]>> {
     Some(out)
 }
 
+/// A card's picture: the item alone, three-quarter on (back items from behind), framed to fill the
+/// card's well. `None` when it has nothing to show.
+fn thumb(item: &Item, scale: f32) -> Option<Arc<RenderImage>> {
+    let body = preview::player_model(false);
+    let side = (THUMB * scale) as u32;
+    // Drawn where it sits on a whole body, four times finer than the card, then cut to it.
+    let (wide, tall) = (side * 6, side * 10);
+    let draws = preview::Draw::item(item, &body, 0.0);
+    if draws.is_empty() {
+        return None;
+    }
+    let yaw = if item.slot == horizon_cosmetics::Slot::Back {
+        210.
+    } else {
+        -30.
+    };
+    let image = preview::render(&draws, wide, tall, yaw, 12.);
+    let side = side as usize;
+    let texels = fit(&image.rgba, wide as usize, tall as usize, side)?;
+    Some(art::bake(&texels, side, side, 1. / scale, scale))
+}
+
 /// `e`'s failure as the line to copy: host · what · when.
 fn details(e: &Error) -> String {
     let code = match e {
@@ -373,7 +408,6 @@ impl Launcher {
     /// The Shop tab under `tabs`.
     pub(super) fn shop_page(&mut self, tabs: Div, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        self.shop_bake();
         let head = page_header(
             "Shop",
             "Things to wear for your player, seen by everyone who plays on Horizon.",
@@ -584,6 +618,7 @@ impl Launcher {
                 )),
             );
         }
+        self.shop_bake(&entries, cx);
         let look = glass_ui::look();
         // The chip over the title, the paragraph, and the line with the time.
         let (badge, said, clock) = match (window, owned) {
@@ -847,7 +882,7 @@ impl Launcher {
         };
         let picture: AnyElement = if e.slot == "name_tag" {
             self.tag_preview(e, me)
-        } else if let Some((_, image)) = self.shop.thumbs.get(&e.id) {
+        } else if let Some(image) = self.shop.thumbs.get(&e.id) {
             gpui::img(image.clone())
                 .w(px(THUMB))
                 .h(px(THUMB))
@@ -887,7 +922,7 @@ impl Launcher {
             .as_ref()
             .and_then(|i| i.tag)
             .map(|g| gpui::rgb(u32::from_be_bytes([0, g.line[0], g.line[1], g.line[2]])));
-        let mark = item.as_ref().map(|i| self.wardrobe_mark(i));
+        let mark = item.and_then(|_| self.shop.marks.get(&e.id).cloned());
         let name = me.map_or_else(|| tr("Your name").to_owned(), |m| m.name.clone());
         // Small enough for a 16-character name in a narrow card; a longer one ends in "…".
         div()
@@ -912,39 +947,37 @@ impl Launcher {
             .into_any_element()
     }
 
-    /// Bake the cards' pictures the Wardrobe has the items for: the item alone, three-quarter on
-    /// (back items from behind), framed to fill the card's well.
-    fn shop_bake(&mut self) {
+    /// Get `entries`' pictures ready, those the Wardrobe has the items for: marks here, cards' on
+    /// the background executor, their wells empty until then.
+    fn shop_bake(&mut self, entries: &[Entry], cx: &mut Context<Self>) {
         let scale = self.scale;
         let Some(w) = self.wardrobe.as_ref() else {
             return;
         };
-        let body = preview::player_model(false);
-        let side = (THUMB * scale) as u32;
-        // Drawn where it sits on a whole body, four times finer than the card, then cut to it.
-        let (wide, tall) = (side * 6, side * 10);
-        let mut baked = Vec::new();
-        for (id, item) in &w.items {
-            if self.shop.thumbs.get(id).is_some_and(|(s, _)| *s == scale) {
-                continue;
-            }
-            let draws = preview::Draw::item(item, &body, 0.0);
-            if draws.is_empty() {
-                continue;
-            }
-            let yaw = if item.slot == horizon_cosmetics::Slot::Back {
-                210.
-            } else {
-                -30.
-            };
-            let image = preview::render(&draws, wide, tall, yaw, 12.);
-            let Some(texels) = fit(&image.rgba, wide as usize, tall as usize, side as usize) else {
+        for e in entries {
+            let Some(item) = w.items.get(&e.id) else {
                 continue;
             };
-            let pic = art::bake(&texels, side as usize, side as usize, 1. / scale, scale);
-            baked.push((id.clone(), (scale, pic)));
+            if e.slot == "name_tag" {
+                wardrobe_mark(&mut self.shop.marks, &e.id, item, scale);
+                continue;
+            }
+            if !self.shop.thumbs.start(&e.id, scale) {
+                continue;
+            }
+            let (id, item) = (e.id.clone(), item.clone());
+            let task = cx
+                .background_executor()
+                .spawn(async move { thumb(&item, scale) });
+            cx.spawn(async move |this, cx| {
+                let picture = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.shop.thumbs.finish(&id, scale, picture);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
-        self.shop.thumbs.extend(baked);
     }
 
     /// Draw the time left again in a while, while it shows.
