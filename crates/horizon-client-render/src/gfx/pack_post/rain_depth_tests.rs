@@ -34,7 +34,7 @@ fn pack(property: &str, fallback: bool) -> Post {
         ),
         (
             "final.fsh".to_owned(),
-            "#version 120\nvarying vec2 uv;uniform sampler2D depthtex0;uniform sampler2D depthtex1;uniform sampler2D colortex0;\nvoid main(){gl_FragColor=vec4(texture2D(depthtex0,uv).r,texture2D(depthtex1,uv).r,texture2D(colortex0,uv).b,1.0);}".into(),
+            "#version 120\nvarying vec2 uv;uniform sampler2D depthtex0;uniform sampler2D colortex0;\nvoid main(){gl_FragColor=vec4(texture2D(depthtex0,uv).r,texture2D(colortex0,uv).b,0.0,1.0);}".into(),
         ),
     ] {
         zip.start_file(
@@ -119,7 +119,17 @@ fn weather_depth_writes_and_occlusion_reach_the_rendered_output() {
                 },
             );
             assert!(post.has_weather(), "{:?}", post.notes);
-            assert!(post.notes.is_empty(), "{:?}", post.notes);
+            assert_eq!(
+                post.notes,
+                vec![format!(
+                    "rain and snow draw with {}",
+                    if fallback {
+                        "gbuffers_textured"
+                    } else {
+                        "gbuffers_weather"
+                    }
+                )]
+            );
             for size in [[4, 2], [6, 3]] {
                 for hidden in [false, true] {
                     let color = texture(&gpu.device, size, T::Rgba8Unorm);
@@ -150,7 +160,7 @@ fn weather_depth_writes_and_occlusion_reach_the_rendered_output() {
                         } else {
                             204
                         };
-                        let expected = [expected_depth, 204, if hidden { 32 } else { 102 }, 255];
+                        let expected = [expected_depth, if hidden { 32 } else { 102 }, 0, 255];
                         assert!(
                             got.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 1),
                             "fallback={fallback}, {property:?}, {size:?}, hidden={hidden}, pixel={i}: {got:?}, expected {expected:?}"
