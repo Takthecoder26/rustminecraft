@@ -153,6 +153,9 @@ fn chunk_fade_decodes_visibility_without_moving_or_losing_vertices() {
         assert_ne!(adapter.get_info().device_type, wgpu::DeviceType::Cpu);
     }
     let geometry_supported = adapter.limits().max_bind_groups >= 6;
+    if !geometry_supported {
+        eprintln!("chunk-fade geometry subcontrol skipped: fewer than six bind groups");
+    }
     if std::env::var_os("HORIZON_REQUIRE_CHUNK_FADE_GPU").is_some() {
         assert!(geometry_supported, "geometry control needs six bind groups");
     }
