@@ -626,12 +626,11 @@ impl Sprites {
             .transpose()?;
         let count = frames.len() as u32;
         let layer = u32::try_from(self.native.len())?;
-        let pbr = match name.split_once(':') {
-            Some(_) if labpbr_maps() => {
-                let path = crate::atlas_sources::texture_path(root, name, "textures");
-                ["_n", "_s"].map(|suffix| pbr_map(&path, suffix, count))
-            }
-            _ => [None, None],
+        let pbr = if labpbr_maps() {
+            let path = crate::atlas_sources::texture_path(root, name, "textures");
+            ["_n", "_s"].map(|suffix| pbr_map(&path, suffix, count))
+        } else {
+            [None, None]
         };
         let settings = crate::mipmap::Settings {
             native_size: side,
