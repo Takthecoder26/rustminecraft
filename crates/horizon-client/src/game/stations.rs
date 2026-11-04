@@ -2968,6 +2968,10 @@ impl Game<'_> {
                 }
             }
         }
+        if matches!(self.simulation.world.block_entities.get(&pos), Some(BlockEntity::Brewing(b)) if b.idle())
+        {
+            self.simulation.world.block_entities.sleep(pos);
+        }
         Ok(())
     }
 }

@@ -46,7 +46,8 @@ impl Game<'_> {
         for slot in self.simulation.world.block_entity_tickers().iter().copied() {
             let pos = slot.0;
             // Ticks before this one can remove it (`TickingBlockEntity.isRemoved`).
-            if !self.simulation.world.block_entities.is_live(slot)
+            if self.simulation.world.block_entities.is_asleep(&pos)
+                || !self.simulation.world.block_entities.is_live(slot)
                 || !ticking(pos.0, pos.2)
                 || !self.border.contains(f64::from(pos.0), f64::from(pos.2))
             {
@@ -269,6 +270,10 @@ impl Game<'_> {
             self.campfire_drop(pos, stack);
         }
         let Some(lit) = lit else {
+            if matches!(self.simulation.world.block_entities.get(&pos), Some(BlockEntity::Furnace(f)) if f.idle())
+            {
+                self.simulation.world.block_entities.sleep(pos);
+            }
             return Ok(());
         };
         let state = self.simulation.world.block(pos.0, pos.1, pos.2);

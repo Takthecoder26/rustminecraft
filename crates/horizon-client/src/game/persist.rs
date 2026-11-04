@@ -1345,7 +1345,12 @@ impl Game<'_> {
             let uuid = saved_uuid(&self.simulation.persist, d.id);
             out.entry(chunk_of(d.position))
                 .or_default()
-                .push(d.to_nbt(uuid, raw.as_ref()));
+                // The fields kept with it (`remember_tags`: Silent, Tags, a
+                // name...) once it has flown from where it was loaded.
+                .push(with_raw(
+                    d.to_nbt(uuid, raw.as_ref()),
+                    self.simulation.persist.raw.get(&d.id),
+                ));
         }
         for c in &self.simulation.crystals {
             if keys.contains(&chunk_of(c.position)) {
@@ -1355,9 +1360,10 @@ impl Game<'_> {
                     c.position,
                 );
                 let uuid = saved_uuid(&self.simulation.persist, c.id);
-                out.entry(chunk_of(c.position))
-                    .or_default()
-                    .push(c.to_nbt(uuid, raw.as_ref()));
+                out.entry(chunk_of(c.position)).or_default().push(with_raw(
+                    c.to_nbt(uuid, raw.as_ref()),
+                    self.simulation.persist.raw.get(&c.id),
+                ));
             }
         }
         for s in &self.simulation.ominous_spawners {

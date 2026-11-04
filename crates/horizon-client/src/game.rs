@@ -206,6 +206,7 @@ mod narrator;
 mod native_biome_colors;
 pub mod native_block_entity_draw;
 mod native_block_sprites;
+mod native_chunk_tickets;
 mod native_claimed_items;
 mod native_components;
 mod native_configs;
@@ -218,6 +219,7 @@ mod native_entity_refs;
 mod native_explosions;
 mod native_falling;
 mod native_hooks;
+mod native_host_bridge;
 mod native_inventories;
 mod native_item_container;
 mod native_item_energy;
@@ -225,6 +227,7 @@ mod native_item_fluids;
 mod native_level_refs;
 mod native_lifecycle;
 mod native_living_refs;
+mod native_machines;
 mod native_menus;
 mod native_mob_draw;
 mod native_mobs;
@@ -237,6 +240,7 @@ mod native_projectiles;
 mod native_quick_move;
 mod native_recipes;
 mod native_reload_listeners;
+mod native_scene;
 mod native_server;
 mod native_shaders;
 mod native_ticks;
@@ -272,9 +276,9 @@ mod potions;
 mod powder_snow;
 mod prediction;
 mod pumpkin;
+mod pvp;
 mod quick_actions;
 mod raids;
-mod ram_limit;
 mod random_textures;
 mod recipe_book;
 mod remote;
@@ -419,19 +423,23 @@ use horizon_world::{
     },
     registry::BlockStateId,
 };
+pub use machines::native_fluids::NativeFluidTank;
 pub use maps::{NativeMapDecoration, NativeMapInfo};
 pub use native_block_entity_draw::BlockEntityDraw;
 pub use native_claimed_items::{NativeHeldItem, NativeHit, NativeModEvent};
+pub use native_components::NativeComponentError;
 pub use native_configs::{NativeConfig, NativeConfigFile, NativeConfigKind};
+pub use native_criteria::NativeCriterion;
 pub use native_data_maps::NativeDataMapType;
 pub use native_falling::NativeFalling;
-pub use native_hooks::{NativeClock, NativeShake};
+pub use native_hooks::{NativeClock, NativeItemEntity, NativeShake};
 pub use native_item_energy::ItemEnergyBuffer;
 pub use native_mob_draw::{NativeMobRender, NativePlayerRender};
 pub use native_reload_listeners::NativeReloadListener;
 pub use native_server::NativeExperienceOrb;
 pub use native_world_columns::NativeColumnBlocks;
 pub use native_world_edit::{NativeBlockEdit, NativeBlockRun, NativeHeightmap};
+pub use native_world_read::NativeBlockReadError;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -994,6 +1002,12 @@ struct GameLevel<'w> {
     debug: bool,
     native_sounds: &'w mut Vec<creatures::NativeSound>,
     native_particles: &'w mut Vec<lan_particles::QueuedParticle>,
+    /// The tool a mod's machine breaks blocks with (`native_machine_destroy_block`):
+    /// `Block.dropResources` rolls the loot with it instead of with none.
+    drop_tool: Option<ItemStack>,
+    /// Where `Block.dropResources` puts the drops instead of popping them,
+    /// while a mod's machine breaks a block (`native_machine_destroy_block`).
+    drop_into: Option<Vec<ItemStack>>,
 }
 struct PlayerCollision {
     y: f64,
@@ -1817,6 +1831,14 @@ impl LevelAccess for GameLevel<'_> {
                 self.world.block_entities.get(&(pos.x, pos.y, pos.z)),
                 Some(BlockEntity::Mod(_))
             )
+    }
+    /// `ShulkerBoxBlockEntity.isClosed`: the lid state the block-entity tick
+    /// copied from `be_anims` (`ShulkerBoxBlock.getBlockSupportShape`).
+    fn shulker_is_closed(&self, pos: BlockPos) -> Option<bool> {
+        self.world
+            .shulkers
+            .get(&[pos.x, pos.y, pos.z])
+            .map(|s| s.status == horizon_client::block_entity_anim::ShulkerStatus::Closed)
     }
     fn remove_block_entity(&mut self, pos: BlockPos, old: BlockStateId, side_effects: bool) -> u8 {
         self.remove_entity(pos, old, side_effects)
@@ -2892,6 +2914,9 @@ struct Game<'a> {
     mod_screen: Option<native_hooks::OpenNativeScreen>,
     /// The players with each mod container open, by level (`tick_mod_container_viewers`).
     mod_container_viewers: HashMap<(&'static str, (i32, i32, i32)), u32>,
+    /// The owners of each chunk a native mod's ticket holds, by level
+    /// (`native_force_chunk`); `streaming.mod_forced` is the level's chunks.
+    mod_chunk_tickets: HashMap<Dim, HashMap<(i32, i32), std::collections::BTreeSet<String>>>,
     /// Where item entities are, while the block entities tick (hoppers).
     item_columns: Option<machines::ItemColumns>,
     creative_screen: Creative,
@@ -2912,6 +2937,8 @@ struct Game<'a> {
     frame_graph: horizon_client::perf_overlay::FrameGraph,
     /// Horizon's extras (minimap, auto-reconnect; mods' counters): `game/extras.rs`.
     extras: extras::ExtrasState,
+    /// The PvP & HUD options' state (`game/pvp.rs`).
+    pvp: pvp::PvpState,
     /// Horizon mods (`game/mods.rs`), none running unless turned on.
     mods: mods::ModsState,
     /// Every item and recipe, for mods (`game/native_recipes.rs`), made once.
@@ -3003,8 +3030,6 @@ struct Game<'a> {
     debug_options: Option<debug_options::DebugOptionsUi>,
     /// `DebugEntryMemory`'s readings (game/debug_lines.rs).
     memory_meter: std::cell::RefCell<horizon_client::debug_overlay::MemoryMeter>,
-    /// How far memory holds the game below the player's settings (`game/ram_limit.rs`).
-    ram_limit: horizon_client::ram_limit::Governor,
     /// `Minecraft.gpuUtilization`: the last timed frame's GPU time over its
     /// CPU time, in percent.
     gpu_utilization: f64,
@@ -4644,6 +4669,8 @@ impl Game<'_> {
             debug: self.world_debug,
             native_sounds: &mut self.creatures.lan_sounds,
             native_particles: &mut self.creatures.lan_particles,
+            drop_tool: None,
+            drop_into: None,
         };
         let result = f(
             self.res.behaviours(),
@@ -4845,7 +4872,20 @@ impl Game<'_> {
                     .filter(|&(_, spectator)| game_mode::loads_chunks(rule, spectator))
                     .map(|(chunk, _)| chunk)
                     .collect(),
-                forced: self.streaming.forced.iter().copied().collect(),
+                // A native mod's ticket holds its chunk as `/forceload` does
+                // (NeoForge's `TicketController` uses the same `FORCED` level).
+                forced: self
+                    .streaming
+                    .forced
+                    .iter()
+                    .chain(
+                        self.streaming
+                            .mod_forced
+                            .iter()
+                            .filter(|c| !self.streaming.forced.contains(c)),
+                    )
+                    .copied()
+                    .collect(),
                 // Filled from the `PORTAL` tickets by `update`.
                 portal: Vec::new(),
                 // EnderDragonFight.tick: while a player watches the fight, the
@@ -5419,6 +5459,8 @@ impl Game<'_> {
                         // LevelEvent.SOUND_ZOMBIE_WOODEN_DOOR (attack, break).
                         1019 => Some(("minecraft:entity.zombie.attack_wooden_door", 2.0)),
                         1021 => Some(("minecraft:entity.zombie.break_wooden_door", 2.0)),
+                        1026 => Some(("minecraft:entity.zombie.infect", 2.0)),
+                        1027 => Some(("minecraft:entity.zombie_villager.converted", 2.0)),
                         1030 => Some(("minecraft:block.anvil.use", 1.0)),
                         1029 => Some(("minecraft:block.anvil.destroy", 1.0)),
                         1031 => Some(("minecraft:block.anvil.land", 0.3)),
@@ -5449,6 +5491,10 @@ impl Game<'_> {
                             1029 | 1030 | 1042 | 1043 | 1044 | 1053 | 1054 => {
                                 self.simulation.world.random.next_float() * 0.1 + 0.9
                             }
+                            1026 | 1027 => {
+                                let r = self.particles.level_random();
+                                (r.next_float() - r.next_float()) * 0.2 + 1.0
+                            }
                             1019 | 1021 => {
                                 (self.simulation.world.random.next_float()
                                     - self.simulation.world.random.next_float())
@@ -5459,7 +5505,17 @@ impl Game<'_> {
                         };
                         if matches!(
                             id,
-                            1019 | 1021 | 1029 | 1030 | 1045 | 1052 | 1053 | 1054 | 1501 | 1503
+                            1019 | 1021
+                                | 1026
+                                | 1027
+                                | 1029
+                                | 1030
+                                | 1045
+                                | 1052
+                                | 1053
+                                | 1054
+                                | 1501
+                                | 1503
                         ) {
                             // Clients play these sounds from their level events;
                             // capturing it also sends a duplicate sound packet.
@@ -8672,7 +8728,14 @@ impl Game<'_> {
                 });
                 let draws = hud_layout::crosshair(wi, hi, attack, full);
                 self.gui_layer("minecraft:crosshair", &mut batch, |g, batch| {
-                    hud_layout::paint(batch, &g.gui.atlas, &draws);
+                    // The custom crosshair takes the sprite's place (the first draw); the
+                    // attack indicator stays.
+                    if g.custom_crosshair() {
+                        g.draw_custom_crosshair(batch, wi, hi);
+                        hud_layout::paint(batch, &g.gui.atlas, &draws[1..]);
+                    } else {
+                        hud_layout::paint(batch, &g.gui.atlas, &draws);
+                    }
                 });
             }
             self.gui_layer("minecraft:hotbar", &mut batch, |g, batch| {
@@ -11623,6 +11686,35 @@ impl Game<'_> {
         }
     }
 
+    /// `ServerLevel.destroyBlockProgress`: breaker `breaker`'s crack on `pos`
+    /// (0..=9, anything else takes it away), for every player within 64 blocks.
+    pub(super) fn server_destroy_block_progress(
+        &mut self,
+        breaker: i32,
+        pos: [i32; 3],
+        progress: i32,
+    ) {
+        self.destroy_block_progress(breaker, pos, progress);
+        if let Some(host) = self.lan.as_ref() {
+            host.hub.broadcast_near(
+                [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])],
+                64.0,
+                &horizon_protocol::packets::play::Clientbound::BlockDestruction(
+                    horizon_protocol::packets::play::BlockDestruction {
+                        id: breaker,
+                        pos,
+                        progress: if (0..10).contains(&progress) {
+                            progress as u8
+                        } else {
+                            255
+                        },
+                    },
+                ),
+                None,
+            );
+        }
+    }
+
     /// The cracks to draw and their stage sprite's atlas origin: our own mining and the
     /// other players' (`renderBlockDestroyAnimation`: within 32 blocks of the camera, the
     /// furthest progress on each block).
@@ -12823,7 +12915,7 @@ impl Game<'_> {
     }
     /// Let go of every entity of the level (saved first): the next world
     /// opened must not inherit them, nor save them as its own.
-    fn clear_entities(&mut self) {
+    pub(super) fn clear_entities(&mut self) {
         self.simulation.mobs.clear();
         self.simulation.dropped.clear();
         self.simulation.orbs.clear();
@@ -12850,6 +12942,19 @@ impl Game<'_> {
         self.riding = None;
         self.simulation.persist = Default::default();
         self.entity_attachments.clear();
+        self.clear_remote_objects();
+        self.clear_remote_projectiles();
+        self.simulation_server.levels.clear();
+        self.entity_vertices.clear();
+        self.see_through_vertices.clear();
+        self.glowing_vertices.get_mut().clear();
+        self.shadow_only_vertices.get_mut().clear();
+        self.entity_spans.borrow_mut().clear();
+        self.entity_motion.borrow_mut().clear();
+        self.skin_models
+            .borrow_mut()
+            .restart(&mut self.skin_frame.borrow_mut());
+        self.skin_frame.borrow_mut().clear_draws();
     }
     /// Equipment attribute modifiers (LivingEntity.collectEquipmentChanges).
     fn apply_equipment(&mut self) {
@@ -14515,7 +14620,7 @@ impl Game<'_> {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
-        self.streaming.radius = self.render_distance_in_use();
+        self.streaming.radius = self.settings.render_distance;
         // Options.biomeBlendRadius, ambientOcclusion, cutoutLeaves and the
         // leaf-culling mode: LevelExtractor.allChanged when they change.
         let leaf_culling = self.effective_leaf_culling();
@@ -16858,13 +16963,9 @@ impl Game<'_> {
     fn far_terrain_choice(&self) -> (u32, bool) {
         let g = &self.settings.horizon;
         let reduced = g.far_detail == horizon_client::graphics::FarDetail::Reduced;
-        let distance = if self.ram_limit.far_off() {
-            0
-        } else {
-            match self.server_far_terrain() {
-                Some(offer) => g.lod_distance.min(offer.distance),
-                None => g.lod_distance,
-            }
+        let distance = match self.server_far_terrain() {
+            Some(offer) => g.lod_distance.min(offer.distance),
+            None => g.lod_distance,
         };
         (distance, reduced)
     }
@@ -18780,7 +18881,7 @@ impl Game<'_> {
                     if let Some(server) = &self.integrated {
                         server.set_paused(self.pause);
                         server.set_distances(
-                            self.render_distance_in_use(),
+                            self.settings.render_distance,
                             self.settings.simulation_distance,
                             self.settings.entity_distance,
                         );
@@ -18942,6 +19043,14 @@ impl Game<'_> {
         // The world a backup made before its upgrade opens (EditWorldScreen's callback).
         if let Some(folder) = self.title.as_mut().and_then(|t| t.take_open_request())
             && let Err(error) = self.open_world(&folder, None, None, false, None)
+        {
+            self.error = Some(error);
+            event_loop.exit();
+            return;
+        }
+        // A Realm's address came back (GetServerDetailsTask hands over to ConnectScreen).
+        if let Some(action) = self.title.as_mut().and_then(|t| t.take_connect_request())
+            && let Err(error) = self.title_action(event_loop, action)
         {
             self.error = Some(error);
             event_loop.exit();
@@ -19393,6 +19502,7 @@ impl<'a> Game<'a> {
 
             mod_screen: None,
             mod_container_viewers: HashMap::new(),
+            mod_chunk_tickets: HashMap::new(),
             item_columns: None,
             creative_screen: prepared.creative_screen,
             control: None,
@@ -19418,6 +19528,7 @@ impl<'a> Game<'a> {
             pending_uploads: Vec::new(),
             frame_graph: Default::default(),
             extras: Default::default(),
+            pvp: Default::default(),
             mods: Default::default(),
             recipe_tables: Default::default(),
             panel: Default::default(),
@@ -19455,7 +19566,6 @@ impl<'a> Game<'a> {
             ),
             debug_options: None,
             memory_meter: Default::default(),
-            ram_limit: Default::default(),
             gpu_utilization: 0.0,
             rendered_mobs: Default::default(),
             spawn_counts: HashMap::new(),
@@ -21460,6 +21570,7 @@ impl Loading {
             event_loop.exit();
             return;
         }
+        self.poll_menu_realms(event_loop);
         if let Some(w) = &self.window {
             if self.options.as_ref().is_some_and(|o| o.offscreen) {
                 self.draw();

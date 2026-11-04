@@ -1993,6 +1993,14 @@ pub enum MobEvent {
         /// `MobEffectInstance` ambient flag (the beacon-style translucent icon).
         ambient: bool,
     },
+    /// Apply an effect to another mob: `IllusionerBlindnessSpellGoal.performSpellCasting`
+    /// blinds whatever `LivingEntity` the illusioner targets, not only a player.
+    EffectMob {
+        target: u32,
+        effect: &'static str,
+        ticks: i32,
+        amplifier: i32,
+    },
     /// Set an entity on fire.
     Ignite {
         target: Who,
@@ -2711,6 +2719,7 @@ impl MobEvent {
             | MobEvent::AxolotlSupportPlayer { .. }
             | MobEvent::DolphinTreasure { .. }
             | MobEvent::EffectPlayer { .. }
+            | MobEvent::EffectMob { .. }
             | MobEvent::Ignite { .. }
             | MobEvent::SetBlockName { .. }
             | MobEvent::Hiss { .. }
@@ -3176,6 +3185,14 @@ impl Mob {
     #[inline]
     pub fn species(&self) -> Species {
         self.kind.species
+    }
+    /// Entity.getMaxAirSupply and the aquatic species' overrides.
+    pub fn max_air_supply(&self) -> i32 {
+        match self.species() {
+            Species::Axolotl => axolotl::MAX_AIR,
+            Species::Dolphin => 4800,
+            _ => 300,
+        }
     }
     /// `Mob.getMainArm`: the left arm when the mob is left-handed, a player's
     /// `mainHand` option for a player mob.

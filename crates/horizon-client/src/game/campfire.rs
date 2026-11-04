@@ -95,6 +95,7 @@ impl Game<'_> {
                 .insert((pos.0 >> 4, pos.2 >> 4));
         }
         if !lit {
+            self.sleep_idle_campfire(pos, false);
             return Ok(());
         }
         let Some(BlockEntity::Campfire(c)) = self.simulation.world.block_entities.get_mut(&pos)
@@ -118,7 +119,15 @@ impl Game<'_> {
                 Some(state),
             );
         }
+        self.sleep_idle_campfire(pos, true);
         Ok(())
+    }
+
+    fn sleep_idle_campfire(&mut self, pos: Pos, lit: bool) {
+        if matches!(self.simulation.world.block_entities.get(&pos), Some(BlockEntity::Campfire(c)) if c.idle(lit))
+        {
+            self.simulation.world.block_entities.sleep(pos);
+        }
     }
 
     /// `CampfireRenderer`: each cooking item lies on the fire, slot `i`
