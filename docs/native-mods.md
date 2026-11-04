@@ -2909,11 +2909,13 @@ one custom payload channel `horizon:mod_net`. A vanilla client never gets them, 
 ### Scenes in screens
 
 `native_draw_scene(batch, rect, blocks, view)` (client, `crates/horizon-client/src/game/native_scene.rs`) draws a small
-scene into a box of a screen: block states at positions of the scene's own (`NativeSceneBlock`), each with its model and,
-given a mod block entity, its drawing through `native_block_entity_submit`, `spin` parts included. `NativeSceneView`
-sets the point at the box's middle, the turn (`yaw`, counterclockwise seen from above; at 0 the scene is seen from the
-north), the tilt of its top towards the viewer (`pitch`) and the pixels per block (`scale`). The scene has a depth of its
-own and is cut to the box. Draw it from the screen's drawing hook; Create's Ponder steps through its scenes this way.
+scene into a box of a screen: block states at positions of the scene's own (`NativeSceneBlock::new(pos, state, entity)`),
+each with its model and, given a mod block entity, its drawing through `native_block_entity_submit`, `spin` parts
+included. A state the registry doesn't know is left out. `NativeSceneView::new(center, yaw, pitch, scale)` sets the point
+at the box's middle, the turn (`yaw`, counterclockwise seen from above; at 0 the scene is seen from the north), the tilt
+of its top towards the viewer (`pitch`) and the pixels per block (`scale`). The scene has a depth of its own and is cut to
+the box. A block entity's quads are shaded and culled as in the world: a flat quad shows from behind. Draw it from the
+screen's drawing hook; Create's Ponder steps through its scenes this way.
 
 ### Chat and commands a client mod sends
 

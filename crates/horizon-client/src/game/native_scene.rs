@@ -9,18 +9,74 @@ use glam::{Mat4, Vec3};
 use horizon_client::{
     block_entity_render::diffuse_lights,
     hud::HudBatch,
-    mesher::Vertex,
+    mesher::{CULL_BACK, SHADED_CULL_W, Vertex},
     mod_api::{NativeSceneBlock, NativeSceneView},
 };
-use horizon_world::level::data::state_flags;
+use horizon_world::{level::data::state_flags, registry::BlockStateId};
+use std::collections::HashMap;
 
 /// A quad in the scene's blocks, before it is seen: its corners, UVs in the
-/// atlas, ABGR colour, and its outward normal.
+/// atlas, ABGR colour, its outward normal, and whether it is left out when
+/// seen from behind.
 struct SceneQuad {
     corners: [Vec3; 4],
     uv: [[f32; 2]; 4],
     color: u32,
     normal: Vec3,
+    cull: bool,
+}
+
+impl SceneQuad {
+    /// Whether `m` shows this quad: a culling quad only from its front.
+    fn seen(&self, m: Mat4) -> bool {
+        !self.cull || m.transform_vector3(self.normal).z > 0.0
+    }
+}
+
+/// The scene's quad of `q`, a quad a block entity drew, read as the entity
+/// pipelines read its `normal.w` (`entity.wgsl`). Only 127 is left to shade
+/// here: `native_draw_block` and `native_draw_model` draw it, and the other
+/// `native_draw_*` bake their colour (0 or `CULL_BACK`). Only `CULL_BACK` and
+/// `SHADED_CULL_W` lose their back faces.
+fn drawn_quad(q: &[Vertex; 4]) -> SceneQuad {
+    let corners = q.each_ref().map(|v| Vec3::from_array(v.pos));
+    let normal = (corners[1] - corners[0])
+        .cross(corners[2] - corners[0])
+        .normalize_or_zero();
+    // A quad drawn as a triangle has its area in the other half.
+    let normal = if normal == Vec3::ZERO {
+        (corners[2] - corners[1])
+            .cross(corners[3] - corners[1])
+            .normalize_or_zero()
+    } else {
+        normal
+    };
+    let w = q[0].normal[3];
+    SceneQuad {
+        corners,
+        uv: q.each_ref().map(|v| v.uv),
+        color: if w == 127 {
+            shaded(q[0].color, face_shade(normal))
+        } else {
+            q[0].color
+        },
+        normal,
+        cull: w == CULL_BACK[3] || w == SHADED_CULL_W,
+    }
+}
+
+/// The states of `blocks` by position, for telling which faces are hidden,
+/// without those outside the registry's `state_count` states: the model lookup
+/// skips them too, and their facts would be out of bounds.
+fn occupied_states(
+    blocks: &[NativeSceneBlock<'_>],
+    state_count: usize,
+) -> HashMap<[i32; 3], BlockStateId> {
+    blocks
+        .iter()
+        .filter(|b| (b.state.0 as usize) < state_count)
+        .map(|b| (b.pos, b.state))
+        .collect()
 }
 
 /// The GUI transform of `view` in the box `rect` (x0, y0, x1, y1): the view's
@@ -70,7 +126,8 @@ impl Game<'_> {
     /// outside the box is cut off, and the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
     /// the order drawn. Draw it from a screen's drawing hook
-    /// (`native_screen_draw`). A client's call; nothing is drawn on a server.
+    /// (`native_screen_draw`). A state the registry doesn't know is left out.
+    /// A client's call; nothing is drawn on a server.
     /// API @API:scenes_in_screens@.
     pub(super) fn native_draw_scene(
         &self,
@@ -82,8 +139,7 @@ impl Game<'_> {
         if !self.native_window() || !view.scale.is_finite() || view.scale <= 0.0 {
             return;
         }
-        let occupied: std::collections::HashMap<[i32; 3], _> =
-            blocks.iter().map(|b| (b.pos, b.state)).collect();
+        let occupied = occupied_states(blocks, self.res.behaviours().table.state_count());
         let solid = |pos: [i32; 3]| {
             occupied.get(&pos).is_some_and(|&state| {
                 self.res.behaviours().facts(state).flags & state_flags::SOLID_RENDER != 0
@@ -140,6 +196,8 @@ impl Game<'_> {
                     }),
                     color,
                     normal,
+                    // As terrain is drawn: a block's own faces lose their backs.
+                    cull: true,
                 });
             }
             if let Some(entity) = block.entity {
@@ -164,24 +222,13 @@ impl Game<'_> {
                     at,
                     &mut placed,
                 );
-                for q in placed.as_chunks::<4>().0 {
-                    let corners = q.each_ref().map(|v| Vec3::from_array(v.pos));
-                    let normal = (corners[1] - corners[0])
-                        .cross(corners[2] - corners[0])
-                        .normalize_or_zero();
-                    quads.push(SceneQuad {
-                        corners,
-                        uv: q.each_ref().map(|v| v.uv),
-                        color: shaded(q[0].color, face_shade(normal)),
-                        normal,
-                    });
-                }
+                quads.extend(placed.as_chunks::<4>().0.iter().map(drawn_quad));
             }
         }
         let m = scene_matrix(rect, view);
         let mut seen: Vec<(f32, [[f32; 3]; 4], [[f32; 2]; 4], u32)> = quads
             .into_iter()
-            .filter(|q| m.transform_vector3(q.normal).z > 0.0)
+            .filter(|q| q.seen(m))
             .map(|q| {
                 let p = q.corners.map(|c| m.transform_point3(c));
                 let depth = p.iter().map(|v| v.z).sum::<f32>() / 4.0;
@@ -203,12 +250,79 @@ mod tests {
     use super::*;
 
     fn view(yaw: f32, pitch: f32) -> NativeSceneView {
-        NativeSceneView {
-            center: [0.5, 0.5, 0.5],
-            yaw,
-            pitch,
-            scale: 20.0,
+        NativeSceneView::new([0.5, 0.5, 0.5], yaw, pitch, 20.0)
+    }
+
+    /// A quad of `corners` with one colour and `normal`.
+    fn drawn(corners: [[f32; 3]; 4], color: u32, normal: [i8; 4]) -> [Vertex; 4] {
+        corners.map(|pos| Vertex {
+            pos,
+            uv: [0.0, 0.0],
+            layer: 0,
+            color,
+            light: 0,
+            normal,
+            glint_uv: [0.0, 0.0],
+        })
+    }
+
+    /// Wound to face east, as `native_draw_quad` asks.
+    const EAST: [[f32; 3]; 4] = [
+        [1.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ];
+    /// Wound to face south: its back is what an unturned scene sees.
+    const SOUTH: [[f32; 3]; 4] = [
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ];
+
+    /// An east face comes out at 0.6 of white, 153, drawn either way: already
+    /// baked to it by `native_draw_quad`, or left to shade by
+    /// `native_draw_block`. Shaded twice it would be about 0.36.
+    #[test]
+    fn a_face_is_shaded_once() {
+        for baked in [[0; 4], CULL_BACK] {
+            let q = drawn_quad(&drawn(EAST, 0xFF99_9999, baked));
+            assert_eq!(q.color, 0xFF99_9999, "baked with {baked:?}");
         }
+        let q = drawn_quad(&drawn(EAST, 0xFFFF_FFFF, [127, 0, 0, 127]));
+        assert_eq!(q.color, 0xFF99_9999);
+    }
+
+    /// As in the world: a flat quad or a block drawn by an entity shows from
+    /// behind, and only the culling kinds lose their back faces.
+    #[test]
+    fn only_culling_quads_are_hidden_from_behind() {
+        let m = scene_matrix([0.0, 0.0, 100.0, 100.0], view(0.0, 0.0));
+        let from_behind = |normal: [i8; 4]| drawn_quad(&drawn(SOUTH, !0, normal)).seen(m);
+        assert!(from_behind([0; 4]), "a baked flat quad");
+        assert!(from_behind([0, 0, 127, 127]), "a shaded quad");
+        assert!(!from_behind(CULL_BACK), "entitySolid");
+        assert!(!from_behind([0, 0, 127, SHADED_CULL_W]), "entityCutoutCull");
+
+        let turned = scene_matrix([0.0, 0.0, 100.0, 100.0], view(180.0, 0.0));
+        assert!(
+            drawn_quad(&drawn(SOUTH, !0, CULL_BACK)).seen(turned),
+            "a culling quad still shows from its front"
+        );
+    }
+
+    #[test]
+    fn a_state_the_registry_does_not_know_occupies_nothing() {
+        let block = |pos, id| NativeSceneBlock::new(pos, BlockStateId(id), None);
+        let blocks = [
+            block([0, 0, 0], 9),
+            block([1, 0, 0], 10),
+            block([2, 0, 0], u32::MAX),
+        ];
+        let occupied = occupied_states(&blocks, 10);
+        assert_eq!(occupied.len(), 1);
+        assert_eq!(occupied.get(&[0, 0, 0]), Some(&BlockStateId(9)));
     }
 
     /// Unturned, the scene is seen from the north as a player at yaw 0 sees
