@@ -4151,7 +4151,7 @@ mod teleport_pitch_tests {
             .get("minecraft:zombie")
             .unwrap()
             .clone();
-        game.mobs.push(horizon_client::mobs::Mob::new(
+        game.simulation.mobs.push(horizon_client::mobs::Mob::new(
             42,
             kind,
             horizon_core::geometry::Vec3::new(0.0, 0.0, 0.0),
@@ -4167,10 +4167,16 @@ mod teleport_pitch_tests {
             game.pitch = 20.0;
             game.teleport_to_in_level(Target::Player, [0.0; 3], Some(rotation));
             assert_eq!([game.yaw, game.pitch], expected);
-            game.mobs[0].yaw = 10.0;
-            game.mobs[0].head_pitch = 20.0;
+            game.simulation.mobs[0].yaw = 10.0;
+            game.simulation.mobs[0].head_pitch = 20.0;
             game.teleport_to_in_level(Target::Mob(42), [0.0; 3], Some(rotation));
-            assert_eq!([game.mobs[0].yaw, game.mobs[0].head_pitch], expected);
+            assert_eq!(
+                [
+                    game.simulation.mobs[0].yaw,
+                    game.simulation.mobs[0].head_pitch
+                ],
+                expected
+            );
         }
         game.build_registries();
         game.set_allow_commands(true);
@@ -4180,7 +4186,7 @@ mod teleport_pitch_tests {
             ("tp @e[type=minecraft:zombie,limit=1] 0 0 0 0 270", -90.0),
         ] {
             assert!(game.run_command(command), "{command}");
-            assert_eq!(game.mobs[0].head_pitch, expected, "{command}");
+            assert_eq!(game.simulation.mobs[0].head_pitch, expected, "{command}");
         }
         for (source, target, angle, expected) in [
             (90.0, 90.0, "~100", 90.0),
@@ -4189,25 +4195,28 @@ mod teleport_pitch_tests {
             (0.0, 90.0, "~-100", 90.0),
         ] {
             game.pitch = source;
-            game.mobs[0].head_pitch = target;
+            game.simulation.mobs[0].head_pitch = target;
             assert!(game.run_command(&format!(
                 "tp @e[type=minecraft:zombie,limit=1] 0 0 0 0 {angle}"
             )));
-            assert_eq!(game.mobs[0].head_pitch, expected);
+            assert_eq!(game.simulation.mobs[0].head_pitch, expected);
         }
         game.yaw = 190.0;
-        game.mobs[0].yaw = 170.0;
+        game.simulation.mobs[0].yaw = 170.0;
         assert!(game.run_command("tp @e[type=minecraft:zombie,limit=1] 0 0 0 ~ ~"));
-        assert_eq!(game.mobs[0].yaw, 190.0, "relative yaw wraps the delta");
+        assert_eq!(
+            game.simulation.mobs[0].yaw, 190.0,
+            "relative yaw wraps the delta"
+        );
 
-        game.mobs[0].head_pitch = 360.0;
+        game.simulation.mobs[0].head_pitch = 360.0;
         assert!(
             game.run_command(
                 "tp @e[type=minecraft:zombie,limit=1] @e[type=minecraft:zombie,limit=1]"
             )
         );
         assert_eq!(
-            game.mobs[0].head_pitch, 0.0,
+            game.simulation.mobs[0].head_pitch, 0.0,
             "destination rotation wraps too"
         );
 
@@ -4216,18 +4225,24 @@ mod teleport_pitch_tests {
             assert!(game.run_command(&format!(
                 "rotate @e[type=minecraft:zombie,limit=1] 0 {pitch}"
             )));
-            assert_eq!(game.mobs[0].head_pitch, expected);
+            assert_eq!(game.simulation.mobs[0].head_pitch, expected);
         }
         for (yaw, pitch, expected) in [
             ("40", overflow.as_str(), [40.0, 20.0]),
             (overflow.as_str(), "30", [10.0, 30.0]),
         ] {
-            game.mobs[0].yaw = 10.0;
-            game.mobs[0].head_pitch = 20.0;
+            game.simulation.mobs[0].yaw = 10.0;
+            game.simulation.mobs[0].head_pitch = 20.0;
             assert!(game.run_command(&format!(
                 "tp @e[type=minecraft:zombie,limit=1] 0 0 0 {yaw} {pitch}"
             )));
-            assert_eq!([game.mobs[0].yaw, game.mobs[0].head_pitch], expected);
+            assert_eq!(
+                [
+                    game.simulation.mobs[0].yaw,
+                    game.simulation.mobs[0].head_pitch
+                ],
+                expected
+            );
         }
     }
 
