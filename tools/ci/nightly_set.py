@@ -4,7 +4,9 @@
     nightly_set.py command     one `/nightly …` comment (nightly-command.yml): checks who asked, updates the set,
                                starts the build and answers in the thread
 
-A comment by Ludovic or by a login in .github/trusted-reviewers.txt, on any issue or pull request:
+A comment by Ludovic or by an account in .github/trusted-reviewers.txt, on any issue or pull request. Accounts are
+matched by their numeric GitHub ID, never by login: a login is a name anyone can claim once its owner renames or
+deletes the account, an ID is never reused (docs/release-flow.md "Trusted reviewers"):
 
     /nightly 2640 2642     the set becomes these pull requests, merged onto main in this order; builds now
     /nightly add 2650      adds one, or takes its newest head again; builds now
@@ -34,7 +36,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-OWNER = "ludovic111"
+OWNER = "ludovic111"  # for messages only: who is Ludovic is decided by OWNER_ID
+# ludovic111's numeric GitHub ID (`gh api users/ludovic111 --jq .id`). None fails closed: nobody is the owner until
+# tools/ci/resolve_reviewer_ids.py has filled it in.
+OWNER_ID: int | None = None
 REVIEWERS = ".github/trusted-reviewers.txt"
 CODEOWNERS = ".github/CODEOWNERS"
 # What CODEOWNERS guards today, refused even if the file moved: what builds, signs and checks releases.
@@ -49,6 +54,10 @@ BOT = ("github-actions[bot]", "41898283+github-actions[bot]@users.noreply.github
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "merge.renormalize=false"]
 NUMBER = re.compile(r"^#?(\d{1,6}),?$")
 LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+USER_ID = re.compile(r"^[1-9][0-9]{0,11}$")
+# Repository variable NIGHTLY_REQUIRE_REVIEW=1 (off by default): a pull request whose author isn't Ludovic or a
+# listed reviewer needs an approving review at its picked head, by Ludovic or a listed reviewer.
+REQUIRE_REVIEW_VAR = "NIGHTLY_REQUIRE_REVIEW"
 VERBS = ("add", "remove", "clear", "status", "dry-run")
 USAGE = ("Use `/nightly 2640 2642`, `/nightly add 2650`, `/nightly remove 2640`, `/nightly clear`, "
          "`/nightly status` or `/nightly dry-run 2640`.")
@@ -99,42 +108,78 @@ def parse(body: str) -> Command | None:
     return Command(verb, prs)
 
 
+@dataclass(frozen=True)
+class Actor:
+    """Who wrote a comment: the login (for messages and logs) and the numeric ID (for every decision)."""
+    login: str
+    id: int
+
+
+def actor_from_env(env=os.environ) -> Actor:
+    """The comment's author from the workflow's AUTHOR and AUTHOR_ID. Without a numeric ID nobody is anyone."""
+    login, raw = env.get("AUTHOR", ""), env.get("AUTHOR_ID", "")
+    if not USER_ID.match(raw.strip()):
+        raise Refused("The workflow didn't say who wrote this comment (AUTHOR_ID), so nothing was done.")
+    return Actor(login, int(raw))
+
+
 @dataclass
 class Reviewers:
-    logins: set[str]  # lowercase
+    members: dict[int, str]  # numeric ID -> login as listed (for messages)
     paused: bool
+    skipped: list[str] = field(default_factory=list)  # lines not understood, ignored (fail closed)
+
+    def listed(self, user_id: int) -> bool:
+        return user_id in self.members
+
+    @property
+    def logins(self) -> set[str]:
+        """The listed logins, lowercase: for messages and tests only, never to decide who may act."""
+        return {login.lower() for login in self.members.values()}
 
 
 def read_reviewers(text: str) -> Reviewers:
-    """The list file: one login per line, `#` comments, and a `paused` line that stops every reviewer."""
-    logins, paused = set(), False
-    for raw in text.splitlines():
+    """The list file, shared by /nightly, the triage commands and /claim: `<id> <login>` per line, `#` comments,
+    and a `paused` line that stops every reviewer. Any other line (a bare login from the old format included) is
+    ignored and reported on stderr: it grants nothing rather than being half-read."""
+    members: dict[int, str] = {}
+    paused, skipped = False, []
+    for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         words = line.split()
-        if len(words) != 1:  # not a login: ignored rather than half-read
-            continue
-        word = words[0]
-        if word.lower() == "paused":
+        if words == ["paused"] or (len(words) == 1 and words[0].lower() == "paused"):
             paused = True
-        elif LOGIN.match(word):
-            logins.add(word.lower())
-    return Reviewers(logins, paused)
+        elif len(words) == 2 and USER_ID.match(words[0]) and LOGIN.match(words[1]):
+            members[int(words[0])] = words[1]
+        else:
+            skipped.append(f"line {n}: {line[:60]!r}")
+    if skipped:
+        print(f"{REVIEWERS}: ignored (not `<id> <login>` or `paused`): " + "; ".join(skipped), file=sys.stderr)
+    return Reviewers(members, paused, skipped)
 
 
-def is_owner(login: str) -> bool:
-    return login.lower() == OWNER
+def is_owner_id(user_id: int | None) -> bool:
+    return OWNER_ID is not None and user_id == OWNER_ID
 
 
-def authorize(login: str, reviewers: Reviewers) -> None:
+def is_owner(actor: Actor) -> bool:
+    return is_owner_id(actor.id)
+
+
+def authorize(actor: Actor, reviewers: Reviewers) -> None:
     """Ludovic always; a listed reviewer unless the list is paused; nobody else."""
-    if is_owner(login):
+    if is_owner(actor):
         return
-    if login.lower() not in reviewers.logins:
+    if not reviewers.listed(actor.id):
         raise Refused(f"Only Ludovic and the trusted reviewers listed in `{REVIEWERS}` can pick the Nightly.")
     if reviewers.paused:
         raise Refused(f"`/nightly` is paused: Ludovic stopped it in `{REVIEWERS}`.")
+
+
+def require_review(env=os.environ) -> bool:
+    return env.get(REQUIRE_REVIEW_VAR, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def guarded_patterns(codeowners: str) -> list[str]:
@@ -157,6 +202,9 @@ class PullRequest:
     author: str
     base: str
     files: list[str]
+    author_id: int = 0
+    # IDs whose latest review (APPROVED, CHANGES_REQUESTED or DISMISSED) is an approval of `head`.
+    approved_at_head: frozenset[int] = frozenset()
 
 
 def check(pr: PullRequest | None, number: int, patterns: list[str]) -> str | None:
@@ -174,6 +222,27 @@ def check(pr: PullRequest | None, number: int, patterns: list[str]) -> str | Non
         more = f" and {len(bad) - 1} more" if len(bad) > 1 else ""
         return f"#{number} changes `{bad[0]}`{more}, which only Ludovic merges (CODEOWNERS)"
     return None
+
+
+def review_refusal(pr: PullRequest, reviewers: Reviewers) -> str | None:
+    """With NIGHTLY_REQUIRE_REVIEW on: why `pr` can't go in yet, or None. Ludovic's and the listed reviewers' own pull
+    requests need nothing more; anyone else's needs an approval at the head being picked by one of them."""
+    if is_owner_id(pr.author_id) or reviewers.listed(pr.author_id):
+        return None
+    if any(is_owner_id(i) or reviewers.listed(i) for i in pr.approved_at_head if i != pr.author_id):
+        return None
+    return (f"#{pr.number} needs an approving review at its head ({pr.head[:7]}) by Ludovic or a trusted reviewer "
+            "before it goes in a Nightly")
+
+
+def approvals_at_head(reviews: list[dict], head: str) -> frozenset[int]:
+    """The reviewers whose latest deciding review approves `head` (GitHub's reviews, oldest first)."""
+    latest: dict[int, dict] = {}
+    for r in reviews:
+        user = r.get("user") or {}
+        if isinstance(user.get("id"), int) and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[user["id"]] = r
+    return frozenset(i for i, r in latest.items() if r["state"] == "APPROVED" and r.get("commit_id") == head)
 
 
 def entry(pr: PullRequest, asked_by: str, now: str) -> dict:
@@ -203,13 +272,15 @@ def describe(prs: list[dict], heading: str = "The set") -> str:
     return "\n".join(lines)
 
 
-def apply(state: dict, cmd: Command, login: str, now: str, lookup: Callable[[int], PullRequest | None],
-          patterns: list[str]) -> Result:
-    """What `cmd` by `login` makes of `state` (set.json). Pure but for `lookup`; raises Refused."""
+def apply(state: dict, cmd: Command, actor: Actor, now: str, lookup: Callable[[int], PullRequest | None],
+          patterns: list[str], reviewers: Reviewers, review_needed: bool = False) -> Result:
+    """What `cmd` by `actor` makes of `state` (set.json). Pure but for `lookup`; raises Refused. `review_needed` is
+    the NIGHTLY_REQUIRE_REVIEW flag (off by default)."""
+    login = actor.login
     st = copy.deepcopy(state)
     prs: list[dict] = st.setdefault("prs", [])
     blocked: list[int] = st.setdefault("blocked", [])
-    owner = is_owner(login)
+    owner = is_owner(actor)
     if cmd.verb == "status":
         extra = f"\nOnly Ludovic can add these back: {', '.join(f'#{n}' for n in blocked)}." if blocked else ""
         return Result(state, describe(prs) + extra, False)
@@ -230,6 +301,8 @@ def apply(state: dict, cmd: Command, login: str, now: str, lookup: Callable[[int
         for n in cmd.prs:
             pr = lookup(n)
             if why := check(pr, n, patterns):
+                problems.append(why)
+            elif review_needed and (why := review_refusal(pr, reviewers)):
                 problems.append(why)
             else:
                 asked.append(entry(pr, login, now))
@@ -450,7 +523,12 @@ def lookup(repo: str) -> Callable[[int], PullRequest | None]:
         files = gh("api", "--paginate", f"repos/{repo}/pulls/{n}/files", "--jq",
                    ".[] | .filename, (.previous_filename // empty)").splitlines()
         state = "merged" if p.get("merged_at") else p["state"]
-        return PullRequest(n, state, p["head"]["sha"], p["title"], p["user"]["login"], p["base"]["ref"], files)
+        reviews = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{n}/reviews", check=False)
+                             or "[]")
+        reviews = [r for page in reviews for r in (page if isinstance(page, list) else [page])]
+        return PullRequest(n, state, p["head"]["sha"], p["title"], p["user"]["login"], p["base"]["ref"], files,
+                           author_id=int(p["user"]["id"]),
+                           approved_at_head=approvals_at_head(reviews, p["head"]["sha"]))
     return get
 
 
@@ -478,7 +556,7 @@ def dispatch(repo: str, issue: str, request: str, dry_run: list[dict] | None) ->
 def command() -> None:
     """nightly-command.yml: the comment arrives in env vars, never in a shell line."""
     repo, issue = os.environ["GITHUB_REPOSITORY"], os.environ["ISSUE"]
-    login, body, url = os.environ["AUTHOR"], os.environ.get("BODY", ""), os.environ.get("COMMENT_URL", "")
+    body, url = os.environ.get("BODY", ""), os.environ.get("COMMENT_URL", "")
     token = os.environ["GH_TOKEN"]
     try:
         cmd = parse(body)
@@ -489,8 +567,10 @@ def command() -> None:
         return
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     try:
-        reviewers = Path(REVIEWERS).read_text() if Path(REVIEWERS).exists() else ""
-        authorize(login, read_reviewers(reviewers))
+        actor = actor_from_env()
+        login = actor.login
+        reviewers = read_reviewers(Path(REVIEWERS).read_text() if Path(REVIEWERS).exists() else "")
+        authorize(actor, reviewers)
         patterns = guarded_patterns(Path(CODEOWNERS).read_text() if Path(CODEOWNERS).exists() else "")
         if cmd.verb != "status":
             today = now[:10]
@@ -501,7 +581,7 @@ def command() -> None:
         results: list[Result] = []
 
         def change(state: dict, builds: str):
-            result = apply(state, cmd, login, now, lookup(repo), patterns, read_reviewers(reviewers).logins)
+            result = apply(state, cmd, actor, now, lookup(repo), patterns, reviewers, require_review())
             results.append(result)
             if result.state is state:  # status, dry run: nothing to save
                 return None

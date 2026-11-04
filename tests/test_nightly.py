@@ -19,7 +19,9 @@ def lookup(*prs):
 
 
 def run(state, text, login="kacpherek", *prs):
-    return ns.apply(state, ns.parse(text), login, NOW, lookup(*prs), PATTERNS)
+    reviewers = ns.read_reviewers("101 kacpherek\n")
+    return ns.apply(state, ns.parse(text), ns.Actor(login, 101 if login == "kacpherek" else 9999), NOW,
+                    lookup(*prs), PATTERNS, reviewers)
 
 T = dt.datetime(2026, 10, 28, 12, 0, tzinfo=dt.timezone.utc)
 
