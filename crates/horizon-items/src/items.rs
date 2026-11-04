@@ -363,6 +363,7 @@ thread_local! {
     /// inside itself (`LootContext.pushVisitedElement`).
     static NESTED_ROLLS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+#[derive(Clone)]
 pub struct Items {
     pub items: HashMap<Arc<str>, ItemInfo>,
     pub order: Vec<Arc<str>>,
@@ -372,6 +373,8 @@ pub struct Items {
     /// Block tag name (without '#') -> member block names.
     pub block_tags: HashMap<String, HashSet<String>>,
     pub item_tags: HashMap<String, HashSet<String>>,
+    /// Entity type tags, used by shader entity ID assignments.
+    pub entity_tags: HashMap<String, HashSet<String>>,
     /// Item tags in vanilla's order (`TagLoader`: file order, nested tags in
     /// place, first occurrence kept), the order `TagSlotDisplay` resolves.
     pub item_tag_order: HashMap<String, Vec<String>>,
@@ -616,7 +619,55 @@ pub fn villager_food(item: &str) -> Option<i32> {
     food.as_ref().and_then(|f| f.get(item).copied())
 }
 
+/// The tags a server sent (`ClientboundUpdateTagsPacket`), by registry: each
+/// tag's members by name, in the packet's order. `None` is a registry the
+/// server sent nothing for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerTags {
+    pub block: Option<HashMap<String, Vec<String>>>,
+    pub item: Option<HashMap<String, Vec<String>>>,
+    pub entity_type: Option<HashMap<String, Vec<String>>>,
+}
+
 impl Items {
+    /// These tables as a client of a server plays with them: the client
+    /// binds the tags the server sent into its registries
+    /// (`ClientPacketListener.handleUpdateTags`, `RegistryDataCollector.appendTags`),
+    /// so `Block.is`/`ItemStack.is` (mining speed, movement, tooltips) read the
+    /// server's tags. A registry the server sent replaces that registry's tags
+    /// whole: a tag it left out is empty. One it did not send keeps the
+    /// game's own. An item tag keeps the packet's order (the server's
+    /// `TagLoader` order), first occurrence kept.
+    pub fn with_server_tags(&self, tags: &ServerTags) -> Items {
+        let sets = |tags: &HashMap<String, Vec<String>>| -> HashMap<String, HashSet<String>> {
+            tags.iter()
+                .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
+                .collect()
+        };
+        let mut items = self.clone();
+        if let Some(block) = &tags.block {
+            items.block_tags = sets(block);
+        }
+        if let Some(entity) = &tags.entity_type {
+            items.entity_tags = sets(entity);
+        }
+        if let Some(item) = &tags.item {
+            items.item_tags = sets(item);
+            items.item_tag_order = item
+                .iter()
+                .map(|(tag, members)| {
+                    let mut seen = HashSet::new();
+                    let ordered = members
+                        .iter()
+                        .filter(|m| seen.insert(m.as_str()))
+                        .cloned()
+                        .collect();
+                    (tag.clone(), ordered)
+                })
+                .collect();
+        }
+        items
+    }
     pub fn resists_fire(&self, stack: &ItemStack, source: &str) -> bool {
         if let Some(data) = stack.data()
             && let Some((_, v)) = data
@@ -926,6 +977,7 @@ impl Items {
             registry_order,
             block_tags: load_tags(root, "block", overlay)?,
             item_tags: load_tags(root, "item", overlay)?,
+            entity_tags,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot,
             songs: load_songs(root),
@@ -956,6 +1008,7 @@ impl Items {
             registry_order: Vec::new(),
             block_tags: load_tags(root, "block", overlay)?,
             item_tags: load_tags(root, "item", overlay)?,
+            entity_tags: load_tags(root, "entity_type", overlay)?,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot: Default::default(),
             songs: HashMap::new(),
@@ -971,6 +1024,7 @@ impl Items {
             order: Vec::new(),
             registry_order: Vec::new(),
             block_tags: HashMap::new(),
+            entity_tags: HashMap::new(),
             item_tag_order: item_tags
                 .iter()
                 .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
@@ -2246,6 +2300,60 @@ pub(crate) fn prepared_items() -> Option<Items> {
 }
 
 #[cfg(test)]
+mod server_tag_tests {
+    use super::*;
+
+    /// #7843: a client plays with the tags its server sent. An iron pickaxe
+    /// (`ToolMaterial.IRON`: speed 6) mines what `#minecraft:mineable/pickaxe`
+    /// holds at 6 and the rest at 1; a server that puts dirt in that tag, and
+    /// stone not, swaps the two. A registry the server sent nothing for keeps
+    /// the game's tags.
+    #[test]
+    fn a_servers_tags_replace_the_games_own_per_registry() {
+        let Some(game) = prepared_items() else {
+            return;
+        };
+        let pickaxe = ItemStack::new("minecraft:iron_pickaxe", 1);
+        assert_eq!(game.mining_speed(Some(&pickaxe), "minecraft:stone"), 6.0);
+        assert_eq!(game.mining_speed(Some(&pickaxe), "minecraft:dirt"), 1.0);
+        let tags = ServerTags {
+            block: Some(HashMap::from([(
+                "minecraft:mineable/pickaxe".to_owned(),
+                vec!["minecraft:dirt".to_owned()],
+            )])),
+            item: Some(HashMap::from([(
+                "minecraft:logs".to_owned(),
+                vec![
+                    "minecraft:stick".to_owned(),
+                    "minecraft:oak_log".to_owned(),
+                    "minecraft:stick".to_owned(),
+                ],
+            )])),
+            entity_type: None,
+        };
+        let client = game.with_server_tags(&tags);
+        assert_eq!(client.mining_speed(Some(&pickaxe), "minecraft:dirt"), 6.0);
+        assert_eq!(client.mining_speed(Some(&pickaxe), "minecraft:stone"), 1.0);
+        // A block tag the server left out is empty, not the game's.
+        assert!(!client.block_tags.contains_key("minecraft:climbable"));
+        assert!(game.block_tags["minecraft:climbable"].contains("minecraft:ladder"));
+        // An item tag: the packet's members and order, first occurrence kept.
+        assert_eq!(
+            client.item_tags["minecraft:logs"],
+            HashSet::from(["minecraft:stick".to_owned(), "minecraft:oak_log".to_owned()])
+        );
+        assert_eq!(
+            client.item_tag_order["minecraft:logs"],
+            vec!["minecraft:stick".to_owned(), "minecraft:oak_log".to_owned()]
+        );
+        // No entity type tags sent: the game's stay.
+        assert_eq!(client.entity_tags, game.entity_tags);
+        // The game's own tables are untouched.
+        assert_eq!(game.mining_speed(Some(&pickaxe), "minecraft:stone"), 6.0);
+    }
+}
+
+#[cfg(test)]
 mod consume_effect_tests {
     use super::*;
 
@@ -2330,6 +2438,23 @@ mod tests {
         let b = BlocksAttacks::of_stack(&bare, None).expect("defaults");
         assert_eq!(b.reductions[0].horizontal_angle, 90.0);
         assert_eq!(b.disable_scale, 1.0);
+    }
+
+    #[test]
+    fn entity_type_tags_survive_world_tag_loading() {
+        let root = std::env::temp_dir().join(format!("horizon-entity-tags-{}", std::process::id()));
+        let tags = root.join("data/test/tags/entity_type");
+        std::fs::create_dir_all(&tags).unwrap();
+        std::fs::write(tags.join("mobs.json"), r#"{"values":["test:mob"]}"#).unwrap();
+        std::fs::write(root.join(crate::content_namespaces::MARKER), r#"["test"]"#).unwrap();
+        let items = Items::tags_only(&root, &PackOverlay::default()).unwrap();
+        assert_eq!(
+            items.entity_tags["test:mobs"],
+            HashSet::from(["test:mob".into()])
+        );
+        assert!(items.block_tags.is_empty());
+        assert!(items.item_tags.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
