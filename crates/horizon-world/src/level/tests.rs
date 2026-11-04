@@ -1524,7 +1524,14 @@ fn crop_can_be_placed_on_farmland() {
     let wheat = w.id("wheat", &[("age", "0")]);
     w.floor(0, 2, "stone");
     w.put(BlockPos::new(0, 0, 0), farmland);
-    let outcome = w.place("wheat", BlockPos::new(0, 0, 0), Direction::Up, 0.0, 60.0, 0.0);
+    let outcome = w.place(
+        "wheat",
+        BlockPos::new(0, 0, 0),
+        Direction::Up,
+        0.0,
+        60.0,
+        0.0,
+    );
     assert!(matches!(outcome, PlaceOutcome::Placed { .. }));
     assert_eq!(w.get(BlockPos::new(0, 1, 0)), wheat);
 }
@@ -1534,11 +1541,17 @@ fn other_crops_can_be_placed_on_farmland() {
     let mut w = world!();
     let farmland = w.id("farmland", &[("moisture", "7")]);
     w.floor(0, 5, "stone");
-    for (i, crop) in ["carrots", "potatoes", "beetroot", "nether_wart"].iter().enumerate() {
+    for (i, crop) in ["carrots", "potatoes", "beetroot", "nether_wart"]
+        .iter()
+        .enumerate()
+    {
         let x = i as i32;
         w.put(BlockPos::new(x, 0, 0), farmland);
         let outcome = w.place(crop, BlockPos::new(x, 0, 0), Direction::Up, 0.0, 60.0, 0.0);
-        assert!(matches!(outcome, PlaceOutcome::Placed { .. }), "failed to place {crop}");
+        assert!(
+            matches!(outcome, PlaceOutcome::Placed { .. }),
+            "failed to place {crop}"
+        );
     }
 }
 
@@ -1548,7 +1561,14 @@ fn crops_cannot_be_placed_on_non_farmland() {
     let dirt = w.id("dirt", &[]);
     w.floor(0, 2, "stone");
     w.put(BlockPos::new(0, 0, 0), dirt);
-    let outcome = w.place("wheat", BlockPos::new(0, 0, 0), Direction::Up, 0.0, 60.0, 0.0);
+    let outcome = w.place(
+        "wheat",
+        BlockPos::new(0, 0, 0),
+        Direction::Up,
+        0.0,
+        60.0,
+        0.0,
+    );
     assert!(matches!(outcome, PlaceOutcome::Failed));
 }
 
