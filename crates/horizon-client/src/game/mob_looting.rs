@@ -22,24 +22,28 @@ use horizon_core::{geometry::Vec3, random::RandomSource};
 impl Game<'_> {
     /// `Mob.aiStep`'s looting block, once per mob per tick.
     pub(super) fn tick_mob_looting(&mut self) {
-        if self.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
+        if self.simulation.dropped.is_empty() || !self.ui.rules.bool("mob_griefing") {
             return;
         }
         let mut near = super::item_areas::ItemAreas::default();
-        for i in 0..self.mobs.len() {
-            let m = &self.mobs[i];
+        for i in 0..self.simulation.mobs.len() {
+            let m = &self.simulation.mobs[i];
             if !m.can_pick_up_loot() || !m.alive() || m.removed {
                 continue;
             }
             // `Mob.ITEM_PICKUP_REACH`.
             let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
-            if !near.may_meet(&self.dropped, self.next_entity, reach) {
+            if !near.may_meet(
+                &self.simulation.dropped,
+                self.simulation_server.next_entity,
+                reach,
+            ) {
                 continue;
             }
             let (species, baby, passenger) = (m.species(), m.is_baby(), m.extra.passenger);
             let mut j = 0;
-            while j < self.dropped.len() {
-                let e = &self.dropped[j];
+            while j < self.simulation.dropped.len() {
+                let e = &self.simulation.dropped[j];
                 if e.pickup_delay > 0 || !reach.intersects(e.bounds()) {
                     j += 1;
                     continue;
@@ -62,11 +66,11 @@ impl Game<'_> {
                     j += 1;
                     continue;
                 };
-                let before = self.dropped[j].clone();
-                let id = self.mobs[i].id;
+                let before = self.simulation.dropped[j].clone();
+                let id = self.simulation.mobs[i].id;
                 self.add_pickup(Taken::Item(Box::new(before.clone())), Collector::Mob(id));
                 self.mob_item_pickup_trigger(i, &before);
-                let e = &mut self.dropped[j];
+                let e = &mut self.simulation.dropped[j];
                 e.stack.count -= taken;
                 if e.stack.count == 0 {
                     self.remove_dropped(j);
@@ -88,7 +92,7 @@ impl Game<'_> {
         // empty main hand.
         if slot.is_armor() && !replace {
             slot = Slot::MainHand;
-            replace = self.mobs[index].extra.main_hand.is_none();
+            replace = self.simulation.mobs[index].extra.main_hand.is_none();
         }
         if !replace {
             return None;
@@ -100,7 +104,7 @@ impl Game<'_> {
         } else {
             stack.count.max(1)
         };
-        let m = &mut self.mobs[index];
+        let m = &mut self.simulation.mobs[index];
         let old = finalize::item_stack(m, slot.index());
         let chance = stored_drop_chance(m, slot.index());
         // `DropChances.byEquipment` against the roll the equip makes.
@@ -122,7 +126,7 @@ impl Game<'_> {
 
     /// `Mob.canReplaceCurrentItem` for what `m` wears or holds in `slot`.
     fn can_replace(&self, index: usize, stack: &ItemStack, slot: Slot) -> bool {
-        let m = &self.mobs[index];
+        let m = &self.simulation.mobs[index];
         let Some(worn_stack) = finalize::item_stack(m, slot.index()) else {
             return true;
         };
@@ -195,7 +199,7 @@ impl Game<'_> {
             return;
         };
         let stack = e.stack.clone();
-        let target = self.mob_entity(&self.mobs[index]);
+        let target = self.mob_entity(&self.simulation.mobs[index]);
         self.for_each_player(|g| {
             if g.acting_uuid() == owner {
                 g.trigger_item_entity("minecraft:thrown_item_picked_up_by_entity", &stack, &target);

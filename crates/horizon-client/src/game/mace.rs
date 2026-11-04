@@ -147,7 +147,7 @@ impl Game<'_> {
             held.as_ref(),
             "minecraft:smash_damage_per_fallen_block",
             &ctx,
-            &mut self.world.random,
+            &mut self.simulation.world.random,
             0.0,
         );
         (damage + f64::from(per_block) * fall) as f32
@@ -170,7 +170,7 @@ impl Game<'_> {
                 })
             }
             horizon_client::mobs::Who::Mob(id) => {
-                let m = self.mobs.iter().find(|m| m.id == id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
                 Some(horizon_client::mobs::Aim {
                     eye: [m.position.x, m.eye_y(), m.position.z],
                     look: m.look_angle(),
@@ -185,11 +185,13 @@ impl Game<'_> {
         let _attacker = self.knockback_scope(self.player.as_ref().map_or(0, |p| p.entity_id));
         let held = self.held().cloned();
         let aim = self.attacker_aim(source.attacker);
-        let kind = self.mobs[index].kind.id.clone();
+        let kind = self.simulation.mobs[index].kind.id.clone();
         let mut amount = amount;
         // After the invulnerability guard, as `LivingIncomingDamageEvent` fires.
-        if !crate::mod_api::mods().is_empty() && !self.mobs[index].refuses_damage(&source) {
-            let victim = &self.mobs[index];
+        if !crate::mod_api::mods().is_empty()
+            && !self.simulation.mobs[index].refuses_damage(&source)
+        {
+            let victim = &self.simulation.mobs[index];
             let position = victim.position;
             let view = super::view_vector(victim.head_yaw, victim.head_pitch);
             let mut canceled = false;
@@ -223,7 +225,7 @@ impl Game<'_> {
             ..Default::default()
         };
         let enchantments = &world_stations!(self).enchantments;
-        let random = &mut self.world.random;
+        let random = &mut self.simulation.world.random;
         // CombatRules.getDamageAfterAbsorb: EnchantmentHelper.modifyArmorEffectiveness.
         let mut breach = |fraction: f32| {
             enchantments.modify_value(
@@ -234,14 +236,14 @@ impl Game<'_> {
                 fraction,
             )
         };
-        let old_health = self.mobs[index].health;
+        let old_health = self.simulation.mobs[index].health;
         // The causing entity's aim, for what turns a blow by where it points
         // (`SulfurCube.knockback`).
-        self.mobs[index].attacker_aim = aim;
-        let hurt = self.mobs[index].damage_with(amount, source, Some(&mut breach));
-        self.mobs[index].attacker_aim = None;
-        if hurt && self.mobs[index].health != old_health {
-            self.mob_damage_event(self.mobs[index].id);
+        self.simulation.mobs[index].attacker_aim = aim;
+        let hurt = self.simulation.mobs[index].damage_with(amount, source, Some(&mut breach));
+        self.simulation.mobs[index].attacker_aim = None;
+        if hurt && self.simulation.mobs[index].health != old_health {
+            self.mob_damage_event(self.simulation.mobs[index].id);
         }
         hurt
     }
@@ -292,9 +294,9 @@ impl Game<'_> {
     /// waived from where the hit landed, the ground or air smash sounds, and
     /// the knockback around the target.
     fn mace_hurt_enemy(&mut self, index: usize) {
-        let target_on_ground = self.mobs[index].on_ground;
+        let target_on_ground = self.simulation.mobs[index].on_ground;
         if let Some(fall) = self.mace_smash_self(target_on_ground) {
-            let target = &self.mobs[index];
+            let target = &self.simulation.mobs[index];
             self.smash_knockback(target.position, Spared::Mob(target.id), fall);
         }
     }
@@ -404,13 +406,14 @@ impl Game<'_> {
         self.level_event_at(2013, on_pos, 750);
         let heavy = if fall > HEAVY_THRESHOLD { 2.0 } else { 1.0 };
         let player = Some(self.acting_uuid());
-        for m in self.mobs.iter_mut().filter(|m| {
+        for m in self.simulation.mobs.iter_mut().filter(|m| {
             target != Spared::Mob(m.id) && m.alive() && !m.removed && !ally_of_player(m, player)
         }) {
             let resistance = m.knockback_resistance();
             smash_push(center, heavy, m.position, &mut m.velocity, resistance);
         }
         for s in self
+            .simulation
             .armor_stands
             .iter_mut()
             .filter(|s| !s.marker && target != Spared::Stand(s.id))
@@ -523,7 +526,7 @@ impl Game<'_> {
             )
         };
         let mut victims: Vec<((i32, i32, i32), u32, bool)> = Vec::new();
-        for m in &self.mobs {
+        for m in &self.simulation.mobs {
             if spared != Spared::Mob(m.id)
                 && m.alive()
                 && !m.removed
@@ -535,7 +538,7 @@ impl Game<'_> {
                 victims.push((section(m.position), m.id, false));
             }
         }
-        for s in &self.armor_stands {
+        for s in &self.simulation.armor_stands {
             if !s.marker
                 && spared != Spared::Stand(s.id)
                 && s.bounds().intersects(area)
@@ -547,7 +550,7 @@ impl Game<'_> {
         victims.sort_by_key(|&(key, id, _)| (key, id));
         for (_, id, is_stand) in victims {
             if is_stand {
-                let Some(i) = self.armor_stands.iter().position(|s| s.id == id) else {
+                let Some(i) = self.simulation.armor_stands.iter().position(|s| s.id == id) else {
                     continue;
                 };
                 // knockback(0.4, ..) follows a hurtServer that landed, on a
@@ -574,12 +577,12 @@ impl Game<'_> {
                 }
                 let (mut kx, mut kz) = (knock.x, knock.z);
                 while kx * kx + kz * kz < f64::from(1.0e-5_f32) {
-                    let r = &mut self.world.random;
+                    let r = &mut self.simulation.world.random;
                     kx = (r.next_double() - r.next_double()) * 0.01;
                     kz = (r.next_double() - r.next_double()) * 0.01;
                 }
                 let len = (kx * kx + kz * kz).sqrt();
-                if let Some(s) = self.armor_stands.iter_mut().find(|s| s.id == id) {
+                if let Some(s) = self.simulation.armor_stands.iter_mut().find(|s| s.id == id) {
                     s.velocity = Vec3::new(
                         s.velocity.x / 2.0 - kx / len * knock.strength,
                         if s.on_ground {
@@ -592,23 +595,23 @@ impl Game<'_> {
                 }
                 continue;
             }
-            let Some(i) = self.mobs.iter().position(|m| m.id == id) else {
+            let Some(i) = self.simulation.mobs.iter().position(|m| m.id == id) else {
                 continue;
             };
-            let kind = self.mobs[i].kind.id.clone();
+            let kind = self.simulation.mobs[i].kind.id.clone();
             let kind = format!("minecraft:{}", kind.trim_start_matches("minecraft:"));
             let amount = self.enchanted_damage(&kind, base) * scale;
             let source = self.attack_source(from);
             // hurtServer first; the knockback and post-attack effects follow
             // only when it landed.
-            let old_health = self.mobs[i].health;
+            let old_health = self.simulation.mobs[i].health;
             if self.hurt_by_player(i, amount, source) {
-                if old_health > 0.0 && !self.mobs[i].alive() {
+                if old_health > 0.0 && !self.simulation.mobs[i].alive() {
                     self.native_kill_event(i);
                 }
-                self.mobs[i].knockback(0.4, xd, zd, &source);
+                self.simulation.mobs[i].knockback(0.4, xd, zd, &source);
                 self.last_hurt_by_player
-                    .insert(self.mobs[i].id, self.lan_acting);
+                    .insert(self.simulation.mobs[i].id, self.lan_acting);
                 self.post_attack(i);
             }
         }
@@ -624,7 +627,7 @@ impl Game<'_> {
     /// Level event 2013 (`ParticleUtils.spawnSmashAttackParticles`): dust
     /// pillars of the block at `pos`, a cluster over it and a ring 3.5 out.
     pub(super) fn smash_dust(&mut self, pos: BlockPos, count: i32) {
-        let state = self.world.block(pos.x, pos.y, pos.z);
+        let state = self.simulation.world.block(pos.x, pos.y, pos.z);
         let Some((sprite, tint)) = self.particle_sprite(state, [pos.x, pos.y, pos.z]) else {
             return;
         };

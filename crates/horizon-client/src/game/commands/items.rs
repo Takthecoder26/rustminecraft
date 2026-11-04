@@ -177,6 +177,7 @@ impl Game<'_> {
             // `getChestVehicleSlot` takes any index below `getContainerSize`.
             Owner::Entity(Target::Cart(id)) => {
                 let size = self
+                    .simulation
                     .carts
                     .iter()
                     .find(|c| c.id == *id)
@@ -353,7 +354,7 @@ impl Game<'_> {
             Slot::Offhand => self.offhand.clone(),
             Slot::Ender(i) => self.ender_items.get(*i).cloned().flatten(),
             Slot::Mob(id, key) => {
-                let m = self.mobs.iter().find(|m| m.id == *id)?;
+                let m = self.simulation.mobs.iter().find(|m| m.id == *id)?;
                 let item = match *key {
                     "mainhand" => &m.extra.main_hand,
                     "offhand" => &m.extra.off_hand,
@@ -372,6 +373,7 @@ impl Game<'_> {
                 })
             }
             Slot::Stand(id, i) => self
+                .simulation
                 .armor_stands
                 .iter()
                 .find(|a| a.id == *id)?
@@ -379,9 +381,16 @@ impl Game<'_> {
                 .get(*i)
                 .cloned()
                 .flatten(),
-            Slot::Frame(id) => self.item_frames.iter().find(|f| f.id == *id)?.item.clone(),
+            Slot::Frame(id) => self
+                .simulation
+                .item_frames
+                .iter()
+                .find(|f| f.id == *id)?
+                .item
+                .clone(),
             Slot::Cart(id, i) => self.cart_slots(*id)?.get(*i).cloned().flatten(),
             Slot::Block(p, i) => self
+                .simulation
                 .world
                 .block_entities
                 .get(&(p[0], p[1], p[2]))?
@@ -404,12 +413,18 @@ impl Game<'_> {
         self.block_can_place(*p, *i, stack.unwrap_or(&air))
     }
     fn block_container_size(&self, p: [i32; 3]) -> Option<usize> {
-        let size = match self.world.block_entities.get(&(p[0], p[1], p[2]))? {
+        let size = match self
+            .simulation
+            .world
+            .block_entities
+            .get(&(p[0], p[1], p[2]))?
+        {
             BlockEntity::Mod(m) if m.id.is_empty() => 0,
             BlockEntity::Mod(_) => self
+                .simulation
                 .world
                 .block_entities
-                .mod_container(self.world.block(p[0], p[1], p[2]).0)
+                .mod_container(self.simulation.world.block(p[0], p[1], p[2]).0)
                 .map_or(0, |c| c.slots),
             entity => entity.slots().len(),
         };
@@ -427,11 +442,14 @@ impl Game<'_> {
                 .is_some_and(|m| m.contains(&*s.item))
         });
         let recipes = world_recipes!(self);
-        match self.world.block_entities.get_mut(&key) {
+        match self.simulation.world.block_entities.get_mut(&key) {
             Some(BlockEntity::Furnace(f)) if i == 0 => f.set_input(recipes, stack),
             Some(BlockEntity::Furnace(f)) => {
                 f.items[i] = stack;
-                self.world.modified.insert((p[0] >> 4, p[2] >> 4));
+                self.simulation
+                    .world
+                    .modified
+                    .insert((p[0] >> 4, p[2] >> 4));
                 return true;
             }
             Some(BlockEntity::ChiseledBookshelf(_)) if !book => return true,
@@ -518,7 +536,7 @@ impl Game<'_> {
                 None => false,
             },
             Slot::Mob(id, key) => {
-                let Some(m) = self.mobs.iter_mut().find(|m| m.id == *id) else {
+                let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == *id) else {
                     return false;
                 };
                 let item = stack.as_ref().map(|s| s.item.clone());
@@ -547,6 +565,7 @@ impl Game<'_> {
                 true
             }
             Slot::Stand(id, i) => match self
+                .simulation
                 .armor_stands
                 .iter_mut()
                 .find(|a| a.id == *id)
@@ -558,7 +577,7 @@ impl Game<'_> {
                 }
                 None => false,
             },
-            Slot::Frame(id) => match self.item_frames.iter_mut().find(|f| f.id == *id) {
+            Slot::Frame(id) => match self.simulation.item_frames.iter_mut().find(|f| f.id == *id) {
                 Some(f) => {
                     f.item = stack;
                     true
@@ -1063,7 +1082,11 @@ impl Game<'_> {
             if found.is_empty() {
                 return Err(match &sources[..] {
                     [Owner::Block(p)]
-                        if !self.world.block_entities.contains_key(&(p[0], p[1], p[2])) =>
+                        if !self
+                            .simulation
+                            .world
+                            .block_entities
+                            .contains_key(&(p[0], p[1], p[2])) =>
                     {
                         err(
                             "commands.item.source.not_a_container",

@@ -22,15 +22,15 @@ pub(super) struct FangState {
 }
 impl Game<'_> {
     pub(super) fn add_fangs(&mut self, at: [f64; 3], yaw: f32, delay: i32, owner: u32) {
-        self.next_entity += 1;
-        self.insert_fangs(self.next_entity, at, yaw, delay, owner);
+        self.simulation_server.next_entity += 1;
+        self.insert_fangs(self.simulation_server.next_entity, at, yaw, delay, owner);
     }
 
     pub(super) fn insert_fangs(&mut self, id: u32, at: [f64; 3], yaw: f32, delay: i32, owner: u32) {
-        if self.fangs.model.is_none() {
-            self.fangs.model = self.entity_models.evoker_fangs.clone();
+        if self.simulation.fangs.model.is_none() {
+            self.simulation.fangs.model = self.entity_models.evoker_fangs.clone();
         }
-        self.fangs.list.push(Fangs {
+        self.simulation.fangs.list.push(Fangs {
             id,
             pos: at,
             yaw,
@@ -45,9 +45,9 @@ impl Game<'_> {
             Vec3::new(f.pos[0], f.pos[1], f.pos[2]),
             f.yaw,
             f.warmup,
-            self.persist.uuids.get(&f.owner).copied(),
+            self.simulation.persist.uuids.get(&f.owner).copied(),
             uuid,
-            self.persist.raw.get(&f.id),
+            self.simulation.persist.raw.get(&f.id),
         )
     }
     pub(super) fn loaded_fangs_owner(&self, tag: &horizon_world::nbt::Tag) -> u32 {
@@ -61,7 +61,7 @@ impl Game<'_> {
     /// `EvokerFangs.handleEntityEvent`: only event 4 starts a client attack.
     pub(super) fn remote_fangs_event(&mut self, id: u32, event: i8) {
         if event == 4
-            && let Some(f) = self.fangs.list.iter_mut().find(|f| f.id == id)
+            && let Some(f) = self.simulation.fangs.list.iter_mut().find(|f| f.id == id)
         {
             f.started = true;
             self.audio.play_unshared(
@@ -75,7 +75,7 @@ impl Game<'_> {
 
     /// `EvokerFangs.tick`: clients only advance animation, never damage or discard.
     pub(super) fn tick_remote_fangs(&mut self) {
-        for f in &mut self.fangs.list {
+        for f in &mut self.simulation.fangs.list {
             if f.started {
                 f.life -= 1;
             }
@@ -84,7 +84,7 @@ impl Game<'_> {
 
     /// `EvokerFangs.tick`.
     pub(super) fn tick_fangs(&mut self) {
-        let mut list = std::mem::take(&mut self.fangs.list);
+        let mut list = std::mem::take(&mut self.simulation.fangs.list);
         list.retain_mut(|f| {
             f.warmup = f.warmup.wrapping_sub(1);
             if f.warmup >= 0 {
@@ -106,7 +106,7 @@ impl Game<'_> {
             f.life -= 1;
             f.life >= 0
         });
-        self.fangs.list = list;
+        self.simulation.fangs.list = list;
     }
     /// `dealDamageTo` everything alive in the fangs' box (0.5 x 0.8,
     /// inflated 0.2 sideways) but the evoker's allies.
@@ -120,6 +120,7 @@ impl Game<'_> {
         // `EvokerFangs.dealDamageTo`: indirectMagic(fangs, owner) while the
         // owner lives, plain magic (nobody to name) once it is gone.
         let owner = self
+            .simulation
             .mobs
             .iter()
             .any(|m| m.id == f.owner && m.alive())
@@ -148,6 +149,7 @@ impl Game<'_> {
             )
         };
         let illagers: Vec<u32> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| illager(m.species()))
@@ -155,7 +157,7 @@ impl Game<'_> {
             .collect();
         // A missing owner hurts everyone (`currentOwner == null`).
         let owner_known = illagers.contains(&f.owner);
-        for m in &mut self.mobs {
+        for m in &mut self.simulation.mobs {
             let ally = owner_known
                 && (illager(m.species())
                     || m.species() == Species::Vex
@@ -180,7 +182,7 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<horizon_client::mesher::Vertex>,
     ) {
-        let Some(model) = self.fangs.model.as_ref() else {
+        let Some(model) = self.simulation.fangs.model.as_ref() else {
             return;
         };
         let Some(r) = self
@@ -193,7 +195,7 @@ impl Game<'_> {
             return;
         };
         let partial = alpha as f32;
-        for f in &self.fangs.list {
+        for f in &self.simulation.fangs.list {
             if !f.started {
                 continue;
             }
@@ -220,7 +222,7 @@ impl Game<'_> {
             root[6] = pre;
             root[7] = pre;
             root[8] = pre;
-            let light = self.world.light(
+            let light = self.simulation.world.light(
                 f.pos[0].floor() as i32,
                 f.pos[1].floor() as i32,
                 f.pos[2].floor() as i32,

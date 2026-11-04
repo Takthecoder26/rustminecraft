@@ -39,7 +39,7 @@ impl Game<'_> {
         &*self
             .res
             .facts()
-            .get(self.world.block(pos[0], pos[1], pos[2]))
+            .get(self.simulation.world.block(pos[0], pos[1], pos[2]))
             .name
             == "minecraft:powder_snow"
     }
@@ -55,7 +55,10 @@ impl Game<'_> {
         let Some(filled) = picked else {
             return Ok(());
         };
-        self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
+        self.simulation
+            .world
+            .modified
+            .insert((pos[0] >> 4, pos[2] >> 4));
         self.award_stat("used", "minecraft:bucket", 1);
         if let Some(eye) = self
             .player

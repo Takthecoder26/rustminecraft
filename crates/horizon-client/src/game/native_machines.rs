@@ -37,10 +37,10 @@ impl Game<'_> {
         tool: Option<&ItemStack>,
         collect: bool,
     ) -> Option<Vec<ItemStack>> {
-        if !self.native_authoritative() || !self.world.loaded(pos[0], pos[2]) {
+        if !self.native_authoritative() || !self.simulation.world.loaded(pos[0], pos[2]) {
             return None;
         }
-        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
         if self.res.behaviours().is_air(state) {
             return None;
         }

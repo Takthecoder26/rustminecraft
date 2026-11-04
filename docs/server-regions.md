@@ -1,0 +1,499 @@
+# Server simulation ownership and region execution
+
+The server runs region-owned mob transactions on a bounded persistent pool,
+then commits them in the original entity order. Independence is checked from
+actual observations and shared RNG checkpoints. A region boundary never hides
+a target, collision candidate, owner, projectile, or player.
+
+## Ownership and lifecycle
+
+`game/simulation.rs::LevelSimulation` owns the mutable world/chunks, ordered
+entity families (mobs, projectiles, vehicles, items, experience and decorations),
+block tick queues, chunk tickets, spawn scratch, death bookkeeping, region
+indexes and outgoing level/entity events. `Game` and `levels::Parked` hold this
+same owner. Dimension swaps move it as one value. Existing typed raid, sculk,
+portal, streaming and save services retain their existing coordinated phases
+and dimension-specific swaps. Read-only registries, collision tables, recipes,
+biomes and mob types are borrowed from `Resources`/`PackResources`.
+
+`ServerCoordination` owns the dimension manager, server-wide entity IDs, the
+entity admission cutoff and one lazy persistent pool shared by all levels.
+The mutable level owner is `Send`; the immutable `TickResources` contract is
+`Send + Sync`. Native callbacks are excluded from worker inputs.
+
+`server_regions::Regions` groups eight-connected resident chunks. Its identity
+is the minimum chunk coordinate in the component, valid until topology changes.
+A loaded bridge merges regions; unloading it splits them. The chunk-map
+membership revision also detects resets and replacement. Block changes alone
+do not rebuild topology. Resident connectivity defines ownership, not proof
+that two simulations commute.
+
+Topology follows `ChunkMap::deltas_since` a chunk at a time. An added chunk joins
+or merges the regions around it. A removed chunk keeps its region whole when the
+chunks around it still connect among themselves; when they don't, the region may
+have split, and the whole map is rebuilt. So is a reset or a gap in the deltas.
+Legacy mode and automatic mode below its mob threshold keep no regions at all.
+
+Every entity retains its global insertion slot. Region-local entity indexes
+preserve the filtered order of those slots. At the tick barrier an entity belongs
+to exactly one resident component, or to none when its chunk is unloaded; the
+coordinator's walk reaches it either way. Movement may cross owners during the tick; ownership is
+frozen until the next barrier, when migration, removals and new entities are
+indexed together. Migration never loads or retains a chunk. Existing admission,
+entity-ticking ticket, despawn, portal, persistence and save rules remain in
+charge. Concatenating region lists would change interleaved entity ordering;
+the coordinator always walks the original global list.
+
+## Transaction and publication barrier
+
+1. Complete the existing spawn/raid and native pre-tick phases. Refresh topology
+   and local indexes, and build the ordered `Seen` snapshot and spatial grid.
+2. Reserve level-owned EntitySection insertion order in global entity order.
+   Build immutable player indexes and per-mob difficulty/despawn contexts.
+3. Give each job exclusive ownership of its mutable mob inputs. Workers borrow
+   world/chunk/resources; they do not clone the world or its chunks. A sparse
+   overlay contains only that region's updated `Seen` entries and grid cells.
+4. Tick each region in its original local order, including AI, navigation,
+   effects, movement, collision, damage and despawn decisions. Same-region
+   pushes and single-target brain writes reach later local inputs immediately.
+5. Join all jobs. Walk global entity slots and validate each prediction's
+   observations, same-region prefix and level RNG checkpoint. Commit an
+   unchanged transaction by moving its resulting mob/events into place.
+   Otherwise run that mob serially against the current authoritative inputs
+   and invalidate the rest of that owner's predicted prefix.
+6. Apply immediate pushes and brain events at the existing point in that walk.
+   Complete deaths, loot, event effects, projectiles and replication in their
+   original coordinated phases. Clients only see completed authoritative state.
+
+No new cross-region delayed-event queue is used. A replay has no externally
+visible speculative events. The full mutable-mob tests compare every field,
+event sequence and final RNG against the retained serial execution, including
+breeding, overlapping owners and nectar-bearing bees that consume level RNG.
+The serial reference also runs against a complete snapshot without the spatial
+index, checking that indexed execution preserves the filtered results.
+
+`SeenView` prevents untracked raw-slice observations. ID lookups record slots;
+full scans record a complete-snapshot read; spatial queries record exact grid
+columns, including empty columns. An earlier foreign entity entering an empty
+queried column invalidates a prediction. Bounds growth, retained empty cells
+and a change between indexed and full-scan queries also invalidate it. No
+fixed margin or maximum entity speed is assumed. Sparse grid overlays preserve
+the original candidate order and legacy full-scan fallback rules.
+
+Audited box-filtering callers use `others_intersecting`, which enforces the
+exact intersection predicate at its API. Position-range searches retain their
+inclusive range predicate. For these bounded queries, a sparse lookup scans
+populated cells when that is cheaper than walking empty columns, preserving
+global slot order without declaring the entire snapshot observed. The query
+extent comes from the requested geometry and actual maximum body width, not a
+region margin. Validation likewise scans changed populated cells for very large
+areas, so an enormous query cannot cause an unbounded empty-cell walk. Legacy
+candidate-only callers without an equivalent geometric predicate retain their
+existing scan and conservative dependency rules.
+
+Species-filtered observations have their own ordered index and read set.
+Zombie village searches and villager POI ticket scans can read all villagers
+without falsely depending on unrelated zombies. A foreign member's changed
+state, removal, or a change into/out of the queried species invalidates that
+read, including a query that originally found nobody. Same-region membership
+changes are supplied by the sparse overlay in global slot order. Genuine global
+villager POI dependencies therefore remain coordinated through validation and
+replay; an empty villager population does not serialize every zombie region.
+
+The player directory uses exact distance searches over all players. Local
+players seed the search, but pruning uses distance bounds over the complete
+tree. Original host/guest tie order, dead/creative/spectator filtering, bound
+targets, sleeping owners and lead holders are preserved; nonfinite inputs use
+the original ordered scan.
+
+## Cross-region dependency audit
+
+| Dependency | Coordination |
+| --- | --- |
+| Level RNG | Each job starts at the same checkpoint. A result that consumed it commits only at that exact authoritative stream state, including cached Gaussian state; otherwise serial replay consumes the original draws. A result with no level draws never overwrites the authoritative stream. No per-region seed is substituted. |
+| Mob observations and collisions | The complete snapshot remains visible. Actual slot, spatial, species and full-scan reads are validated against earlier foreign writes; local overlays preserve immediate local observations. |
+| Pushes and brain memories | Pending pushes retain event order. Known single-recipient writes are applied to later owned inputs; foreign recipients invalidate their owner's prefix. Riding and school-follow changes conservatively invalidate all prefixes and run the remaining conflicting work serially. |
+| EntitySection insertion | A per-level allocator reserves order before jobs run. Rejected work cannot consume a process-global insertion counter or change candidate ordering. |
+| Raider hurt ordering | Raider species and active raid participants stay serial because their hurt sequence remains globally coordinated. A worker stops before that entity; the coordinator runs it normally. |
+| Native mods and tracing | Loaded native mods, entity tick listeners and RNG tracing retain serial execution. Arbitrary callbacks are never speculated. Content-block contacts keep their existing server-thread scope. |
+| Projectiles and vehicles | The existing ordered hit, homing, passenger and steering phases operate on completed mob state. Their dependencies can span any region and are not declared independent. Projectile admission/join rules are preserved. |
+| Explosions, block writes and navigation | Existing explosion, damage, block and event handlers remain coordinated. Navigation sees the same borrowed world and collision-change list during the mob phase. No explosion radius is used as an independence margin. |
+| Spawning and caps | Natural/custom spawning, raids, pack finalization, global/per-player caps, IDs and their shared RNG stay in their existing serial order before entity transactions. Spawn scratch follows its level owner. |
+| Death, despawn and drops | Existing ticket/despawn checks, corpse removal, death effects and loot processing surround the validated mob tick at the original points. Non-ticking despawns invalidate affected observations. |
+| Replication and chunk lifecycle | All workers join before publication, streaming or unload can mutate the borrowed world. Existing event buffers and entity tracking publish committed results, including authoritative replay results. |
+
+Sound ID interning uses persistent-thread local caches instead of process-wide
+mutexes in living-entity ticking. There is no global mob-loop lock. Worker
+results contain owned mob state and events; there are no unsafe world pointers.
+
+## Execution controls
+
+Automatic mode uses region transactions for at least 128 mobs in at least two
+resident regions. Small or connected workloads retain the direct serial path.
+The threshold only controls scheduling overhead; it never limits interactions.
+
+A region that wastes its predictions (half or more thrown away, four rounds in a
+row) sits out in automatic mode: 20 ticks, doubling up to 640 while each new try
+is wasted too, and forgiven by a round that commits. Its mobs run on the
+coordinator meanwhile, exactly as a replay does, and other regions keep their
+workers. This only changes cost. Level RNG draws (school leaders, nectar bees,
+villagers) and shared villager reads are the usual causes. The forced modes below
+never sit out, so that they test everything. How much this saves on a mixed
+population has not been measured; `tools/bench_region_ticks.py --species
+zombie,cow,villager` runs one.
+
+- `HORIZON_SIMULATION_MODE=legacy`: retained direct serial mob loop.
+- `HORIZON_SIMULATION_MODE=serial`: region transactions on the server thread.
+- `HORIZON_SIMULATION_MODE=parallel`: force region transactions, including small
+  test scenarios.
+- `HORIZON_SIMULATION_MODE=verify`: `parallel`, and every commit is also replayed
+  on the coordinator from the same mob and RNG. A different mob, event list, RNG
+  or keep decision panics and names the first difference. One draw is repeated
+  on purpose: a long jump's angle shuffle is unseeded, as in vanilla, so this mode
+  seeds it from the mob and its target (`mobs/frog.rs`). Without that,
+  `dedicated_server` failed here on every run, and the 2026-11-04 parallel commit
+  results below predate the fix. Other modes keep the unseeded shuffle.
+  The check catches what the
+  read tracking can't see: a new thread-local, a global counter, or a `MobWorld`
+  override only one of the two paths sets. CI runs the server harnesses this way
+  (`tools/ci/region-verify.sh`).
+- `HORIZON_PARALLEL_COMMIT=0`: every round takes the serial walk, with no
+  classification. Any other value, or none, leaves clean rounds on the workers
+  ([below](#parallel-commit)). `verify` runs a clean round on both paths and
+  compares them; `serial` has no workers, so it always walks.
+- `HORIZON_SIMULATION_WORKERS=1..8`: bounded pool size; defaults to the project's
+  worker-count policy, capped at eight. Pool construction failure falls back
+  to serial execution.
+- `HORIZON_REGION_METRICS=1`: region, predicted, committed and replayed counts,
+  and whether the round was clean or fell back, with the reason.
+
+What a prediction replaces is guarded in debug builds too: `TickRound::commit`
+panics when the walk wrote to the mob since its prediction was made. Every event
+that writes to another mob says so in `MobEvent::immediate_write`, an exhaustive
+match that the prediction, the invalidation and `apply_brain_events` all read.
+
+A panic during the mob tick leaves the mob list in `MobRescue`, and the crash save
+takes it back, so the save doesn't write the level's entities as if it had no mobs.
+
+## Parallel commit
+
+The commit walk (step 5 above) costs about 7 ms at 100 players and most of a
+tick's mobs have nothing for it to decide. A round that is provably independent
+skips it: each mob is applied from its own prediction on the workers, and only
+what needs an order runs on the coordinator. Everything else walks as before.
+
+What each step of the walk can observe, and where it goes in a clean round:
+
+| Step | Reads or writes | Clean round |
+| --- | --- | --- |
+| Loaded, ticking and canceled gates | The mob's position, tickets, native callbacks | Decided: a mob they stop has no prediction, which makes the round not clean; native mods already keep the round off the workers |
+| `apply_mob_pushes` before the commit | Pushes from earlier slots | Not run: only same-owner pushes are allowed, and the target's prediction applied them, so the walk's copy would be swapped out anyway |
+| `blocks_changed` | The tick's collision changes | Not run: the prediction did it |
+| Validation (`conflict`, RNG checkpoint) | Earlier foreign writes, the level random | Replaced by the classifier, which is stricter (below) |
+| Swap, `Committed` | The mob and its prediction | Worker |
+| `bindings` | Own id only | Worker decides, coordinator writes the changes in slot order |
+| `events` (cross-owner pushes void an owner) | Other owners | Not reachable: cross-owner pushes aren't clean |
+| Corpses, `gone`, `dead`, `died` | Own mob, own id | Worker decides, coordinator clones and records in slot order |
+| `take_mob_pushes` | Own events | Worker; those at a passed slot are merged in slot order for the end of the walk |
+| Shulker bullet target, guest events | Own events, guest ids | Worker; guest events are merged in slot order |
+| Snapshot entry | Own slot | Worker |
+| `grid.update` | Shared cell lists, `reach` | Worker decides, coordinator updates only the mobs that changed cell or reach, in slot order, so the lists come out identical |
+| `snapshot_changed` | The round's change log | Not needed: nothing validates after the classifier |
+| `apply_brain_events`, `immediate_brain_write` | Other mobs, `failed` | Not reachable: any event that writes to another mob isn't clean |
+| Event order, RNG, section order | Slot order; level random; reserved per slot before the jobs | Merged in slot order; a clean round draws nothing; unchanged |
+
+**Classifying.** Before anything changes, the workers look at each region's
+predictions against tick-start state, and the coordinator joins what they find.
+A round is clean only when all of these hold:
+
+- Every mob has a prediction. No mob is unloaded, outside the entity-ticking area
+  or a raider, no region is sitting out and no prediction was cut short.
+- No prediction drew from the level random.
+- No event writes to another mob (`MobEvent::immediate_write`). This counts writes
+  inside the region too.
+- Pushes only aim at mobs of the same owner.
+- No read meets a write of any other owner's prediction, whichever slot it came
+  from: a full scan, a slot, a species or a queried grid column. Query shapes are
+  checked against the round's final reach and an upper bound on its cell count.
+  The walk's grid always lies between the prediction's and that one, and a shape
+  only grows with them, so a shape that holds on both holds throughout.
+
+These are stricter than validation, which only knows the slots already walked, so
+a clean round is one the walk would commit whole. Any other round runs today's
+walk from the start: nothing has been applied, so there is nothing to undo. The
+walk also stays for `executor()` returning `None` and for pools with one worker.
+
+**The cost of falling back.** A round that fails on the first check pays nothing.
+One that fails later pays the classification and then the walk. How much this
+costs on a workload that falls back every round has not been measured.
+
+**Limits.** This only helps levels whose every mob is predicted, every tick. One
+mob outside the entity-ticking area sends the whole round to the walk, and a
+server's view distance is normally larger than its simulation distance, so mobs
+can stand there. Level RNG users (school leaders, nectar bees, villagers) and
+breeding do the same. The benchmark's zombies avoid all of these, so its result
+is the best case. The server harnesses are nearer the other end: in verify mode,
+`dedicated_server`, `server_entities`, `server_player_damage` and `natural_spawn`
+together had 2 clean rounds and 1,078 that fell back as `Unpredicted`. How often
+a real server's rounds are clean has not been measured.
+
+`clean_commit_matches_the_serial_walk` runs the same scenes through the real
+`tick_creature_entities` on the walk, the clean path and verify mode, and takes
+the walk's result as expected: mobs, snapshot, grid, level random, keep list,
+events in order, guest events, deaths, pushes, bindings and stats. Its scenes are
+a clean round with crowds pushing each other, a cross-region read, a brain write
+to another mob, a death and a removal, a guest hit and a mob with no prediction.
+It needs prepared resources, so it is `#[ignore]`d: set `HORIZON_TEST_RESOURCES`
+and pass `--include-ignored`. The classifier's own tests need no data. In verify
+mode, a clean round also runs on a copy and is compared with the walk's result,
+but the CI harnesses reach that in very few rounds (see the limits above), so
+this test is the clean path's main coverage. The benchmark's clean rounds were
+not compared with a walk.
+
+## Validation and benchmark
+
+The focused tests cover topology/bridge merge and split, stable ordering,
+negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
+sparse-grid equivalence, chunk-by-chunk topology against a whole rebuild,
+negative-space reads, distant ID/full-scan reads,
+foreign bounds growth, sparse populated-cell queries, shared RNG/Gaussian
+consumption, complete mutable-mob transactions and exact indexed player
+selection. At implementation revision `4c5925eb2`, the full mob-AI vanilla oracle passes all 272 scenarios and all
+127,179 mob ticks. Forced-parallel dedicated-server, server-entity,
+player-damage and natural-spawning harnesses pass. Live server-thread/LAN
+checks pass for mobs, portals, projectiles/vehicles and blasts; the mob check
+was repeated against the final runtime.
+
+The repository check at that implementation revision passes formatting, clippy (including the server
+feature configuration), 5,853 workspace Rust tests, 627 Python tests and 24
+content-root tests. Launcher formatting/clippy and 463 launcher tests pass;
+its translation-completeness test fails on missing Hebrew strings. The exact
+unchanged test also fails against base `9697aaf14`, independently reproducing
+that existing failure.
+
+Before integration with newer upstream changes, 225 distinct affected parity
+entries passed without a recorded behavior mismatch. The remaining broad sweep
+was stopped when the user requested delivery after the extended run; it is not
+reported as a completed sweep. Save-fixture setup and an item-order oracle run
+required retries; the fixture startup and both item-order cases then succeeded.
+
+Current main `e41334ac0` is integrated at `98aaa6e9e`. The merged server passes
+`cargo check -p horizon-client --lib`, formatting, seven region topology and
+concurrency tests, and 15 focused mob transaction, player-index and dependency
+tests. These include a new controlling-rider input regression and the complete
+serial/parallel mutable-state, ordered-event and RNG comparison. The full
+workspace/parity sweep and performance measurements were not repeated after
+that integration; the measured engine revisions are explicit below.
+
+`tools/bench_region_ticks.py` starts 100 real `horizon-bots` clients, teleports
+them to a 512-block grid in a fixed-seed flat world, and summons 70 persistent
+AI-enabled zombies per player in interleaved global order (7,000 total). Natural
+spawning and random block ticks are off; players have resistance, and mobs are
+invulnerable to keep the population stable. Each mode uses a fresh world and
+scratch user directories. The script rejects changed player/mob counts and
+collects whole-tick median/p95/p99 from the server performance report, individual
+mob-phase timings, process-tree CPU and RSS, and prediction/replay counts. Setup runs while frozen, and both engines warm
+up for the same fixed number of simulation ticks before timing starts.
+
+```sh
+cargo build --profile fast -p horizon-client -p horizon-client-lib -p horizon-bots \
+  --bin horizon-client --bin horizon-ctl --bin horizon-bots
+python3 tools/bench_region_ticks.py --bin target/fast
+```
+
+The retained serial and parallel modes use identical commands, seed, view and
+simulation distance, fixed-tick warmup and measurement windows in the same binary.
+`--before-bin` instead uses a separately built pre-change engine for the baseline;
+the final comparison uses the PR's original base revision rather than attributing
+improvements common to both new execution modes to parallel scheduling.
+This is a quick workload comparison, not a claim about every mob mix: shared
+RNG, native mods, active raids and unbounded observations can require replay.
+
+### Measured comparison (2026-11-03)
+
+Same 100 connected standing players, 512-block spacing, 7,000 invulnerable
+AI-enabled zombies, seed 12345, flat terrain, view/simulation distance 2,
+200 simulation warmup ticks and a 20-second measurement. Both engines use the
+`fast` optimized profile and Rust 1.99.0 on a Ryzen 5 5600X (6 cores/12 threads).
+The new pool has eight workers. Validation scheduling/compilation was paused
+for measurement after active harnesses finished; other desktop applications
+remained running. This is one quick sweep on a shared machine.
+
+The original engine was built from base `9697aaf14`; the new engine was built
+from `4c5925eb2`. The direct serial control uses the new engine with region
+execution disabled. The complete inputs, percentile summaries and selected
+phase timings are in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Execution | Tick median ms | Tick p95 ms | Tick p99 ms | Mob median ms | Mob p95 ms | Mob p99 ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original engine | 133.74 | 189.87 | 418.22 | 99.2 | 142.2 | 365.8 | 98.50 | 442.38 |
+| New engine, direct serial control | 182.63 | 550.65 | 679.61 | 136.1 | 404.9 | 609.9 | 81.99 | 454.81 |
+| New engine, parallel regions | 91.56 | 101.05 | 110.53 | 60.2 | 66.3 | 72.9 | 236.50 | 521.65 |
+
+CPU 100% means one logical core. Peak RSS was 443.96/456.22/547.60 MiB,
+respectively. The reports contain 139/79/219 ticks; timed mob spans cover
+138/78/218 ticks, with the initial frozen/report boundary omitted. Every
+measurement kept all 100 players and 7,000 mobs. Parallel execution committed
+all 7,000 predictions across 100 regions per tick, with no replay in this
+workload. The direct serial control had substantial tail variation; this
+single sweep does not establish a small-workload or serial-mode speedup.
+
+Against the original engine, parallel execution reduced median mob time by
+39%, whole-tick median by 32%, p95 by 47% and p99 by 74%, using more CPU and
+about 79 MiB more mean RSS. This dense collision workload still runs below
+20 TPS (6.93 before, 10.90 after). The results establish a live improvement,
+not a guarantee that every 100-player mob mix fits a 50 ms tick budget.
+
+```sh
+python3 tools/bench_region_ticks.py --bin .local/parity-target/fast \
+  --before-bin /path/to/base-build/target/fast --modes legacy,control,parallel \
+  --warmup 10 --settle 20 --seconds 20
+```
+
+### After the coordinator work (2026-11-04)
+
+Two runs of the same workload at `ce803b1ea`, parallel mode only, with the
+`fast` profile plus frame pointers and line tables, on the same shared machine
+(other applications running, the bots on the same CPU). Their full reports are
+under `coordinator_work` in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 47.44 | 47.09 | 51.06 | 53.72 | 54.82 | 26 of 401 | 28.4 | 394.65 | 544.63 |
+| 2 | 49.06 | 48.05 | 56.25 | 66.28 | 75.04 | 88 of 401 | 28.9 | 399.49 | 558.37 |
+
+Both runs hold 20 TPS with all 7,000 predictions committed and no replay, and
+the average tick fits the 50 ms budget. Single ticks still go over it, so this
+workload has no margin on this machine, and runs differ by a millisecond or
+two. The remaining time is mostly the workers' 16 ms round, the 7 ms commit walk
+and 8 ms of `tick_lan`.
+
+The time came from the coordinator's walks over every mob, each a cache miss
+per mob: game events and melee hits find their listeners and mob directly,
+states and entity sends are built on the workers, a mob's rarely used fields
+sit behind a box so a clone copies less, and the scans a tick repeats run on the
+workers (`Game::mob_slots`) or not at all. The replaced mobs are freed by one
+worker at the end of the tick, so those scans do not queue behind the frees.
+
+### After the portal and sculk work (2026-11-04)
+
+One run of the same workload at `4d8283a8c`, with the same settings and build
+flags as above, on the same shared machine. The user's own Horizon client was
+running at about 8% of a core. Its full report is under
+`portal_and_sculk_workers` in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | TPS | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 50.76 | 49.53 | 57.68 | 75.24 | 91.18 | 178 of 394 | 19.67 | 30.1 | 404.37 | 548.74 |
+
+This run is no faster overall than the two before it (47.44 and 49.06 ms
+average), and it falls below 20 TPS. It does not show a regression either: those
+runs were at `ce803b1ea`, before two merges of main, and there is no run of the
+merged main without these changes, so one run cannot separate this work from
+main or from the machine's load. Spans these changes do not touch also rose
+(`mob_predict` 15.82/16.25 to 16.80 ms, `tick_lan` 7.93/8.14 to 8.83 ms).
+
+The spans these changes target did drop on the coordinator. All 7,000
+predictions still committed, with no replay.
+
+| Span | Before, wall ms | After, wall ms | Before, coordinator CPU ms | After, coordinator CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| `entity_portals` | 1.68, 1.82 | 1.04 | 1.65, 1.78 | 0.66 |
+| `tick_sculk_entities` | 1.80, 1.83 | 1.70 | 1.50, 1.54 | 0.80 |
+
+The sculk span's wall time barely moved, because the coordinator now waits for
+the workers and then stores each mob's `Steps`. The passenger index has no span
+of its own, and `mob_guest_events` did not move (1.97/2.02 to 2.05 ms), so this
+run shows no gain from it.
+
+What changed, with gameplay meant to stay the same. Without workers
+(`executor()` returns `None`), both worker passes keep the serial code:
+
+- `entity_hurt_player` walks every mob for passengers only when one of the
+  trigger's criteria names `passenger` at any depth, or a `minecraft:reference`
+  that might. Other callers of `mob_entity` keep the whole view.
+- The mobs' part of the `find_entity_portals` pass sweeps on the workers over a
+  read-only view. Workers read the kept palette answers, scan a chunk that has
+  none, and leave its key for the coordinator to store afterwards. Other entity
+  kinds and the ridden-vehicle pass stay serial. Mobs come first in the walk, so
+  the inside list keeps its order.
+- `tick_mob_sculk_events` classifies each mob on the workers once the tables are
+  built. A quiet mob only stores its new `Steps`; the rest run the existing code
+  in list order. After a block write or a chunk membership change
+  (`World::revision`, `ChunkMap::membership_revision`), every remaining mob runs
+  the existing code.
+
+The pool-against-serial tests need prepared resources, so they are `#[ignore]`d:
+`pool_and_serial_find_the_same_portals_in_the_same_order`,
+`pool_and_serial_raise_the_same_events_and_keep_the_same_steps` and
+`entity_hurt_player_reads_riders_only_when_a_criterion_can`. Set
+`HORIZON_TEST_RESOURCES` and run them with `--include-ignored`.
+
+The harnesses `tools/parity.py --changed-files` selects for these files were
+stopped before the run finished, at the user's request, and three of them failed
+without being looked into. `lan_e2e` was not run. The PR records the details.
+
+### Parallel commit (2026-11-04)
+
+One run of the same workload, with the same settings and build flags as above,
+on the same shared machine, from the commit that adds this section (on
+`2362e29c5`, which merges main at `23bbd8117`). The user's own Horizon client was
+running at about 17-24% of a core. Its full report is under `parallel_commit` in
+[the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | TPS | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 46.69 | 45.58 | 53.56 | 59.67 | 91.01 | 66 of 400 | 19.97 | 25.7 | 448.39 | 537.28 |
+
+Every round was clean: 409 clean, 0 fell back, counting the warmup. All 7,000
+predictions committed, with no replay.
+
+`mob_classify` is the classification and the clean commit together; `mob_walk`
+is empty when the walk is skipped. The "before" figures are the three earlier
+runs above.
+
+| Span | Before, wall ms | After, wall ms | Before, coordinator CPU ms | After, coordinator CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| `mob_walk` + `mob_classify` | 7.03, 7.26, 7.68 | 3.24 | 6.92, 7.17, 7.51 | 1.29 |
+
+So the walk's span saved 3.8 to 4.4 ms of wall time, at or just under the low end
+of the 4-5 ms estimated before the work. The clean commit did not take the span
+to zero, because the workers still do the work and the coordinator still merges.
+
+The whole tick is less clear. The average fell by 0.75, 2.37 and 4.07 ms against
+the three earlier runs (47.44, 49.06 and 50.76 ms). There is no run of this
+binary with `HORIZON_PARALLEL_COMMIT=0`, so these comparisons cross merges of main
+and the machine's load:
+
+- `mob_projectiles` fell from 0.70-0.85 ms to nothing because of main's early
+  return in `tick_projectiles`. That is part of the tick's drop and not this work.
+- Spans this work does not touch did not fall: `mob_predict` 15.82/16.25/16.80 to
+  17.39 ms, `tick_lan` 7.93/8.14/8.83 to 8.80 ms.
+- The process used more CPU in total (394.65/399.49/404.37 to 448.39%). One run
+  can't say how much of that is the commit.
+
+**Checks.** `cargo fmt --check`; clippy `-D warnings` on `horizon-client` and
+`horizon-client-lib`, all targets; `cargo test -p horizon-client --lib`;
+`cargo test -p horizon-client-lib --lib` for `mobs::` and `lan::`;
+`clean_commit_matches_the_serial_walk` with prepared resources. Ten deliberate
+breaks of the clean path were each caught by that test. With
+`HORIZON_SIMULATION_MODE=parallel`, `mob_ai`, `natural_spawn`, `dedicated_server`,
+`server_entities` and `server_player_damage` passed. `dedicated_server` failed
+its first attempt, then passed on the runner's retry without reused oracle
+results and on two more runs; the first attempt's log was overwritten, so why it
+failed is not known. `mob_ai`'s probe has its own mob loop, so it does not reach
+the clean path.
+
+**`tools/ci/region-verify.sh` fails on `dedicated_server`, with or without
+parallel commit.** The panic is "the commit and its replay differ" in a long
+jump's `chosen`. `optimal_jump_vector` follows vanilla's `Collections.shuffle`
+with no seeded random, so a commit and its replay can pick different angles for
+the same frog or goat. It failed 3 of 3 runs with `HORIZON_PARALLEL_COMMIT=0`. With
+the shuffle temporarily pinned, a local change that was not committed, all four
+verify harnesses passed, so this draw is the only cause there. It has not been
+fixed. The script's other tests pass when run on their own. It has not been run
+on the commit before this merge, so when it began to fail is not known.
+
+**Not run.** No control run of this binary, no second run, and no workload with
+mixed species, moving players or mobs outside the entity-ticking area. `lan_e2e`
+was not run.

@@ -148,7 +148,7 @@ impl Game<'_> {
         if horizon_client::mod_api::mods().is_empty() {
             return;
         }
-        let Some(shooter) = self.mobs.iter().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter().find(|m| m.id == mob) else {
             return;
         };
         let kind = shooter.kind.id.clone();
@@ -195,7 +195,7 @@ impl Game<'_> {
     /// replaced ammunition is what the crossbow holds; none leaves it uncharged
     /// and returns false (`tryLoadProjectiles`).
     pub(super) fn mob_crossbow_ammo(&mut self, mob: u32, weapon: &ItemStack) -> bool {
-        let Some(shooter) = self.mobs.iter().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter().find(|m| m.id == mob) else {
             return false;
         };
         let kind = shooter.kind.id.clone();
@@ -203,7 +203,7 @@ impl Game<'_> {
         self.native_living_get_projectile(None, "", Some(mob), &kind, weapon, &mut projectile);
         // A crossbow takes arrows and firework rockets only.
         let projectile = projectile.filter(|ammo| is_arrow(ammo) || &*ammo.item == FIREWORK_ROCKET);
-        let Some(shooter) = self.mobs.iter_mut().find(|m| m.id == mob) else {
+        let Some(shooter) = self.simulation.mobs.iter_mut().find(|m| m.id == mob) else {
             return false;
         };
         let Some(mut crossbow) = shooter.extra.main_hand_stack().cloned() else {
@@ -284,7 +284,7 @@ impl Game<'_> {
             if let Some(bow) = self.stack_in_mut(slot).as_mut() {
                 bow.data_mut().charged = drawn;
             }
-            let pitch = 1.0 / (self.world.random.next_float() * 0.5 + 1.0) + 0.2;
+            let pitch = 1.0 / (self.simulation.world.random.next_float() * 0.5 + 1.0) + 0.2;
             self.audio.play(sounds[2], at, 1.0, pitch);
         }
     }
@@ -308,7 +308,7 @@ impl Game<'_> {
                 Some(&weapon),
                 "minecraft:projectile_piercing",
                 &EffectContext::default(),
-                &mut self.world.random,
+                &mut self.simulation.world.random,
                 0.0,
             )
             .clamp(0.0, 127.0) as u8;
@@ -371,12 +371,17 @@ impl Game<'_> {
                     a.fired_from_weapon = Some(weapon.clone());
                     a.pierce = pierce;
                 }
-                arrow.shoot(&mut self.world.random, dir.to_array(), power, 1.0);
+                arrow.shoot(
+                    &mut self.simulation.world.random,
+                    dir.to_array(),
+                    power,
+                    1.0,
+                );
                 self.add_projectile(arrow);
                 let (player, name, projectile) = (
                     horizon_client::lan::playerdata::ints_uuid(self.acting_player_uuid()),
                     self.acting_player_name().to_owned(),
-                    self.next_entity,
+                    self.simulation_server.next_entity,
                 );
                 self.native_entity_shoot_bow(player, &name, projectile, power as f32);
             }
@@ -385,7 +390,8 @@ impl Game<'_> {
                 1.0
             } else {
                 let high = index & 1 == 1;
-                1.0 / (self.world.random.next_float() * 0.5 + 1.8) + if high { 0.63 } else { 0.43 }
+                1.0 / (self.simulation.world.random.next_float() * 0.5 + 1.8)
+                    + if high { 0.63 } else { 0.43 }
             };
             // CrossbowItem.performShooting: at the shooter's getX/Y/Z (feet).
             let feet = self

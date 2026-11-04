@@ -91,13 +91,14 @@ impl Game<'_> {
         rotation: Option<PlacedRotation>,
     ) {
         let riders: Vec<u32> = self
+            .simulation
             .mobs
             .iter()
             .filter(|m| m.extra.mount == Some(vehicle))
             .map(|m| m.id)
             .collect();
         for id in riders {
-            if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+            if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                 m.position = passenger_destination(old, new, m.position);
                 m.previous = m.position;
                 // Entity.calculatePassengerTransition turns the rider with the
@@ -175,11 +176,11 @@ impl Game<'_> {
 
     /// A vehicle's yaw and pitch, for the riders' teleport packet.
     fn vehicle_rotation(&self, id: u32) -> [f32; 2] {
-        if let Some(b) = self.boats.iter().find(|b| b.id == id) {
+        if let Some(b) = self.simulation.boats.iter().find(|b| b.id == id) {
             [b.yaw, 0.0]
-        } else if let Some(c) = self.carts.iter().find(|c| c.id == id) {
+        } else if let Some(c) = self.simulation.carts.iter().find(|c| c.id == id) {
             [c.yaw, c.pitch]
-        } else if let Some(m) = self.mobs.iter().find(|m| m.id == id) {
+        } else if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
             [m.yaw, m.head_pitch]
         } else {
             [0.0, 0.0]
@@ -210,7 +211,7 @@ impl Game<'_> {
                 self.rotation_forced = self.lan_acting.is_some();
             }
             Target::Mob(id) => {
-                if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
+                if let Some(m) = self.simulation.mobs.iter_mut().find(|m| m.id == id) {
                     if yaw.is_finite() {
                         m.yaw = yaw;
                         m.body_yaw = yaw;
@@ -224,7 +225,7 @@ impl Game<'_> {
                 }
             }
             Target::Other(id) => {
-                if let Some(o) = self.others.iter_mut().find(|o| o.id == id) {
+                if let Some(o) = self.simulation.others.iter_mut().find(|o| o.id == id) {
                     if yaw.is_finite() {
                         o.yaw = yaw;
                     }
@@ -234,22 +235,22 @@ impl Game<'_> {
                 }
             }
             Target::Stand(id) if yaw.is_finite() => {
-                if let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id) {
+                if let Some(a) = self.simulation.armor_stands.iter_mut().find(|a| a.id == id) {
                     a.yaw = yaw;
                 }
             }
             Target::Boat(id) if yaw.is_finite() => {
-                if let Some(b) = self.boats.iter_mut().find(|b| b.id == id) {
+                if let Some(b) = self.simulation.boats.iter_mut().find(|b| b.id == id) {
                     b.yaw = yaw;
                 }
             }
             Target::Cart(id) if yaw.is_finite() => {
-                if let Some(c) = self.carts.iter_mut().find(|c| c.id == id) {
+                if let Some(c) = self.simulation.carts.iter_mut().find(|c| c.id == id) {
                     c.yaw = yaw;
                 }
             }
             Target::Fangs(id) if yaw.is_finite() => {
-                if let Some(f) = self.fangs.list.iter_mut().find(|f| f.id == id) {
+                if let Some(f) = self.simulation.fangs.list.iter_mut().find(|f| f.id == id) {
                     f.yaw = yaw;
                 }
             }

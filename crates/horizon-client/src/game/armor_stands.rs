@@ -305,13 +305,18 @@ impl Game<'_> {
             .armor
             .iter()
             .chain(guests.flat_map(|g| g.armor.iter()))
-            .chain(self.mobs.iter().flat_map(|m| m.extra.armor.iter()))
+            .chain(
+                self.simulation
+                    .mobs
+                    .iter()
+                    .flat_map(|m| m.extra.armor.iter()),
+            )
             .zip(
                 ["helmet", "chestplate", "leggings", "boots"]
                     .into_iter()
                     .cycle(),
             )
-            .chain(self.armor_stands.iter().flat_map(|a| {
+            .chain(self.simulation.armor_stands.iter().flat_map(|a| {
                 [5usize, 4, 3, 2]
                     .map(|slot| &a.equipment[slot])
                     .into_iter()
@@ -406,10 +411,11 @@ impl Game<'_> {
             return None;
         }
         // BlockPlaceContext: a replaceable clicked block is replaced.
-        let clicked = self
-            .res
-            .facts()
-            .get(self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]));
+        let clicked = self.res.facts().get(
+            self.simulation
+                .world
+                .block(hit.pos[0], hit.pos[1], hit.pos[2]),
+        );
         let pos = if clicked.replaceable {
             hit.pos
         } else {
@@ -422,7 +428,7 @@ impl Game<'_> {
         );
         let yaw =
             (((self.yaw - 180.0 + 180.0).rem_euclid(360.0) - 180.0 + 22.5) / 45.0).floor() * 45.0;
-        let mut stand = ArmorStand::new(self.next_entity + 1, foot, yaw);
+        let mut stand = ArmorStand::new(self.simulation_server.next_entity + 1, foot, yaw);
         // Entity.applyImplicitComponents: a name from an anvil names the stand.
         if let Some(name) = stack.custom_name() {
             stand.custom_name = Some(horizon_client::text::Text::literal(name));
@@ -436,12 +442,13 @@ impl Game<'_> {
             Vec3::new(hi.x - e, hi.y - e, hi.z - e),
         );
         let mut scene = horizon_client::collisions::SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
         if !scene.unobstructed(bounds).unwrap_or(false)
             || self
+                .simulation
                 .armor_stands
                 .iter()
                 .any(|o| overlaps(o.bounds(), bounds))
@@ -458,15 +465,18 @@ impl Game<'_> {
             return false;
         };
         let foot = stand.position;
-        self.next_entity += 1;
+        self.simulation_server.next_entity += 1;
         self.audio.play(
             "minecraft:entity.armor_stand.place",
             Some([foot.x, foot.y, foot.z]),
             0.75,
             0.8,
         );
-        self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
-        self.armor_stands.push(stand);
+        self.simulation
+            .world
+            .modified
+            .insert((pos[0] >> 4, pos[2] >> 4));
+        self.simulation.armor_stands.push(stand);
         if !self.creative {
             self.consume_held();
         }
@@ -479,7 +489,7 @@ impl Game<'_> {
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
         let mut best: Option<(usize, f64, [f64; 3])> = None;
-        for (i, a) in self.armor_stands.iter().enumerate() {
+        for (i, a) in self.simulation.armor_stands.iter().enumerate() {
             if a.marker {
                 continue;
             }
@@ -527,8 +537,8 @@ impl Game<'_> {
         let Some((i, d, point)) = (match target {
             // interactAt gets the packet's location, measured from the stand's
             // position, so getClickedSlot reads the height the client clicked.
-            Some(t) => Self::named_entity(&self.armor_stands, t.id, |a| a.id).map(|i| {
-                let p = self.armor_stands[i].position;
+            Some(t) => Self::named_entity(&self.simulation.armor_stands, t.id, |a| a.id).map(|i| {
+                let p = self.simulation.armor_stands[i].position;
                 (
                     i,
                     0.0,
@@ -549,7 +559,7 @@ impl Game<'_> {
         }
         let held = self.held().cloned();
         if let Some(stack) = held.as_ref().filter(|h| &*h.item == "minecraft:name_tag") {
-            let stand = &mut self.armor_stands[i];
+            let stand = &mut self.simulation.armor_stands[i];
             let alive = stand.health > 0.0;
             if !stand.name_with_tag(stack) {
                 return false;
@@ -570,7 +580,7 @@ impl Game<'_> {
             self.swing_arm();
             return true;
         }
-        let a = &self.armor_stands[i];
+        let a = &self.simulation.armor_stands[i];
         let slot = match &held {
             Some(h) => {
                 let slot = self.equipment_slot(h);
@@ -616,7 +626,7 @@ impl Game<'_> {
         if a.swap_locked(slot) {
             return false;
         }
-        let current = self.armor_stands[i].equipment[slot].clone();
+        let current = self.simulation.armor_stands[i].equipment[slot].clone();
         if held.is_none() && current.is_none() {
             return false;
         }
@@ -629,7 +639,7 @@ impl Game<'_> {
             && target.is_some()
             && let (Some(player), Some(name)) = (self.lan_acting_uuid, self.lan_acting_name.clone())
         {
-            let stand = self.armor_stands[i].id as i32;
+            let stand = self.simulation.armor_stands[i].id as i32;
             let slot_name = ["mainhand", "offhand", "feet", "legs", "chest", "head"][slot];
             let mut cancel = false;
             self.native_armor_stand_manipulate(player, &name, stand, slot_name, &mut cancel);
@@ -642,13 +652,13 @@ impl Game<'_> {
             // A player with infinite materials puts a copy of one on an empty
             // slot and keeps the stack.
             Some(h) if self.creative && current.is_none() => {
-                self.armor_stands[i].equipment[slot] = Some(ItemStack { count: 1, ..h });
+                self.simulation.armor_stands[i].equipment[slot] = Some(ItemStack { count: 1, ..h });
             }
             Some(h) if h.count > 1 => {
                 if current.is_some() {
                     return true;
                 }
-                self.armor_stands[i].equipment[slot] = Some(ItemStack {
+                self.simulation.armor_stands[i].equipment[slot] = Some(ItemStack {
                     count: 1,
                     ..h.clone()
                 });
@@ -658,12 +668,13 @@ impl Game<'_> {
                 });
             }
             h => {
-                self.armor_stands[i].equipment[slot] = h;
+                self.simulation.armor_stands[i].equipment[slot] = h;
                 *self.held_mut() = current;
             }
         }
-        let p = self.armor_stands[i].position;
-        self.world
+        let p = self.simulation.armor_stands[i].position;
+        self.simulation
+            .world
             .modified
             .insert(((p.x.floor() as i32) >> 4, (p.z.floor() as i32) >> 4));
         self.swing_arm();
@@ -706,10 +717,13 @@ impl Game<'_> {
         before_weapon: impl FnOnce(&mut Self, Aabb, u32),
     ) -> bool {
         // The stand's box, id and place, before the hit may remove it.
-        let (area, id) = (self.armor_stands[i].bounds(), self.armor_stands[i].id);
+        let (area, id) = (
+            self.simulation.armor_stands[i].bounds(),
+            self.simulation.armor_stands[i].id,
+        );
         let (center, on_ground) = (
-            self.armor_stands[i].position,
-            self.armor_stands[i].on_ground,
+            self.simulation.armor_stands[i].position,
+            self.simulation.armor_stands[i].on_ground,
         );
         let hurt = self.punch_armor_stand(i);
         if hurt {
@@ -753,26 +767,26 @@ impl Game<'_> {
     /// creative player breaks it, otherwise the first hit wobbles it and a
     /// second within five ticks breaks it.
     pub(super) fn punch_armor_stand(&mut self, i: usize) -> bool {
-        let time = self.world.game_time;
-        let at = self.armor_stands[i].position;
+        let time = self.simulation.world.game_time;
+        let at = self.simulation.armor_stands[i].position;
         let at = [at.x, at.y, at.z];
         if self.creative {
-            let (width, height) = stand_box(&self.armor_stands[i]);
-            self.armor_stands.remove(i);
+            let (width, height) = stand_box(&self.simulation.armor_stands[i]);
+            self.simulation.armor_stands.remove(i);
             self.audio
                 .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
             self.show_breaking_particles(at, f64::from(width), f64::from(height));
             return true;
         }
-        if time - self.armor_stands[i].last_hit > 5 {
+        if time - self.simulation.armor_stands[i].last_hit > 5 {
             // First hit: entity event 32, the wobble and the hit sound.
-            self.armor_stands[i].last_hit = time;
+            self.simulation.armor_stands[i].last_hit = time;
             self.audio
                 .play("minecraft:entity.armor_stand.hit", Some(at), 0.3, 1.0);
             return true;
         }
         // brokenByPlayer: the stand item, then brokenByAnything: the equipment.
-        let a = self.armor_stands.remove(i);
+        let a = self.simulation.armor_stands.remove(i);
         let (width, height) = stand_box(&a);
         self.audio
             .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
@@ -786,7 +800,7 @@ impl Game<'_> {
         };
         self.spawn_item(stand, center, [0.0; 3], 10);
         for stack in a.equipment.into_iter().flatten() {
-            let r = &mut self.world.random;
+            let r = &mut self.simulation.world.random;
             let v = [
                 f64::from(r.next_float()) * 0.2 - 0.1,
                 0.2,
@@ -794,7 +808,8 @@ impl Game<'_> {
             ];
             self.spawn_item(stack, center, v, 10);
         }
-        self.world
+        self.simulation
+            .world
             .modified
             .insert(((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4));
         true
@@ -803,26 +818,26 @@ impl Game<'_> {
         let mut dead = Vec::new();
         // ServerLevel.tick: only entities in entity-ticking chunks tick.
         let ticking = self.entity_ticking_area();
-        for i in 0..self.armor_stands.len() {
-            let at = self.armor_stands[i].position;
+        for i in 0..self.simulation.armor_stands.len() {
+            let at = self.simulation.armor_stands[i].position;
             if !ticking(at.x.floor() as i32, at.z.floor() as i32) {
-                self.armor_stands[i].previous = at;
-                self.armor_stands[i].previous_yaw = self.armor_stands[i].yaw;
+                self.simulation.armor_stands[i].previous = at;
+                self.simulation.armor_stands[i].previous_yaw = self.simulation.armor_stands[i].yaw;
                 continue;
             }
             self.armor_stand_location_effects(i, false);
-            let a = &mut self.armor_stands[i];
+            let a = &mut self.simulation.armor_stands[i];
             a.previous = a.position;
             a.previous_yaw = a.yaw;
             // aiStep's freezing step (removeFrost) makes the speed instance.
             a.speed_instance = true;
             let (water_height, lava_height) =
-                a.push_by_fluid(&self.world, &self.res.motion().fluids);
+                a.push_by_fluid(&self.simulation.world, &self.res.motion().fluids);
             let in_water = water_height > 0.0;
             let medium =
                 horizon_client::entities::StandMedium::from_heights(water_height, lava_height);
             let (world, registry, facts, collision) = (
-                &self.world,
+                &self.simulation.world,
                 self.pack.assets.registry,
                 self.res.facts(),
                 self.collision,
@@ -849,7 +864,7 @@ impl Game<'_> {
             for pos in tops {
                 self.bubble_column_particles(pos);
             }
-            let a = &mut self.armor_stands[i];
+            let a = &mut self.simulation.armor_stands[i];
             if in_water {
                 a.enchantment_fall_distance = 0.0;
             } else {
@@ -867,9 +882,9 @@ impl Game<'_> {
             }
             self.armor_stand_turtle_eggs(i, landed)?;
             if landed {
-                self.post_landing_event(self.armor_stands[i].position, true);
+                self.post_landing_event(self.simulation.armor_stands[i].position, true);
             }
-            let a = &self.armor_stands[i];
+            let a = &self.simulation.armor_stands[i];
             if !a.marker && !a.no_gravity {
                 self.entity_powder_snow_particles(
                     a.previous,
@@ -879,8 +894,12 @@ impl Game<'_> {
                     true,
                 );
             }
-            let a = &mut self.armor_stands[i];
-            if !a.environment_tick(&self.world, self.res.facts(), self.pack.assets.registry) {
+            let a = &mut self.simulation.armor_stands[i];
+            if !a.environment_tick(
+                &self.simulation.world,
+                self.res.facts(),
+                self.pack.assets.registry,
+            ) {
                 dead.push(i);
             }
         }
@@ -896,12 +915,16 @@ impl Game<'_> {
     /// `applyEffectsFromBlocks`, after `travel`, so a marker that has landed
     /// still steps). `canDestroyEgg` wants mob griefing before the level's roll.
     fn armor_stand_turtle_eggs(&mut self, i: usize, landed: bool) -> Result<()> {
-        let stand = &self.armor_stands[i];
+        let stand = &self.simulation.armor_stands[i];
         if !stand.on_ground || self.remote.is_some() || self.options.execution_role.is_client() {
             return Ok(());
         }
         let p = stand.on_pos_legacy(|p| {
-            let name = &self.res.facts().get(self.world.block(p.x, p.y, p.z)).name;
+            let name = &self
+                .res
+                .facts()
+                .get(self.simulation.world.block(p.x, p.y, p.z))
+                .name;
             let tags = &self.res.items().block_tags;
             [
                 "minecraft:fences",
@@ -916,11 +939,17 @@ impl Game<'_> {
                 .pack
                 .assets
                 .registry
-                .state(self.world.block(p.x, p.y, p.z))
+                .state(self.simulation.world.block(p.x, p.y, p.z))
                 .is_some_and(|s| s.name == "minecraft:turtle_egg");
             if egg
                 && self.ui.rules.bool("mob_griefing")
-                && self.world.random.next_int_bound(chance).unwrap_or(1) == 0
+                && self
+                    .simulation
+                    .world
+                    .random
+                    .next_int_bound(chance)
+                    .unwrap_or(1)
+                    == 0
             {
                 self.crack_turtle_egg([p.x, p.y, p.z])?;
             }
@@ -931,7 +960,7 @@ impl Game<'_> {
     /// breaks a stand: its equipment pops above its block, the stand item does
     /// not drop.
     pub(super) fn break_armor_stand_by_anything(&mut self, i: usize) {
-        let a = self.armor_stands.remove(i);
+        let a = self.simulation.armor_stands.remove(i);
         let at = [a.position.x, a.position.y, a.position.z];
         let (pos, drops) = broken_armor_stand_equipment(a);
         for stack in drops {
@@ -939,7 +968,10 @@ impl Game<'_> {
         }
         self.audio
             .play("minecraft:entity.armor_stand.break", Some(at), 1.0, 1.0);
-        self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
+        self.simulation
+            .world
+            .modified
+            .insert((pos[0] >> 4, pos[2] >> 4));
     }
     /// ArmorStandRenderer: the stand with its default pose, then armor layers.
     pub(super) fn armor_stand_geometry(
@@ -950,7 +982,7 @@ impl Game<'_> {
     ) {
         // The stands' models posed on the GPU path (`mobs::skin`), when it runs this frame.
         let skinning = self.skinning();
-        for a in &self.armor_stands {
+        for a in &self.simulation.armor_stands {
             let entity_start = out.len();
             // ArmorStand.shouldRenderAtSqrDistance: 256 times the box's mean
             // edge (4 for a marker's empty box), whatever the entity distance.
@@ -985,7 +1017,7 @@ impl Game<'_> {
             let at = a.render_position(alpha);
             let p = super::entity_culling::at(at) - camera;
             // setupRotations: 180 - body yaw, plus the wobble for 5 ticks after a hit.
-            let wiggle = (self.world.game_time - a.last_hit) as f32 + alpha as f32;
+            let wiggle = (self.simulation.world.game_time - a.last_hit) as f32 + alpha as f32;
             let wobble = if wiggle < 5.0 {
                 (wiggle / 1.5 * std::f32::consts::PI).sin() * 3.0
             } else {
@@ -997,7 +1029,7 @@ impl Game<'_> {
                 )
                 * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
                 * glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.501, 0.0));
-            let light = self.world.light(
+            let light = self.simulation.world.light(
                 at.x.floor() as i32,
                 (at.y + 0.5).floor() as i32,
                 at.z.floor() as i32,

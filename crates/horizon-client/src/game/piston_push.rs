@@ -99,7 +99,7 @@ impl Game<'_> {
             }
             let Ok(moved) = pushed_movement(
                 SceneCollisions {
-                    world: &self.world,
+                    world: &self.simulation.world,
                     binding: self.collision,
                     subject: None,
                 },
@@ -147,7 +147,7 @@ impl Game<'_> {
             let _ = MotionWorld {
                 entities: &entities,
                 player,
-                scene: &mut self.world,
+                scene: &mut self.simulation.world,
                 assets: &self.pack.assets,
                 collision_binding: self.collision,
                 resources: self.motion,
@@ -172,7 +172,7 @@ impl Game<'_> {
             return;
         };
         let mut scene = SceneCollisions {
-            world: &self.world,
+            world: &self.simulation.world,
             binding: self.collision,
             subject: None,
         };
@@ -193,7 +193,7 @@ impl Game<'_> {
         // `moveStuckEntities` asks the moved state's own top for its box.
         let sticky_top = if honey {
             let mut scene = SceneCollisions {
-                world: &self.world,
+                world: &self.simulation.world,
                 binding: self.collision,
                 subject: None,
             };
@@ -309,14 +309,14 @@ impl Game<'_> {
         pos: BlockPos,
         old: horizon_world::registry::BlockStateId,
     ) {
-        let new = self.world.block(pos.x, pos.y, pos.z);
+        let new = self.simulation.world.block(pos.x, pos.y, pos.z);
         if new == old {
             return;
         }
         let at = [pos.x, pos.y, pos.z];
         let shape = |state| {
             let mut scene = SceneCollisions {
-                world: &self.world,
+                world: &self.simulation.world,
                 binding: self.collision,
                 subject: None,
             };
@@ -466,7 +466,7 @@ impl Game<'_> {
         let resolved = with_piston_noclip(piston_direction, || {
             pushed_movement(
                 SceneCollisions {
-                    world: &self.world,
+                    world: &self.simulation.world,
                     binding: self.collision,
                     subject: None,
                 },
@@ -483,7 +483,7 @@ impl Game<'_> {
         // even for a horizontal piston push. Keeping the old support flag
         // would run Frost Walker while the stand is moving over open water.
         if let Target::Entity(EntityHandle::ArmorStand(i)) = target {
-            self.armor_stands[i].on_ground = limited.y < 0.0 && limited.y != resolved.y;
+            self.simulation.armor_stands[i].on_ground = limited.y < 0.0 && limited.y != resolved.y;
         }
         if resolved.length_squared() <= 1.0e-7
             && limited.length_squared() - resolved.length_squared() >= 1.0e-7
@@ -501,7 +501,7 @@ impl Game<'_> {
         movement: Vec3,
         accumulators: &mut std::collections::HashMap<Target, PistonMovement>,
     ) -> Option<Vec3> {
-        let time = self.world.game_time;
+        let time = self.simulation.world.game_time;
         let limit = |state: &mut PistonMovement| state.limit(movement, || Ok::<i64, ()>(time)).ok();
         match target {
             Target::Player => {
@@ -513,7 +513,7 @@ impl Game<'_> {
                 let g = host.hub.guests.iter_mut().find(|g| g.conn == conn)?;
                 limit(&mut g.motion.as_deref_mut()?.piston)
             }
-            Target::Entity(EntityHandle::Mob(i)) => limit(&mut self.mobs[i].piston),
+            Target::Entity(EntityHandle::Mob(i)) => limit(&mut self.simulation.mobs[i].piston),
             _ => limit(accumulators.entry(target).or_default()),
         }
     }

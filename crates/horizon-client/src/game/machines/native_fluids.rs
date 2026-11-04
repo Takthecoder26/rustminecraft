@@ -164,11 +164,11 @@ impl Game<'_> {
             return None;
         }
         let key = (pos[0], pos[1], pos[2]);
-        let state = self.world.block(pos[0], pos[1], pos[2]);
-        if let Some(tanks) = self.world.block_entities.mod_fluids(state.0) {
+        let state = self.simulation.world.block(pos[0], pos[1], pos[2]);
+        if let Some(tanks) = self.simulation.world.block_entities.mod_fluids(state.0) {
             // The block entity is out of the world while it ticks.
             return matches!(
-                self.world.block_entities.get(&key),
+                self.simulation.world.block_entities.get(&key),
                 Some(horizon_client::containers::BlockEntity::Mod(m)) if !m.id.is_empty()
             )
             .then(|| FluidAt::Mod(Arc::clone(tanks)));
@@ -238,7 +238,7 @@ impl Game<'_> {
                 let reached = tanks.faces[face as usize].clone();
                 let mut state = {
                     let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-                        self.world.block_entities.get(&key)
+                        self.simulation.world.block_entities.get(&key)
                     else {
                         return amount;
                     };
@@ -272,12 +272,15 @@ impl Game<'_> {
                 }
                 if left < amount {
                     let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-                        self.world.block_entities.get_mut(&key)
+                        self.simulation.world.block_entities.get_mut(&key)
                     else {
                         return amount;
                     };
                     write_tanks(&mut m.nbt, &state);
-                    self.world.modified.insert((key.0 >> 4, key.2 >> 4));
+                    self.simulation
+                        .world
+                        .modified
+                        .insert((key.0 >> 4, key.2 >> 4));
                 }
                 left
             }
@@ -327,7 +330,7 @@ impl Game<'_> {
                 let key = (pos[0], pos[1], pos[2]);
                 let state = {
                     let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-                        self.world.block_entities.get(&key)
+                        self.simulation.world.block_entities.get(&key)
                     else {
                         return None;
                     };
@@ -404,7 +407,7 @@ impl Game<'_> {
                 let n = tanks.tanks.len();
                 let mut state = {
                     let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-                        self.world.block_entities.get(&key)
+                        self.simulation.world.block_entities.get(&key)
                     else {
                         return None;
                     };
@@ -438,12 +441,15 @@ impl Game<'_> {
                     return None;
                 }
                 let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-                    self.world.block_entities.get_mut(&key)
+                    self.simulation.world.block_entities.get_mut(&key)
                 else {
                     return None;
                 };
                 write_tanks(&mut m.nbt, &state);
-                self.world.modified.insert((key.0 >> 4, key.2 >> 4));
+                self.simulation
+                    .world
+                    .modified
+                    .insert((key.0 >> 4, key.2 >> 4));
                 Some((fluid?, taken, out))
             }
             FluidAt::Cauldron(CauldronFluids::Water(level)) => {
@@ -558,7 +564,7 @@ impl Game<'_> {
         };
         let key = (pos[0], pos[1], pos[2]);
         let Some(horizon_client::containers::BlockEntity::Mod(m)) =
-            self.world.block_entities.get_mut(&key)
+            self.simulation.world.block_entities.get_mut(&key)
         else {
             return false;
         };
@@ -576,7 +582,10 @@ impl Game<'_> {
             amount -= give;
         }
         write_tanks(&mut m.nbt, &state);
-        self.world.modified.insert((key.0 >> 4, key.2 >> 4));
+        self.simulation
+            .world
+            .modified
+            .insert((key.0 >> 4, key.2 >> 4));
         amount == 0
     }
 }

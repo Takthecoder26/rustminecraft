@@ -414,7 +414,7 @@ fn sting_touching_mobs(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
     let area = m.bounds().inflate(Vec3::new(0.3, 0.3, 0.3));
     let own = w.teams.of(Who::Mob(m.id));
     let stung: Vec<u32> = w
-        .others_near(area)
+        .others_intersecting(area)
         .filter(|o| {
             o.id != m.id
                 && o.alive
@@ -776,7 +776,7 @@ pub fn school_tick(m: &mut Mob, w: &MobWorld, level_random: &mut impl RandomSour
         let area = m.bounds().inflate(Vec3::new(8.0, 8.0, 8.0));
         let species = m.species();
         let others = w
-            .others_near(area)
+            .others_intersecting(area)
             .filter(|s| {
                 s.id != m.id && s.species == species && s.alive && s.bounds.intersects(area)
             })
@@ -863,7 +863,7 @@ impl Goal for FollowFlockLeader {
         let species = m.species();
         let area = m.bounds().inflate(Vec3::new(8.0, 8.0, 8.0));
         let mut near: Vec<&crate::mobs::Seen> =
-            cx.w.others_near(area)
+            cx.w.others_intersecting(area)
                 .filter(|s| s.species == species && s.alive && s.bounds.intersects(area))
                 .collect();
         // `getEntitiesOfClass`: the sections by x, z, y; in each, as they entered it.
@@ -950,7 +950,7 @@ impl Goal for PufferfishPuff {
                 .as_ref()
                 .is_some_and(|p| p.alive && !p.creative && area.intersects(p.bounds));
         // TARGETING_CONDITIONS: not #not_scary_for_pufferfish, and alive.
-        let mob = cx.w.others_near(area).any(|s| {
+        let mob = cx.w.others_intersecting(area).any(|s| {
             s.id != m.id
                 && s.alive
                 && !not_scary_for_pufferfish(s.species)

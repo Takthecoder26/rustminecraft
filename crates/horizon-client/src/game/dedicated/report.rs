@@ -151,17 +151,18 @@ impl Game<'_> {
                 "mobs_by_type": by_type.into_iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
             })
         };
-        let mut current = here(self.dim, &self.world, &self.mobs);
-        current["item_entities"] = json!(self.dropped.len());
-        current["experience_orbs"] = json!(self.orbs.len());
-        current["projectiles"] = json!(self.creatures.projectiles.len());
-        current["minecarts"] = json!(self.carts.len());
-        current["boats"] = json!(self.boats.len());
+        let mut current = here(self.dim, &self.simulation.world, &self.simulation.mobs);
+        current["item_entities"] = json!(self.simulation.dropped.len());
+        current["experience_orbs"] = json!(self.simulation.orbs.len());
+        current["projectiles"] = json!(self.simulation.projectiles.len());
+        current["minecarts"] = json!(self.simulation.carts.len());
+        current["boats"] = json!(self.simulation.boats.len());
         levels.push(current);
-        for dim in self.levels.parked_dims() {
-            if let (Some(world), Some(mobs)) =
-                (self.levels.parked_world(dim), self.levels.parked_mobs(dim))
-            {
+        for dim in self.simulation_server.levels.parked_dims() {
+            if let (Some(world), Some(mobs)) = (
+                self.simulation_server.levels.parked_world(dim),
+                self.simulation_server.levels.parked_mobs(dim),
+            ) {
                 levels.push(here(dim, world, mobs));
             }
         }
