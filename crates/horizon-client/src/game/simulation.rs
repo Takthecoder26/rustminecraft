@@ -3,11 +3,7 @@
 //! tick queues, bookkeeping and replication buffers together as one owner.
 use super::*;
 use super::{mob_index::MobIndex, natural_spawning::SpawnScratch};
-use horizon_client::{
-    fast_hash::FxHashSet,
-    join_seq::JoinList,
-    server_regions::{Regions, Workers},
-};
+use horizon_client::{fast_hash::FxHashSet, join_seq::JoinList, server_regions::Regions};
 
 pub(super) struct LevelSimulation {
     pub armor_stands: horizon_client::join_seq::JoinList<horizon_client::entities::ArmorStand>,
@@ -64,7 +60,6 @@ pub(super) struct LevelSimulation {
     pub spawn_scratch: SpawnScratch,
     pub regions: Regions,
     pub section_order: horizon_client::mobs::region_tick::SectionOrder,
-    pub workers: Workers,
 }
 
 impl LevelSimulation {
@@ -111,7 +106,6 @@ impl LevelSimulation {
             spawn_scratch: Default::default(),
             regions: Default::default(),
             section_order: Default::default(),
-            workers: Default::default(),
         }
     }
 }

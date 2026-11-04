@@ -1239,7 +1239,8 @@ pub struct Mob {
     pub invisible: bool,
     pub random: LegacyRandom,
     pub ai: Box<ai::Ai>,
-    pub extra: Extra,
+    /// Boxed: most of a mob's bytes, and rarely what a walk over the list reads.
+    pub extra: Box<Extra>,
     pub fluids: living::Fluids,
     /// Entity.wasEyeInWater: the eyes were in water before this tick's fluid
     /// update (`isUnderWater` reads it).
@@ -2771,7 +2772,7 @@ impl Mob {
             persistent: false,
             random,
             ai: Box::default(),
-            extra: Extra::default(),
+            extra: Box::default(),
             fluids: living::Fluids::default(),
             was_eye_in_water: false,
             first_tick: true,

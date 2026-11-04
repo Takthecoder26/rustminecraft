@@ -157,6 +157,9 @@ pub struct TickPrediction {
     /// The guest this mob saw (`None`: the host or nobody), so a commit need
     /// not choose again.
     pub conn: Option<u32>,
+    /// How the mob looks to the others after its tick, so a commit need not
+    /// read it all again.
+    pub seen: Seen,
     pub kept: bool,
     pub events: Vec<MobEvent>,
     pub reads: snapshot::ReadSet,
@@ -167,6 +170,15 @@ impl TickPrediction {
     pub fn rng_valid(&self, current: &LegacyRandom) -> bool {
         !self.random_after.was_used() || current.same_stream(&self.random_before)
     }
+}
+
+/// What a commit tells the walk about the mob it swapped in.
+pub struct Committed {
+    pub kept: bool,
+    /// The guest it saw.
+    pub conn: Option<u32>,
+    /// How it looks to the others now (`Seen::alive` already knows `kept`).
+    pub seen: Seen,
 }
 
 pub struct RegionTick<'a> {
@@ -251,6 +263,7 @@ impl RegionTick<'_> {
             let mut current = mob.seen(self.player_uuid);
             current.alive &= kept;
             grid.update(slot, current.bounds);
+            let seen = current.clone();
             overlay.update(slot, current);
             // Replay known single-entity brain writes into the corresponding
             // future owned inputs, preserving their original event order.
@@ -278,6 +291,7 @@ impl RegionTick<'_> {
                 owner: input.owner,
                 mob,
                 conn,
+                seen,
                 kept,
                 events,
                 reads: reads.into_inner(),
@@ -323,6 +337,14 @@ impl RegionExecutor {
         match &self.pool {
             Some(pool) => pool.spawn(move || predictions.into_par_iter().for_each(drop)),
             None => drop(predictions),
+        }
+    }
+    /// `f` of every item, in order, on the workers.
+    pub fn map<T: Sync, R: Send>(&self, items: &[T], f: impl Fn(&T) -> R + Send + Sync) -> Vec<R> {
+        use rayon::prelude::*;
+        match &self.pool {
+            Some(pool) => pool.install(|| items.par_iter().with_min_len(64).map(f).collect()),
+            None => items.iter().map(f).collect(),
         }
     }
     /// `each` for every pair of `targets` and `sources`, with the scratch each
@@ -453,7 +475,7 @@ impl TickRound {
         grid: &seen_grid::SeenGrid,
         random: &mut LegacyRandom,
         events: &mut Vec<MobEvent>,
-    ) -> Option<(bool, Option<u32>)> {
+    ) -> Option<Committed> {
         let owner = self.owners[slot];
         if !self.failed[owner]
             && let Some(queue) = self.queues[owner]
@@ -475,7 +497,11 @@ impl TickRound {
                 }
                 events.append(&mut prediction.events);
                 self.stats.committed += 1;
-                return Some((prediction.kept, prediction.conn));
+                return Some(Committed {
+                    kept: prediction.kept,
+                    conn: prediction.conn,
+                    seen: prediction.seen.clone(),
+                });
             }
             self.stats.rng_conflicts += usize::from(!rng_valid);
             if let Some(conflict) = read_conflict {
@@ -683,7 +709,7 @@ mod tests {
             let from = events.len();
             let kept = match round.as_mut() {
                 Some(round) => match round.commit(slot, mob, &grid, random, &mut events) {
-                    Some((kept, _)) => kept,
+                    Some(committed) => committed.kept,
                     None => round.replay(slot, mob, &world, random, &mut events),
                 },
                 None => mob.tick_with_order(

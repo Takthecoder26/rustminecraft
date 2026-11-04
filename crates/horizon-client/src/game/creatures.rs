@@ -1017,12 +1017,14 @@ impl Game<'_> {
             self.simulation.mobs.iter().map(|m| chunk_at(m.position)),
             players.iter().map(|p| chunk_at(p.position)),
         );
-        let mut snapshot: Vec<Seen> =
-            self.simulation
-                .regions
-                .project(&self.simulation.mobs, self.simulation.workers, |m| {
-                    seen(m, uuid)
-                });
+        let mob_count = self.simulation.mobs.len();
+        let mut snapshot: Vec<Seen> = match self
+            .simulation_server
+            .executor(self.simulation.regions.regions().len(), mob_count)
+        {
+            Some(executor) => executor.map(&self.simulation.mobs, |m| seen(m, uuid)),
+            None => self.simulation.mobs.iter().map(|m| seen(m, uuid)).collect(),
+        };
         let species_index = horizon_client::mobs::snapshot::SpeciesIndex::new(&snapshot);
         laps.lap("mob_snapshot");
         let mut events = Vec::new();
@@ -1268,8 +1270,10 @@ impl Game<'_> {
                 let committed = region_round.as_mut().and_then(|transaction| {
                     transaction.commit(i, m, &grid, &mut scratch, &mut events)
                 });
+                let mut seen_after = None;
                 let (kept, seen_guest) = match committed {
-                    Some((kept, conn)) => {
+                    Some(horizon_client::mobs::region_tick::Committed { kept, conn, seen }) => {
+                        seen_after = Some(seen);
                         if !guests.is_empty() {
                             match conn {
                                 Some(conn) => {
@@ -1316,14 +1320,13 @@ impl Game<'_> {
                     // ShulkerBullet.finalTarget is the guest's entity: the
                     // bullet homes on it while the projectiles tick, where
                     // `Who::Player` is the host's own player.
-                    if let Some(&(_, id)) = guest_ids.iter().find(|g| g.0 == conn) {
-                        for e in &mut events[from..] {
-                            if let MobEvent::Projectile(p) = e
-                                && let ProjectileKind::ShulkerBullet { target, .. } = &mut p.kind
-                                && *target == Some(Who::Player)
-                            {
-                                *target = Some(Who::Mob(id));
-                            }
+                    for e in &mut events[from..] {
+                        if let MobEvent::Projectile(p) = e
+                            && let ProjectileKind::ShulkerBullet { target, .. } = &mut p.kind
+                            && *target == Some(Who::Player)
+                            && let Some(&(_, id)) = guest_ids.iter().find(|g| g.0 == conn)
+                        {
+                            *target = Some(Who::Mob(id));
                         }
                     }
                     let mut k = from;
@@ -1345,8 +1348,11 @@ impl Game<'_> {
                 keep.push(kept);
                 // ServerLevel ticks entities one after another: the ones
                 // after this mob see it as it is now.
-                let mut after = seen(m, uuid);
-                after.alive &= kept;
+                let after = seen_after.unwrap_or_else(|| {
+                    let mut after = seen(m, uuid);
+                    after.alive &= kept;
+                    after
+                });
                 let before = std::mem::replace(&mut snapshot[i], after);
                 grid.update(i, snapshot[i].bounds);
                 if let Some(transaction) = region_round.as_mut() {
