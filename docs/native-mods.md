@@ -3426,7 +3426,8 @@ custom copy handler, conditional serialization, the `sendToPlayer` predicate,
 `Host` exposes the documented `Game` helpers listed under `helpers` in
 `native-hooks.json`, without their `native_` prefix. Each keeps the helper's
 receiver and documentation; a helper without `self` (`config_dir`) takes
-`&self` in `Host`. Level services stay on the level hosts above.
+`&self` in `Host`. Level services stay on the level hosts above, apart from the
+`play_sound` and `send_particles` in the table below.
 A helper's `receiver` also exposes it on that handle. Receivers come from public
 `*Ref` structs in `mod_api.rs`: for example, a public `BlockEntityRef` struct registers
 `block_entity`. Adding a handle requires no separate generator registration.
@@ -3436,12 +3437,13 @@ go through `dyn Host` (`native_host_bridge.rs`):
 
 | `Host` method | For | What it does |
 |---|---|---|
-| `mod_block_entity(pos)`, `change_mod_block_entity(pos, &mut change)` | `with_mod_block_entity` | Reads or changes a neighbouring mod block entity. On a client, `mod_block_entity` returns what the server sent (`native_block_entity_update_tag`), so a client mod can read another block's data. |
+| `mod_block_entity(pos)`, `change_mod_block_entity(pos, &mut change)` | `with_mod_block_entity` | Reads or changes a neighbouring mod block entity. On a client, `mod_block_entity` returns what the server sent (`native_block_entity_update_tag`), so a client mod can read another block's data, and `change_mod_block_entity` changes only that client's copy: the server never sees it, and its next update overwrites the fields it carries. |
 | `trigger_criterion(uuid, trigger, &test)` | `trigger_criterion` | The same call, with the test as `&dyn Fn`. |
 | `play_sound`, `send_particles` | `LevelWriteHost`'s methods | Work in the level in place, from any server hook, such as a block entity's tick. |
 | `block_name_in_tag(block, tag)` | `server_block_in_tag` | Takes a block name instead of a state. |
 
-`equipment(slot)` is the player's own equipment on a client and the acting player's on a server.
+`equipment(slot)` is the player's own equipment on a client and the acting player's on a server;
+`MainHand` is the selected slot and `OffHand` the off hand, whichever hand is acting.
 `sneaking()` is `isSecondaryUseActive` in a use hook. `draw_model`, `item_entities`, `level_random`,
 `server_item_in_tag`, `component`, `set_component` and `remove_component` are the helpers themselves.
 
