@@ -99,6 +99,8 @@ fn me(claim: Claim, owned: &[&str]) -> Me {
         equipped: Default::default(),
         visible: true,
         claim,
+        purchases: Vec::new(),
+        checkout: None,
     }
 }
 
