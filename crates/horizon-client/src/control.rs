@@ -132,14 +132,9 @@ fn random_token() -> String {
         .collect()
 }
 
-/// Write the endpoint file so that only this user can read it.
-fn write_private(path: &Path, text: &str) -> io::Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(text.as_bytes())
-}
+/// Writes the endpoint file so that only this user can read it, even over an older file
+/// (`horizon_server_files::private_file`).
+use horizon_server_files::private_file::write_private;
 
 /// Constant-time comparison of the presented token.
 fn same_token(a: &str, b: &str) -> bool {
@@ -196,8 +191,7 @@ impl Server {
             tcp_port = Some(port);
             write_private(
                 path,
-                &serde_json::json!({ "transport": "tcp", "port": port, "token": token })
-                    .to_string(),
+                serde_json::json!({ "transport": "tcp", "port": port, "token": token }).to_string(),
             )?;
             spawn_listener(
                 move || listener.accept().map(|(s, _)| s),
