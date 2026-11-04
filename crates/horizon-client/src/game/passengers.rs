@@ -130,16 +130,15 @@ impl Game<'_> {
         self.seat_cart_mobs();
         self.seat_tnt_mobs();
         let mounted = self.mob_slots(|m| m.extra.mount.is_some());
-        let index: HashMap<u32, usize> = if mounted.is_empty() {
-            HashMap::new()
-        } else {
-            self.simulation
-                .mobs
-                .iter()
-                .enumerate()
-                .map(|(i, m)| (m.id, i))
-                .collect()
-        };
+        // Displays, interaction boxes and armor stands below also use this
+        // index, even when no mob is itself a passenger.
+        let index: HashMap<u32, usize> = self
+            .simulation
+            .mobs
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.id, i))
+            .collect();
         // Riders of riders settle over a few passes.
         for pass in 0..3 {
             for &i in &mounted {
