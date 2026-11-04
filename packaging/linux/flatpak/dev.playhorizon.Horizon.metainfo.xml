@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.playhorizon.Horizon</id>
+  <name>Horizon</name>
+  <summary>Minecraft: Java Edition 26.3 rewritten in Rust</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer_name>Ludovic Marie and Horizon contributors</developer_name>
+  <description>
+    <p>Horizon is an unofficial Minecraft: Java Edition client and launcher written in Rust. It requires your own legally obtained copy of Minecraft.</p>
+    <p>The Flatpak sandboxes the launcher and grants read-only access to the standard Minecraft data directory. Horizon worlds and settings are stored in the application's Flatpak data directory.</p>
+  </description>
+  <launchable type="desktop-id">dev.playhorizon.Horizon.desktop</launchable>
+  <url type="homepage">https://playhorizon.dev/</url>
+  <url type="bugtracker">https://github.com/horizon-rust/horizon/issues</url>
+  <provides>
+    <binary>horizon-launcher</binary>
+  </provides>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

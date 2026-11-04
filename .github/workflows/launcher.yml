@@ -8,9 +8,8 @@ name: launcher
 # feature. The version and the tag are given to the build (HORIZON_LAUNCHER_VERSION, HORIZON_LAUNCHER_TAG): no bump
 # commits.
 # Never marked latest. Pushes to launcher branches only build. RELEASES_PAUSED=1 stops releases.
-# Linux ships two archives of one binary: the .tar.gz the launcher updates itself from, and an
-# AppImage (packaging/linux/appimage.sh) for players without a distribution package, which replaces
-# itself instead (launcher/src/backend.rs).
+# Linux packages one binary as the .tar.gz the launcher updates itself from, an AppImage that replaces
+# itself (launcher/src/backend.rs), and a sandboxed Flatpak with self-update disabled.
 # macOS: Apple Silicon, and Intel cross-built for x86_64-apple-darwin on the same runner, its tests and smoke test
 # under Rosetta 2 (#1161). With the repository variable MACOS_SIGN_IDENTITY set, Horizon.app and the .dmg are signed with
 # Developer ID, notarized and stapled, from the runner's signing keychain (packaging/macos/README.md);
@@ -185,7 +184,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev patchelf flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub org.freedesktop.Sdk//25.08
       - name: Metal shaders compiled now, or at run time without the Metal toolchain
         # GPUI compiles its Metal shaders when it builds; the Mac mini has Xcode without the Metal toolchain
         # (xcodebuild -downloadComponent MetalToolchain), so there they are compiled when the launcher starts.
@@ -301,10 +302,10 @@ jobs:
           else
             version=${HORIZON_LAUNCHER_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}
             if [[ "$RUNNER_OS" == "Linux" ]]; then
-              # The .tar.gz below is what the launcher updates itself from; the AppImage is what a
-              # player downloads and double-clicks, and it replaces itself instead
-              # (packaging/linux/appimage.sh, launcher/src/backend.rs).
+              # The .tar.gz below is what the launcher updates itself from; the AppImage replaces
+              # itself instead. Flatpak disables self-update: its read-only /app is updated as a package.
               ../packaging/linux/appimage.sh "$BIN/${{ matrix.binary }}" "$version" out
+              ../packaging/linux/flatpak.sh "$BIN/${{ matrix.binary }}" "$version" out
             fi
             mkdir -p dist
             cp "$BIN/${{ matrix.binary }}" dist/
