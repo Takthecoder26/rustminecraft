@@ -1359,7 +1359,7 @@ impl Game<'_> {
         let mobs: Vec<(u32, Vec3, f32, f32)> = self
             .mobs
             .iter()
-            .filter(|m| self.mob_can_use_portal(m))
+            .filter(|m| self.mob_can_use_gateway(m))
             .map(|m| (m.id, m.position, m.width(), m.height()))
             .collect();
         let mut inside: Vec<(u32, BlockPos)> = Vec::new();
@@ -1401,6 +1401,14 @@ impl Game<'_> {
         }
     }
 
+    /// `canUsePortal(false)` of a mob at an End gateway. Vanilla's vehicle takes
+    /// its riders along, but a gateway saves the mob and loads it at the exit,
+    /// which would drop a server player riding it: that mob stays with its
+    /// rider instead.
+    fn mob_can_use_gateway(&self, m: &horizon_client::mobs::Mob) -> bool {
+        self.mob_can_use_portal(m) && !self.guest_rides(m.id)
+    }
+
     /// `ThrownEnderpearl.onInsideBlock` in an End gateway: its owner's
     /// `ServerPlayer.onInsideBlock`, the enter_block trigger, as if they had
     /// walked in. A guest's pearl triggers theirs; one whose guest has left
@@ -1427,7 +1435,11 @@ impl Game<'_> {
             .dropped
             .iter()
             .map(|e| (e.id, true))
-            .chain(self.mobs.iter().map(|m| (m.id, self.mob_can_use_portal(m))))
+            .chain(
+                self.mobs
+                    .iter()
+                    .map(|m| (m.id, self.mob_can_use_gateway(m))),
+            )
             .chain(
                 self.creatures
                     .projectiles
