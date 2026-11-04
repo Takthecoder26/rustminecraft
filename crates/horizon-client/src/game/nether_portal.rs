@@ -1086,6 +1086,7 @@ impl Game<'_> {
                 t.fuse,
                 t.power,
                 t.block_state_nbt(self.pack.assets.registry),
+                t.rotation,
                 uuid,
                 self.persist_raw(id),
             );
@@ -1170,7 +1171,7 @@ impl Game<'_> {
                 &b.entity_type(),
                 b.position,
                 b.velocity,
-                b.yaw,
+                [b.yaw, b.pitch],
                 uuid,
                 self.persist_raw(id),
                 b.chest.then_some(&b.items[..]),
@@ -1413,6 +1414,7 @@ impl Game<'_> {
             f.drop_item,
             f.damage,
             f.fall_distance,
+            f.rotation,
             uuid,
         );
         let mut tag = super::persist::with_raw(modelled, f.saved.as_ref().map(|s| &s.1));
@@ -1578,6 +1580,7 @@ mod tests {
             let at = Vec3::new(2.5, 100.0, 2.5);
             game.simulation.tnts = Default::default();
             game.simulation.tnts.push(PrimedTnt {
+                rotation: [0.0, 0.0],
                 id: 90,
                 position: at,
                 previous: at,

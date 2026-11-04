@@ -98,6 +98,7 @@ impl Game<'_> {
         let at = Vec3::new(pos[0], pos[1], pos[2]);
         self.simulation_server.next_entity += 1;
         self.simulation.falling.push(FallingBlock {
+            rotation: [0.0, 0.0],
             join: Default::default(),
             id: self.simulation_server.next_entity,
             state,

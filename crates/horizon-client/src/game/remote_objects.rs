@@ -458,6 +458,11 @@ impl Game<'_> {
     }
 
     /// Every object a server sent (a new connection, level or dimension).
+    /// Experience orbs too: `ClientPacketListener.handleRespawn` replaces the
+    /// `ClientLevel` on a dimension change, and `Hub::change_level` does not
+    /// remove the old level's entities one by one. An orb kept here follows
+    /// the player (`ExperienceOrb.tick` on the client) and is never
+    /// `playerTouch`ed.
     pub(super) fn clear_remote_objects(&mut self) {
         self.text_displays.clear();
         self.interactions.clear();
@@ -469,6 +474,7 @@ impl Game<'_> {
         self.simulation.cushions.clear();
         self.simulation.item_frames.clear();
         self.simulation.paintings.clear();
+        self.simulation.orbs.clear();
     }
 
     pub(super) fn remove_remote_object(&mut self, id: u32) {

@@ -137,7 +137,7 @@ impl Game<'_> {
                     &b.entity_type(),
                     b.position,
                     b.velocity,
-                    b.yaw,
+                    [b.yaw, b.pitch],
                     uuid,
                     self.simulation.persist.raw.get(&id),
                     b.chest.then_some(&b.items[..]),
@@ -208,6 +208,7 @@ impl Game<'_> {
                     t.fuse,
                     t.power,
                     t.block_state_nbt(self.pack.assets.registry),
+                    t.rotation,
                     uuid,
                     self.simulation.persist.raw.get(&id),
                 )
@@ -226,6 +227,7 @@ impl Game<'_> {
                     f.drop_item,
                     f.damage,
                     f.fall_distance,
+                    f.rotation,
                     uuid,
                 );
                 crate::game::persist::with_raw(tag, raw)
