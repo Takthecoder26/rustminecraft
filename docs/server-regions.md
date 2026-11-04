@@ -262,3 +262,61 @@ states and entity sends are built on the workers, a mob's rarely used fields
 sit behind a box so a clone copies less, and the scans a tick repeats run on the
 workers (`Game::mob_slots`) or not at all. The replaced mobs are freed by one
 worker at the end of the tick, so those scans do not queue behind the frees.
+
+### After the portal and sculk work (2026-11-04)
+
+One run of the same workload at `4d8283a8c`, with the same settings and build
+flags as above, on the same shared machine. The user's own Horizon client was
+running at about 8% of a core. Its full report is under
+`portal_and_sculk_workers` in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | TPS | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 50.76 | 49.53 | 57.68 | 75.24 | 91.18 | 178 of 394 | 19.67 | 30.1 | 404.37 | 548.74 |
+
+This run is no faster overall than the two before it (47.44 and 49.06 ms
+average), and it falls below 20 TPS. It does not show a regression either: those
+runs were at `ce803b1ea`, before two merges of main, and there is no run of the
+merged main without these changes, so one run cannot separate this work from
+main or from the machine's load. Spans these changes do not touch also rose
+(`mob_predict` 15.82/16.25 to 16.80 ms, `tick_lan` 7.93/8.14 to 8.83 ms).
+
+The spans these changes target did drop on the coordinator. All 7,000
+predictions still committed, with no replay.
+
+| Span | Before, wall ms | After, wall ms | Before, coordinator CPU ms | After, coordinator CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| `entity_portals` | 1.68, 1.82 | 1.04 | 1.65, 1.78 | 0.66 |
+| `tick_sculk_entities` | 1.80, 1.83 | 1.70 | 1.50, 1.54 | 0.80 |
+
+The sculk span's wall time barely moved, because the coordinator now waits for
+the workers and then stores each mob's `Steps`. The passenger index has no span
+of its own, and `mob_guest_events` did not move (1.97/2.02 to 2.05 ms), so this
+run shows no gain from it.
+
+What changed, with gameplay meant to stay the same. Without workers
+(`executor()` returns `None`), both worker passes keep the serial code:
+
+- `entity_hurt_player` walks every mob for passengers only when one of the
+  trigger's criteria names `passenger` at any depth, or a `minecraft:reference`
+  that might. Other callers of `mob_entity` keep the whole view.
+- The mobs' part of the `find_entity_portals` pass sweeps on the workers over a
+  read-only view. Workers read the kept palette answers, scan a chunk that has
+  none, and leave its key for the coordinator to store afterwards. Other entity
+  kinds and the ridden-vehicle pass stay serial. Mobs come first in the walk, so
+  the inside list keeps its order.
+- `tick_mob_sculk_events` classifies each mob on the workers once the tables are
+  built. A quiet mob only stores its new `Steps`; the rest run the existing code
+  in list order. After a block write or a chunk membership change
+  (`World::revision`, `ChunkMap::membership_revision`), every remaining mob runs
+  the existing code.
+
+The pool-against-serial tests need prepared resources, so they are `#[ignore]`d:
+`pool_and_serial_find_the_same_portals_in_the_same_order`,
+`pool_and_serial_raise_the_same_events_and_keep_the_same_steps` and
+`entity_hurt_player_reads_riders_only_when_a_criterion_can`. Set
+`HORIZON_TEST_RESOURCES` and run them with `--include-ignored`.
+
+The harnesses `tools/parity.py --changed-files` selects for these files were
+stopped before the run finished, at the user's request, and three of them failed
+without being looked into. `lan_e2e` was not run. The PR records the details.
