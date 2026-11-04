@@ -329,7 +329,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
                 between(p.y - 5.0, p.y + 5.0),
                 between(p.z - 10.0, p.z + 10.0),
             ];
-            shoot(m, i + 1, at, true, events);
+            shoot(m, i, at, true, events);
             m.extra.ints[4 + k] = 0;
         }
         let id = m.extra.ints[k];
@@ -351,7 +351,7 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
                         ) =>
                 {
                     let at = [p[0], p[1] + (eye - p[1]) * 0.5, p[2]];
-                    shoot(m, i + 1, at, false, events);
+                    shoot(m, i, at, false, events);
                     m.extra.ints[2 + k] = age + 40 + m.random.next_int_bound(20).unwrap_or(0);
                     m.extra.ints[4 + k] = 0;
                 }
@@ -511,6 +511,44 @@ mod tests {
         }
         assert_eq!((yaw, pitch), (-100.0, -80.0));
     }
+    /// `WitherBoss.customServerAiStep` passes the loop's `i` (1 and 2) to
+    /// `performRangedAttack`, so a side head's skull starts at that head.
+    #[test]
+    fn a_side_heads_skull_starts_at_that_head() {
+        use crate::mobs::Species;
+        use crate::mobs::sensor_scan_tests::kind;
+        use std::sync::Arc;
+        let mut kind = kind();
+        let k = Arc::make_mut(&mut kind);
+        k.id = "minecraft:wither".into();
+        k.species = Species::Wither;
+        let mut m = Mob::new(1, kind, Vec3::new(0.0, 64.0, 0.0), 0.0);
+        m.body_yaw = 0.0;
+        m.age = 100;
+        // Only the first side head (i = 1) is due, and it is past its 16 quiet
+        // ticks, so it fires its random volley at once.
+        m.extra.ints[2] = 0;
+        m.extra.ints[3] = 1000;
+        m.extra.ints[4] = 20;
+        // World-gated: without the extracted data the body never runs.
+        let _ = crate::mobs::world::with_test_world(&[], |w, _| {
+            let mut events = Vec::new();
+            custom_server_ai_step(&mut m, w, &mut events);
+            let skull = events
+                .iter()
+                .find_map(|e| match e {
+                    MobEvent::Projectile(p) => Some(p.position),
+                    _ => None,
+                })
+                .expect("the side head fires");
+            let head = head_pos(&m, 1);
+            assert!(
+                (skull.x - head[0]).abs() < 1e-9 && (skull.z - head[2]).abs() < 1e-9,
+                "fired from {skull:?}, head 1 is {head:?}"
+            );
+        });
+    }
+
     #[test]
     fn wither_ignores_wither_friends_only() {
         assert!(shielded_from(Species::Wither, Species::Wither));
