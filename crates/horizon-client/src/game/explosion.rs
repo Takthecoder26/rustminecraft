@@ -667,6 +667,7 @@ impl Game<'_> {
                                 .filter(|&o| o != m.id)
                                 .map(horizon_client::mobs::Who::Mob),
                             from: Some(center),
+                            attacker_species: cause,
                         };
                         // `EXPLOSION_KNOCKBACK_RESISTANCE`, not `KNOCKBACK_RESISTANCE`:
                         // its base is 0 for every mob type, so iron golems and

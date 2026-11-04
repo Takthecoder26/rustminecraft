@@ -3,6 +3,8 @@
 use super::{Arg, Context, Game, R, Target, err};
 use horizon_client::{
     command::{CommandError, args::ItemInput},
+    containers::BlockEntity,
+    furnace::FurnaceCooking,
     items::ItemStack,
     scoreboard_cmd::{Holder, Tracker},
     text::Text,
@@ -99,15 +101,7 @@ impl Game<'_> {
         let mut add = |s: Slot| out.push(s);
         match owner {
             Owner::Block(p) => {
-                let size = match self
-                    .simulation
-                    .world
-                    .block_entities
-                    .get(&(p[0], p[1], p[2]))
-                {
-                    Some(horizon_client::containers::BlockEntity::Chest(items)) => items.len(),
-                    _ => 0,
-                };
+                let size = self.block_container_size(*p).unwrap_or(0);
                 for i in 0..size {
                     if matches_name(name, &format!("container.{i}")) {
                         add(Slot::Block(*p, i));
@@ -395,18 +389,89 @@ impl Game<'_> {
                 .item
                 .clone(),
             Slot::Cart(id, i) => self.cart_slots(*id)?.get(*i).cloned().flatten(),
-            Slot::Block(p, i) => match self
+            Slot::Block(p, i) => self
                 .simulation
                 .world
                 .block_entities
-                .get(&(p[0], p[1], p[2]))
-            {
-                Some(horizon_client::containers::BlockEntity::Chest(items)) => {
-                    items.get(*i).cloned().flatten()
-                }
-                _ => None,
-            },
+                .get(&(p[0], p[1], p[2]))?
+                .slots()
+                .get(*i)
+                .cloned()
+                .flatten(),
         }
+    }
+    pub(in crate::game) fn slot_accepts(&self, s: &Slot, stack: Option<&ItemStack>) -> bool {
+        let Slot::Block(p, i) = s else {
+            return true;
+        };
+        let air = ItemStack {
+            item: "minecraft:air".into(),
+            count: 0,
+            damage: 0,
+            extra: None,
+        };
+        self.block_can_place(*p, *i, stack.unwrap_or(&air))
+    }
+    fn block_container_size(&self, p: [i32; 3]) -> Option<usize> {
+        let size = match self
+            .simulation
+            .world
+            .block_entities
+            .get(&(p[0], p[1], p[2]))?
+        {
+            BlockEntity::Mod(m) if m.id.is_empty() => 0,
+            BlockEntity::Mod(_) => self
+                .simulation
+                .world
+                .block_entities
+                .mod_container(self.simulation.world.block(p[0], p[1], p[2]).0)
+                .map_or(0, |c| c.slots),
+            entity => entity.slots().len(),
+        };
+        (size > 0).then_some(size)
+    }
+    fn block_slot_set(&mut self, p: [i32; 3], i: usize, stack: Option<ItemStack>) -> bool {
+        let key = (p[0], p[1], p[2]);
+        let Some(size) = self.block_container_size(p).filter(|&size| i < size) else {
+            return false;
+        };
+        let book = stack.as_ref().is_none_or(|s| {
+            self.items()
+                .item_tags
+                .get("minecraft:bookshelf_books")
+                .is_some_and(|m| m.contains(&*s.item))
+        });
+        let recipes = world_recipes!(self);
+        match self.simulation.world.block_entities.get_mut(&key) {
+            Some(BlockEntity::Furnace(f)) if i == 0 => f.set_input(recipes, stack),
+            Some(BlockEntity::Furnace(f)) => {
+                f.items[i] = stack;
+                self.simulation
+                    .world
+                    .modified
+                    .insert((p[0] >> 4, p[2] >> 4));
+                return true;
+            }
+            Some(BlockEntity::ChiseledBookshelf(_)) if !book => return true,
+            Some(BlockEntity::Jukebox(_)) => {
+                self.jukebox_set_item(p, stack);
+                return true;
+            }
+            Some(BlockEntity::Crafter(c)) => {
+                c.disabled[i] = false;
+                c.items[i] = stack;
+            }
+            Some(BlockEntity::Mod(m)) => {
+                if m.items.len() < size {
+                    m.items.resize(size, None);
+                }
+                m.items[i] = stack;
+            }
+            Some(entity) => entity.slots_mut()[i] = stack,
+            None => return false,
+        }
+        self.container_changed(key);
+        true
     }
     /// `LivingEntity.createEquipmentSlotAccess`: every slot but head, mainhand
     /// and offhand takes only an empty stack or one whose
@@ -526,23 +591,7 @@ impl Game<'_> {
                 }
                 None => false,
             },
-            Slot::Block(p, i) => match self
-                .simulation
-                .world
-                .block_entities
-                .get_mut(&(p[0], p[1], p[2]))
-            {
-                Some(horizon_client::containers::BlockEntity::Chest(items)) => {
-                    match items.get_mut(*i) {
-                        Some(slot) => {
-                            *slot = stack;
-                            true
-                        }
-                        None => false,
-                    }
-                }
-                _ => false,
-            },
+            Slot::Block(p, i) => self.block_slot_set(*p, *i, stack),
         }
     }
     fn owner_holder(&self, o: &Owner) -> Holder {
@@ -918,11 +967,7 @@ impl Game<'_> {
             let slots = self.command_slot_candidates(o, &slot_name);
             if slots.is_empty() {
                 if let Owner::Block(p) = o
-                    && !self
-                        .simulation
-                        .world
-                        .block_entities
-                        .contains_key(&(p[0], p[1], p[2]))
+                    && self.block_container_size(*p).is_none()
                 {
                     return Err(err(
                         "commands.item.target.not_a_container",
@@ -1085,11 +1130,7 @@ impl Game<'_> {
             let slots = self.command_slot_candidates(o, &slot_name);
             if slots.is_empty() {
                 if let Owner::Block(p) = o
-                    && !self
-                        .simulation
-                        .world
-                        .block_entities
-                        .contains_key(&(p[0], p[1], p[2]))
+                    && self.block_container_size(*p).is_none()
                 {
                     return Err(err(
                         "commands.item.target.not_a_container",
@@ -1210,6 +1251,14 @@ impl Game<'_> {
         };
         let mut count = 0;
         for o in owners {
+            if let Owner::Block(p) = o
+                && self.block_container_size(p).is_none()
+            {
+                return Err(err(
+                    "commands.item.source.not_a_container",
+                    &[&p[0], &p[1], &p[2]],
+                ));
+            }
             let slots = self.command_slots(&o, &slot_name);
             if predicate.is_none() {
                 count += slots.len() as i32;

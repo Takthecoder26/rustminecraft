@@ -758,6 +758,7 @@ pub struct Damage {
     pub kind: DamageKind,
     pub attacker: Option<Who>,
     pub from: Option<[f64; 3]>,
+    pub attacker_species: Option<Species>,
 }
 impl Damage {
     pub fn fall() -> Self {
@@ -765,6 +766,7 @@ impl Damage {
             kind: DamageKind::Fall,
             attacker: None,
             from: None,
+            attacker_species: None,
         }
     }
     pub fn of(kind: DamageKind) -> Self {
@@ -772,6 +774,7 @@ impl Damage {
             kind,
             attacker: None,
             from: None,
+            attacker_species: None,
         }
     }
     pub fn player(from: [f64; 3]) -> Self {
@@ -779,6 +782,7 @@ impl Damage {
             kind: DamageKind::PlayerAttack,
             attacker: Some(Who::Player),
             from: Some(from),
+            attacker_species: None,
         }
     }
     /// `DamageSources.mace`: a player's smash attack.
@@ -787,6 +791,7 @@ impl Damage {
             kind: DamageKind::MaceSmash,
             attacker: Some(Who::Player),
             from: Some(from),
+            attacker_species: None,
         }
     }
     /// `DamageSources.spear`: a player's stab with a spear.
@@ -795,6 +800,7 @@ impl Damage {
             kind: DamageKind::Spear,
             attacker: Some(Who::Player),
             from: Some(from),
+            attacker_species: None,
         }
     }
     /// `DamageSources.indirectMagic(potion, owner)`: `attacker` is the owner
@@ -805,6 +811,7 @@ impl Damage {
             kind: DamageKind::IndirectMagic,
             attacker,
             from: Some(from),
+            attacker_species: None,
         }
     }
     /// `DamageSources.fireworks(rocket, owner)`: `attacker` is the owner
@@ -815,6 +822,7 @@ impl Damage {
             kind: DamageKind::Fireworks,
             attacker,
             from: Some(from),
+            attacker_species: None,
         }
     }
     pub fn mob(id: u32, from: [f64; 3]) -> Self {
@@ -822,7 +830,12 @@ impl Damage {
             kind: DamageKind::MobAttack,
             attacker: Some(Who::Mob(id)),
             from: Some(from),
+            attacker_species: None,
         }
+    }
+    pub fn with_species(mut self, species: Species) -> Self {
+        self.attacker_species = Some(species);
+        self
     }
     /// DamageTypeTags.PANIC_CAUSES
     pub fn causes_panic(&self) -> bool {
@@ -4926,6 +4939,7 @@ mod fire_resistance_damage_tests {
             kind: DamageKind::Fireball,
             attacker: Some(Who::Player),
             from: None,
+            attacker_species: None,
         };
         assert!(mob.damage(1.0, source));
         assert_eq!(mob.health, 10.0);
@@ -5011,6 +5025,7 @@ mod magic_absorb_tests {
             kind: DamageKind::IndirectMagic,
             attacker: Some(Who::Mob(m.id)),
             from: None,
+            attacker_species: Some(Species::Witch),
         };
         m.damage(20.0, own);
         assert_eq!(m.health, 10.0);
@@ -5079,6 +5094,7 @@ mod armor_hurt_tests {
             kind: DamageKind::MobAttack,
             attacker: None,
             from: None,
+            attacker_species: None,
         };
         let mut m = horse();
         m.extra.body = Some("minecraft:diamond_horse_armor".into());

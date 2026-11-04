@@ -6,7 +6,7 @@
 use super::Game;
 use horizon_client::{
     first_person::Hand,
-    mobs::{Mob, Species, equine, llama, nautilus},
+    mobs::{Mob, Species, armadillo, equine, llama, nautilus, render::DYE_NAMES},
 };
 
 impl Game<'_> {
@@ -29,6 +29,12 @@ impl Game<'_> {
             || item.strip_suffix("_spawn_egg") == Some(m.kind.id.as_str())
         {
             return true;
+        }
+        // Armadillo.mobInteract: a rolled-up armadillo fails before
+        // AgeableMob/Animal.mobInteract, so food and age lock are not taken.
+        // A brush still reaches brushOffScute below.
+        if m.species() == Species::Armadillo && armadillo::client_rejects_food(m, item) {
+            return false;
         }
         // AgeableMob.mobInteract: a golden dandelion on a baby that can be age
         // locked is SUCCESS on a client too (the server sets the lock).
@@ -72,7 +78,7 @@ impl Game<'_> {
                     ) || m.extra.variant == 1
                         && horizon_client::flowers::stew_effect(item).is_some())
             }
-            Species::Sheep => item == "minecraft:shears" || item.ends_with("_dye"),
+            Species::Sheep => sheep_takes(item, m.extra.sheared, m.extra.color),
             // SnowGolem.mobInteract: shears take the pumpkin off.
             Species::SnowGolem => item == "minecraft:shears" && !m.extra.sheared,
             // AbstractNautilus.mobInteract: an untamed adult only answers its
@@ -104,7 +110,9 @@ impl Game<'_> {
                 item == "minecraft:water_bucket"
                     || !m.extra.age_locked && m.kind.food.iter().any(|f| f.as_str() == item)
             }
-            Species::Armadillo => item == "minecraft:brush",
+            // Armadillo.brushOffScute fails on a baby, so its brush falls
+            // through to FAIL (scared) or Mob.mobInteract's PASS.
+            Species::Armadillo => item == "minecraft:brush" && !baby,
             // ZombieVillager.mobInteract: CONSUME for a golden apple.
             Species::ZombieVillager => item == "minecraft:golden_apple",
             // Creeper.mobInteract: CREEPER_IGNITERS.
@@ -147,6 +155,18 @@ impl Game<'_> {
             horizon_client::particles::Burst::HORSE_EATING,
         );
     }
+}
+
+/// `Sheep.mobInteract` on a client answers CONSUME for shears whether or not the
+/// sheep is sheared (only the server checks `readyForShearing`).
+/// `DyeItem.interactLivingEntity` takes a living, unsheared sheep of another
+/// colour, and passes otherwise.
+fn sheep_takes(item: &str, sheared: bool, color: u8) -> bool {
+    let dye = item
+        .strip_prefix("minecraft:")
+        .and_then(|name| name.strip_suffix("_dye"))
+        .and_then(|name| DYE_NAMES.iter().position(|&d| d == name));
+    item == "minecraft:shears" || !sheared && dye.is_some_and(|c| c != usize::from(color))
 }
 
 /// `AbstractNautilus.mobInteract` on a client: its food is answered while the
@@ -235,6 +255,23 @@ mod tests {
             horizon_core::geometry::Vec3::new(0.0, 4.0, 0.0),
             0.0,
         ))
+    }
+
+    /// `Sheep.mobInteract` and `DyeItem.interactLivingEntity` on a client (#9121).
+    #[test]
+    fn a_sheep_takes_shears_always_and_dye_only_to_change_its_colour() {
+        for sheared in [false, true] {
+            assert!(
+                sheep_takes("minecraft:shears", sheared, 0),
+                "shears, sheared {sheared}"
+            );
+        }
+        assert!(sheep_takes("minecraft:red_dye", false, 0));
+        assert!(!sheep_takes("minecraft:white_dye", false, 0), "same colour");
+        assert!(sheep_takes("minecraft:white_dye", false, 14));
+        assert!(!sheep_takes("minecraft:red_dye", false, 14), "same colour");
+        assert!(!sheep_takes("minecraft:red_dye", true, 0), "sheared");
+        assert!(!sheep_takes("minecraft:stick", false, 0));
     }
 
     /// `AbstractNautilus.mobInteract` (#8595): an untamed adult takes its taming
