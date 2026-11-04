@@ -115,22 +115,41 @@ pub struct Dynamic {
     pub registries: HashMap<String, Vec<(String, Option<Tag>)>>,
     /// The `minecraft:dialog` tags the server sent: each tag's entries by id.
     pub dialog_tags: HashMap<String, Vec<i32>>,
+    /// The `minecraft:block` tags the server sent: each tag's entries by id.
+    pub block_tags: HashMap<String, Vec<i32>>,
+    /// The `minecraft:item` tags the server sent: each tag's entries by id.
+    pub item_tags: HashMap<String, Vec<i32>>,
     /// The peer confirmed the native component registry identity.
     pub custom_components: bool,
 }
 impl Dynamic {
     /// The dialog tags of a `ClientboundUpdateTagsPacket`.
     pub fn add_tags(&mut self, packet: &UpdateTags) {
-        for r in packet
-            .registries
-            .iter()
-            .filter(|r| r.registry == "minecraft:dialog")
-        {
-            self.dialog_tags = r
-                .tags
-                .iter()
-                .map(|t| (t.name.clone(), t.ids.clone()))
-                .collect();
+        for r in &packet.registries {
+            match r.registry.as_str() {
+                "minecraft:dialog" => {
+                    self.dialog_tags = r
+                        .tags
+                        .iter()
+                        .map(|t| (t.name.clone(), t.ids.clone()))
+                        .collect();
+                }
+                "minecraft:block" => {
+                    self.block_tags = r
+                        .tags
+                        .iter()
+                        .map(|t| (t.name.clone(), t.ids.clone()))
+                        .collect();
+                }
+                "minecraft:item" => {
+                    self.item_tags = r
+                        .tags
+                        .iter()
+                        .map(|t| (t.name.clone(), t.ids.clone()))
+                        .collect();
+                }
+                _ => {}
+            }
         }
     }
     pub fn add(&mut self, packet: RegistryData) {
@@ -243,7 +262,7 @@ pub fn ceil_log2(n: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packets::configuration::RegistryEntry;
+    use crate::packets::configuration::{RegistryEntry, RegistryTags, TagEntry, UpdateTags};
 
     #[test]
     fn parses_registry_reports() {
@@ -285,6 +304,40 @@ mod tests {
         assert_eq!(ceil_log2(35723), 16);
         assert_eq!(ceil_log2(65), 7);
         assert_eq!(ceil_log2(64), 6);
+    }
+
+    #[test]
+    fn update_tags_populates_block_item_dialog() {
+        let mut d = Dynamic::default();
+        let packet = UpdateTags {
+            registries: vec![
+                RegistryTags {
+                    registry: "minecraft:dialog".into(),
+                    tags: vec![TagEntry {
+                        name: "minecraft:quick_actions".into(),
+                        ids: vec![1, 2],
+                    }],
+                },
+                RegistryTags {
+                    registry: "minecraft:block".into(),
+                    tags: vec![TagEntry {
+                        name: "minecraft:mineable/pickaxe".into(),
+                        ids: vec![10, 20],
+                    }],
+                },
+                RegistryTags {
+                    registry: "minecraft:item".into(),
+                    tags: vec![TagEntry {
+                        name: "minecraft:planks".into(),
+                        ids: vec![3],
+                    }],
+                },
+            ],
+        };
+        d.add_tags(&packet);
+        assert_eq!(d.dialog_tags.get("minecraft:quick_actions"), Some(&vec![1, 2]));
+        assert_eq!(d.block_tags.get("minecraft:mineable/pickaxe"), Some(&vec![10, 20]));
+        assert_eq!(d.item_tags.get("minecraft:planks"), Some(&vec![3]));
     }
 
     #[test]

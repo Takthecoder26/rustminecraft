@@ -3003,6 +3003,14 @@ impl Game<'_> {
 
     fn handle_packet(&mut self, packet: C) -> Result<()> {
         match packet {
+            C::UpdateTags(t) => {
+                if let Some(r) = self.remote.as_mut() {
+                    let mut registries = (*r.registries).clone();
+                    registries.add_tags(&t);
+                    r.registries = std::sync::Arc::new(registries);
+                }
+                return Ok(());
+            }
             // ClientCommonPacketListenerImpl.handlePing runs on the game
             // thread, after all preceding packets (especially teleports).
             C::Ping(p) => self.send(S::Pong(p)),
