@@ -18,6 +18,19 @@ use crate::{
     packets::{configuration, play},
 };
 
+pub(super) mod v1_20_2;
+pub(super) mod v1_20_3;
+mod v1_20_5;
+pub(super) mod v1_21_1;
+mod v1_21_3;
+mod v1_21_4;
+mod v1_21_5;
+
+pub(super) fn old_experience_orb(session: &Session, payload: &[u8]) -> Result<(i32, Vec<u8>)> {
+    v1_21_4::experience_orb(session, payload)
+}
+mod v1_21_8;
+
 impl Ids {
     /// The table of a registry tags are sent for, by its name; registries the protocol syncs from the
     /// server's own data (biomes, enchantments, ...) are numbered by that data and alike on both sides.
@@ -55,6 +68,92 @@ pub fn clientbound(
         return Ok(Some((id, None)));
     };
     use packet_ids::play::clientbound as cb;
+    let normalized_text = if session.version.at_most(ServerVersion::V1_20_2) {
+        v1_20_2::text::clientbound(session, state, id, payload)?
+    } else {
+        None
+    };
+    let payload = normalized_text.as_deref().unwrap_or(payload);
+    if session.version.at_most(ServerVersion::V1_20_2) && state == State::Play {
+        match id {
+            cb::SET_SCORE => {
+                return v1_20_2::set_score(session, payload)
+                    .map(|(id, body)| Some((id, Some(body))));
+            }
+            cb::EXPLODE => {
+                return v1_20_2::explosion(session, payload).map(|body| Some((id, Some(body))));
+            }
+            _ => {}
+        }
+    }
+    if session.version.at_most(ServerVersion::V1_20_3)
+        && (state, id)
+            == (
+                State::Configuration,
+                packet_ids::configuration::clientbound::REGISTRY_DATA,
+            )
+    {
+        let mut r = Reader::new(payload);
+        let packets = super::legacy::split_registry_data(&r.nbt()?)?;
+        if r.remaining() != 0 || packets.is_empty() {
+            return Err(crate::Error::new("invalid legacy registry packet"));
+        }
+        *session.legacy_items.lock().unwrap() = Default::default();
+        let mut bodies = Vec::new();
+        for packet in packets {
+            super::legacy::remember(session, &packet);
+            let mut w = Writer::new();
+            configuration::RegistryData::write(&packet, &mut w);
+            v1_21_4::registry_data(session, &w.data)?;
+            bodies.push(w.data);
+        }
+        let first = bodies.remove(0);
+        session
+            .incoming
+            .lock()
+            .unwrap()
+            .extend(bodies.into_iter().map(|body| (id, body)));
+        return Ok(Some((id, Some(first))));
+    }
+    if session.version.at_most(ServerVersion::V1_20_3) && state == State::Play {
+        match id {
+            cb::EXPLODE => {
+                return v1_20_3::explosion(session, payload).map(|body| Some((id, Some(body))));
+            }
+            cb::MERCHANT_OFFERS => {
+                return v1_20_3::merchant_offers(session, payload)
+                    .map(|body| Some((id, Some(body))));
+            }
+            cb::SET_EQUIPMENT => {
+                return v1_20_3::equipment(session, payload).map(|body| Some((id, Some(body))));
+            }
+            _ => {}
+        }
+    }
+    if session.version.at_most(ServerVersion::V1_21_1) && state == State::Play {
+        if matches!(id, cb::UPDATE_RECIPES | cb::PLACE_GHOST_RECIPE) {
+            return v1_21_1::recipes::clientbound(session, id, payload)
+                .map(|body| body.map(|body| (id, Some(body))));
+        }
+        if id == cb::CONTAINER_SET_SLOT
+            && let Some((id, body)) = v1_21_1::container_slot(session, payload)?
+        {
+            return Ok(Some((id, Some(body))));
+        }
+        if id == cb::EXPLODE {
+            return v1_21_1::explosion(session, payload).map(|body| Some((id, Some(body))));
+        }
+    }
+    if session.version.at_most(ServerVersion::V1_21_4)
+        && state == State::Configuration
+        && id == packet_ids::configuration::clientbound::REGISTRY_DATA
+    {
+        v1_21_4::registry_data(session, payload)?;
+    }
+    let _trims = (session.version.at_most(ServerVersion::V1_21_4)
+        && state == State::Play
+        && matches!(id, cb::RECIPE_BOOK_ADD | cb::PLACE_GHOST_RECIPE))
+    .then(|| ids::trim_patterns(session.trim_patterns.lock().unwrap().clone()));
     // 1.21.11's configuration ends with the world clocks 26.1 syncs as a registry.
     if session.version.at_most(ServerVersion::V1_21_11)
         && (state, id)
@@ -63,20 +162,34 @@ pub fn clientbound(
                 packet_ids::configuration::clientbound::FINISH_CONFIGURATION,
             )
     {
-        session
-            .incoming
-            .lock()
-            .unwrap()
-            .push_back((id, payload.to_vec()));
+        let clocks = v1_21_11::world_clocks();
+        let mut incoming = session.incoming.lock().unwrap();
+        let mut registries = legacy_registries(session);
+        registries.push(clocks);
+        let first = registries.remove(0);
+        incoming.extend(
+            registries
+                .into_iter()
+                .map(|body| (packet_ids::configuration::clientbound::REGISTRY_DATA, body)),
+        );
+        incoming.push_back((id, payload.to_vec()));
         return Ok(Some((
             packet_ids::configuration::clientbound::REGISTRY_DATA,
-            Some(v1_21_11::world_clocks()),
+            Some(first),
         )));
     }
     // A release at a time: an older server's packets are brought to 26.2's layout first, oldest step first.
     let mut before: Option<Vec<u8>> = None;
     type Step = fn(&Session, State, i32, &[u8]) -> Result<Option<Vec<u8>>>;
-    let steps: [(ServerVersion, Step); 2] = [
+    let steps: [(ServerVersion, Step); 10] = [
+        (ServerVersion::V1_20_2, v1_20_2::clientbound),
+        (ServerVersion::V1_20_3, v1_20_3::clientbound),
+        (ServerVersion::V1_20_5, v1_20_5::clientbound),
+        (ServerVersion::V1_21_1, v1_21_1::clientbound),
+        (ServerVersion::V1_21_3, v1_21_3::clientbound),
+        (ServerVersion::V1_21_4, v1_21_4::clientbound),
+        (ServerVersion::V1_21_5, v1_21_5::clientbound),
+        (ServerVersion::V1_21_8, v1_21_8::clientbound),
         (ServerVersion::V1_21_11, v1_21_11::clientbound),
         (ServerVersion::V26_1, v26_1::clientbound),
     ];
@@ -103,9 +216,37 @@ pub fn clientbound(
             }
             strip_id(p.encode())
         }
-        (State::Play, cb::LOGIN) => login(payload)?,
-        (State::Play, cb::RESPAWN) => respawn(payload)?,
-        (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => chunk(ids, payload)?,
+        (State::Play, cb::LOGIN) => {
+            session.legacy_boats.lock().unwrap().clear();
+            session.legacy_metadata.lock().unwrap().clear();
+            let body = login(payload, session.version)?;
+            let login = play::Login::read(&mut Reader::new(&body))?;
+            *session.local_player.lock().unwrap() = Some((login.player_id, false));
+            *session.dimension.lock().unwrap() = login.spawn.dimension;
+            // The local player receives no AddEntity packet; its metadata still needs the player step.
+            session
+                .kinds
+                .lock()
+                .unwrap()
+                .insert(login.player_id, packet_ids_entity::PLAYER);
+            body
+        }
+        (State::Play, cb::RESPAWN) => {
+            if let Some((_, shift)) = session.local_player.lock().unwrap().as_mut() {
+                *shift = false;
+            }
+            let body = respawn(payload, session.version)?;
+            let dimension = play::Respawn::read(&mut Reader::new(&body))?
+                .spawn
+                .dimension;
+            if *session.dimension.lock().unwrap() != dimension {
+                session.legacy_boats.lock().unwrap().clear();
+                session.legacy_metadata.lock().unwrap().clear();
+            }
+            *session.dimension.lock().unwrap() = dimension;
+            body
+        }
+        (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => chunk(session, ids, payload)?,
         (State::Play, cb::LIGHT_UPDATE) => light_update(payload)?,
         (State::Play, cb::UPDATE_ADVANCEMENTS) => advancements(ids, payload)?,
         (State::Play, cb::LEVEL_PARTICLES) => particles(ids, payload)?,
@@ -125,18 +266,26 @@ pub fn clientbound(
         (State::Play, cb::ADD_ENTITY) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::AddEntity(e) = &mut p {
+                session.legacy_metadata.lock().unwrap().forget(e.id);
                 let falling_block = ids.entity_type.down(packet_ids_entity::FALLING_BLOCK);
                 if Some(e.kind) == falling_block {
                     e.data = ids.block_state.up(e.data).unwrap_or(0);
                 }
                 e.kind = ids.entity_type.up(e.kind).unwrap_or(e.kind);
+                if session.version.at_most(ServerVersion::V1_21_1) {
+                    v1_21_1::boats::spawn(session, ids.entity_type.down(e.kind), e);
+                }
             }
             strip_id(p.encode())
         }
         (State::Play, cb::BLOCK_ENTITY_DATA) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::BlockEntityData(b) = &mut p {
-                b.kind = ids.block_entity_type.up(b.kind).unwrap_or(b.kind);
+                let Some(kind) = ids.block_entity_type.up(b.kind) else {
+                    return Ok(None);
+                };
+                v1_20_3::upgrade_block_entity(session, b.kind, &mut b.tag);
+                b.kind = kind;
             }
             strip_id(p.encode())
         }
@@ -180,6 +329,21 @@ pub fn clientbound(
         (State::Play, cb::SET_ENTITY_DATA) if session.version.at_most(ServerVersion::V1_21_11) => {
             let mut p = decode_play(ids, id, payload)?;
             if let play::Clientbound::SetEntityData(d) = &mut p {
+                if session.version.at_most(ServerVersion::V1_20_3) {
+                    v1_20_3::entity_data(session, d);
+                }
+                if session.version.at_most(ServerVersion::V1_21_1) {
+                    v1_21_1::boats::metadata(session, d);
+                }
+                if session.version.at_most(ServerVersion::V1_21_4) {
+                    v1_21_4::entity_data(session, d);
+                }
+                if session.version.at_most(ServerVersion::V1_21_5) {
+                    v1_21_5::entity_data(session, d);
+                }
+                if session.version.at_most(ServerVersion::V1_21_8) {
+                    v1_21_8::entity_data(session, d);
+                }
                 if session.version.at_most(ServerVersion::V1_21_10) {
                     v1_21_10::entity_data(session, d);
                 }
@@ -199,9 +363,10 @@ pub fn clientbound(
             | cb::SOUND
             | cb::SOUND_ENTITY
             | cb::RECIPE_BOOK_ADD
-            | cb::PLACE_GHOST_RECIPE,
+            | cb::PLACE_GHOST_RECIPE
+            | cb::COMMANDS,
         ) => redecode(ids, id, payload)?,
-        _ => return Ok(Some((id, before))),
+        _ => return Ok(Some((id, before.or(normalized_text)))),
     };
     Ok(Some((id, Some(out))))
 }
@@ -210,6 +375,7 @@ pub fn clientbound(
 mod packet_ids_entity {
     /// `minecraft:falling_block` in 26.3.
     pub const FALLING_BLOCK: i32 = 52;
+    pub const PLAYER: i32 = 159;
 }
 
 /// A serverbound packet with Horizon's `id`, as the older server numbers and lays it out: its id there and
@@ -230,7 +396,109 @@ pub fn serverbound(
         return renumbered(id, payload.to_vec());
     };
     use packet_ids::play::serverbound as sb;
+    if session.version.at_most(ServerVersion::V1_20_2) {
+        if matches!(
+            (state, id),
+            (
+                State::Configuration,
+                packet_ids::configuration::serverbound::RESOURCE_PACK
+            ) | (State::Play, sb::RESOURCE_PACK)
+        ) {
+            return v1_20_2::resource_status(session, payload)?
+                .map_or(Ok(None), |body| renumbered(id, body));
+        }
+        if (state, id) == (State::Play, sb::SET_JIGSAW_BLOCK) {
+            return renumbered(id, v1_20_2::jigsaw(payload)?);
+        }
+    }
     match (state, id) {
+        (State::Play, sb::CONTAINER_BUTTON_CLICK)
+            if session.version.at_most(ServerVersion::V1_20_3) =>
+        {
+            renumbered(id, v1_20_3::container_button(payload)?)
+        }
+        (State::Play, sb::USE_ITEM) if session.version.at_most(ServerVersion::V1_20_5) => {
+            renumbered(id, v1_20_5::use_item(payload)?)
+        }
+        (State::Play, sb::USE_ITEM_ON) if session.version.at_most(ServerVersion::V1_21_1) => {
+            renumbered(id, v1_21_1::use_item_on(payload)?)
+        }
+        (State::Configuration, packet_ids::configuration::serverbound::CLIENT_INFORMATION)
+        | (State::Play, sb::CLIENT_INFORMATION)
+            if session.version.at_most(ServerVersion::V1_21_1) =>
+        {
+            renumbered(id, v1_21_1::client_information(payload)?)
+        }
+        (State::Play, sb::PLACE_RECIPE | sb::RECIPE_BOOK_SEEN_RECIPE)
+            if session.version.at_most(ServerVersion::V1_21_1) =>
+        {
+            match v1_21_1::recipes::serverbound(session, id, payload)? {
+                Some(body) => renumbered(id, body),
+                None => Ok(None),
+            }
+        }
+        (
+            State::Play,
+            sb::MOVE_PLAYER_POS
+            | sb::MOVE_PLAYER_POS_ROT
+            | sb::MOVE_PLAYER_ROT
+            | sb::MOVE_PLAYER_STATUS_ONLY,
+        ) if session.version.at_most(ServerVersion::V1_21_1) => {
+            play::Serverbound::decode(id, payload)?;
+            let mut body = payload.to_vec();
+            if let Some(flags) = body.last_mut() {
+                *flags &= 1;
+            }
+            renumbered(id, body)
+        }
+        (State::Play, sb::CONTAINER_CLOSE) if session.version.at_most(ServerVersion::V1_21_1) => {
+            let container = Reader::new(payload).varint()?;
+            let container = u8::try_from(container)
+                .map_err(|_| crate::Error::new("legacy container id out of range"))?;
+            renumbered(id, vec![container])
+        }
+        (State::Play, sb::MOVE_VEHICLE) if session.version.at_most(ServerVersion::V1_21_3) => {
+            let p = play::Serverbound::decode(id, payload)?;
+            if session.version.at_most(ServerVersion::V1_21_1)
+                && let play::Serverbound::MoveVehicle(p) = p
+            {
+                v1_21_1::boats::controlled(session, p.position, p.yaw, p.pitch);
+            }
+            renumbered(id, payload[..payload.len() - 1].to_vec())
+        }
+        (State::Play, sb::CHAT | sb::CHAT_COMMAND_SIGNED)
+            if session.version.at_most(ServerVersion::V1_21_4) =>
+        {
+            // LastSeenMessages.Update gained its trailing checksum in 1.21.5.
+            play::Serverbound::decode(id, payload)?;
+            renumbered(id, payload[..payload.len() - 1].to_vec())
+        }
+        (State::Play, sb::CONTAINER_CLICK) if session.version.at_most(ServerVersion::V1_21_4) => {
+            let body = v1_21_4::container_click(payload)?;
+            if session.version.at_most(ServerVersion::V1_21_1) {
+                let mut r = Reader::new(&body);
+                let container = u8::try_from(r.varint()?)
+                    .map_err(|_| crate::Error::new("legacy container id out of range"))?;
+                let mut w = Writer::new();
+                w.u8(container);
+                w.bytes(r.rest());
+                renumbered(id, w.data)
+            } else {
+                renumbered(id, body)
+            }
+        }
+        (State::Play, sb::PLAYER_COMMAND) if session.version.at_most(ServerVersion::V1_21_5) => {
+            renumbered(id, v1_21_5::player_command(payload)?)
+        }
+        (State::Play, sb::PLAYER_INPUT) if session.version.at_most(ServerVersion::V1_21_5) => {
+            v1_21_5::input(session, payload)?;
+            let body = if session.version.at_most(ServerVersion::V1_21_1) {
+                v1_21_1::serverbound_input(payload)?
+            } else {
+                payload.to_vec()
+            };
+            renumbered(id, body)
+        }
         // 26.3 also states where the client was teleported to; 26.2 only the teleport's id.
         (State::Play, sb::ACCEPT_TELEPORTATION) => {
             let mut r = Reader::new(payload);
@@ -256,7 +524,7 @@ pub fn serverbound(
             v1_21_11::interact(session, payload)
         }
         (State::Play, sb::ATTACK) if session.version.at_most(ServerVersion::V1_21_11) => {
-            v1_21_11::attack(payload)
+            v1_21_11::attack(session, payload)
         }
         // 26.1 is told the entity a spectator picked by its UUID (spectate_entity, at the same id).
         (State::Play, sb::SPECTATOR_ACTION) if session.version == ServerVersion::V26_1 => {
@@ -266,7 +534,19 @@ pub fn serverbound(
         (State::Play, sb::PUNCH) => {
             let mut w = Writer::new();
             w.varint(0);
-            let swing = if session.version.at_most(ServerVersion::V1_21_11) {
+            let swing = if session.version.at_most(ServerVersion::V1_20_2) {
+                50
+            } else if session.version.at_most(ServerVersion::V1_20_3) {
+                51
+            } else if session.version.at_most(ServerVersion::V1_21_1) {
+                54 // Vanilla 1.21/1.21.1, before bundle selection and client tick-end.
+            } else if session.version.at_most(ServerVersion::V1_21_3) {
+                56 // Vanilla 1.21.2/1.21.3, before block/entity picking and player_loaded.
+            } else if session.version.at_most(ServerVersion::V1_21_4) {
+                58 // Vanilla 1.21.4, before the two 1.21.5 test-block packets.
+            } else if session.version.at_most(ServerVersion::V1_21_5) {
+                59 // Vanilla 1.21.5's swing, before change_game_mode shifted the later ids.
+            } else if session.version.at_most(ServerVersion::V1_21_11) {
                 v1_21_11::SWING
             } else {
                 V26_2_SWING
@@ -308,19 +588,86 @@ fn strip_id(body: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// Before 1.21 these registries were static. Keep their old ids and provide the names the native
+/// client resolves through RegistryData, without pretending to synchronize newer custom definitions.
+fn legacy_registries(session: &Session) -> Vec<Vec<u8>> {
+    let version = session.version;
+    use super::v1_20_5_ids::{ENCHANTMENT_NAMES, PAINTING_VARIANT_NAMES};
+    let mut tables: Vec<(&str, &[&str])> = Vec::new();
+    if version.at_most(ServerVersion::V1_20_3) {
+        use super::v1_20_3_ids as old;
+        tables.extend([
+            ("minecraft:enchantment", old::ENCHANTMENT_NAMES),
+            ("minecraft:painting_variant", old::PAINTING_VARIANT_NAMES),
+            ("minecraft:banner_pattern", old::BANNER_PATTERN_NAMES),
+            ("minecraft:wolf_variant", &["minecraft:pale"]),
+        ]);
+    } else if version.at_most(ServerVersion::V1_20_5) {
+        tables.extend([
+            ("minecraft:enchantment", ENCHANTMENT_NAMES),
+            ("minecraft:painting_variant", PAINTING_VARIANT_NAMES),
+        ]);
+    }
+    if version.at_most(ServerVersion::V1_21_1) {
+        tables.push(("minecraft:instrument", super::v1_20_3_ids::INSTRUMENT_NAMES));
+    }
+    tables
+        .into_iter()
+        .map(|(registry, names)| {
+            let mut w = Writer::new();
+            let data = configuration::RegistryData {
+                registry: registry.into(),
+                entries: names
+                    .iter()
+                    .map(|name| configuration::RegistryEntry {
+                        id: (*name).into(),
+                        data: None,
+                    })
+                    .collect(),
+            };
+            if version.at_most(ServerVersion::V1_20_3) {
+                super::legacy::remember(session, &data);
+            }
+            configuration::RegistryData::write(&data, &mut w);
+            w.data
+        })
+        .collect()
+}
+
 fn tags(ids: &Ids, registries: &mut [configuration::RegistryTags]) {
     for registry in registries {
         let remap = ids.by_registry(&registry.registry);
         for tag in &mut registry.tags {
-            tag.ids = tag.ids.iter().filter_map(|&id| remap.up(id)).collect();
+            let mut mapped = Vec::new();
+            for &id in &tag.ids {
+                if ids.quirks.components_before_1_21_2
+                    && registry.registry == "minecraft:entity_type"
+                    && matches!(remap.up(id), Some(90 | 91))
+                {
+                    mapped.extend(if remap.up(id) == Some(90) {
+                        v1_21_1::boats::TYPES
+                    } else {
+                        v1_21_1::boats::CHEST_TYPES
+                    });
+                } else if let Some(id) = remap.up(id) {
+                    mapped.push(id);
+                }
+            }
+            tag.ids = mapped;
         }
     }
 }
 
 /// 26.2's CommonPlayerSpawnInfo, read into Horizon's: the game types went from bytes (-1 for no previous
 /// one) to VarInts (an optional one as id + 1).
-fn spawn_info(r: &mut Reader) -> Result<play::SpawnInfo> {
-    let dimension_type = r.varint()?;
+fn spawn_info(r: &mut Reader, version: ServerVersion) -> Result<play::SpawnInfo> {
+    let dimension_type = if version.at_most(ServerVersion::V1_20_3) {
+        let name = r.string(32767)?;
+        ids::legacy_registry_id("minecraft:dimension_type", &name)
+            .ok_or_else(|| crate::Error::new("unknown legacy dimension type"))?
+    } else {
+        r.varint()?
+    };
     let dimension = r.string(32767)?;
     let seed = r.i64()?;
     let game_type = i32::from(r.i8()?);
@@ -338,11 +685,16 @@ fn spawn_info(r: &mut Reader) -> Result<play::SpawnInfo> {
         flat,
         last_death,
         portal_cooldown: r.varint()?,
-        sea_level: r.varint()?,
+        // Before the field was synced, ClientLevel inherited Level.getSeaLevel() = 63.
+        sea_level: if version.at_most(ServerVersion::V1_21_1) {
+            63
+        } else {
+            r.varint()?
+        },
     })
 }
 
-fn login(payload: &[u8]) -> Result<Vec<u8>> {
+fn login(payload: &[u8], version: ServerVersion) -> Result<Vec<u8>> {
     let mut r = Reader::new(payload);
     let mut w = Writer::new();
     w.i32(r.i32()?);
@@ -358,15 +710,19 @@ fn login(payload: &[u8]) -> Result<Vec<u8>> {
     for _ in 0..3 {
         w.bool(r.bool()?);
     }
-    play::SpawnInfo::write(&spawn_info(&mut r)?, &mut w);
+    play::SpawnInfo::write(&spawn_info(&mut r, version)?, &mut w);
     w.bytes(r.rest());
+    // Before 1.20.5 this arrived later in ServerData, after the initial play login.
+    if version.at_most(ServerVersion::V1_20_3) {
+        w.bool(false);
+    }
     Ok(w.data)
 }
 
-fn respawn(payload: &[u8]) -> Result<Vec<u8>> {
+fn respawn(payload: &[u8], version: ServerVersion) -> Result<Vec<u8>> {
     let mut r = Reader::new(payload);
     let mut w = Writer::new();
-    play::SpawnInfo::write(&spawn_info(&mut r)?, &mut w);
+    play::SpawnInfo::write(&spawn_info(&mut r, version)?, &mut w);
     w.bytes(r.rest());
     Ok(w.data)
 }
@@ -374,7 +730,7 @@ fn respawn(payload: &[u8]) -> Result<Vec<u8>> {
 /// The column's sections with their block states renumbered and packed for the pinned palette width (a
 /// section on the older global palette uses fewer bits per entry), and its light masks as 26.3 sends them.
 /// Biomes are the server's own registry and stay as they are.
-fn chunk(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
+fn chunk(session: &Session, ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
     let mut r = Reader::new(payload);
     let x = r.i32()?;
     let z = r.i32()?;
@@ -384,6 +740,7 @@ fn chunk(ids: &'static Ids, payload: &[u8]) -> Result<Vec<u8>> {
     // A block entity type the pinned version dropped (26.1's bed) goes; the block still draws.
     block_entities.retain_mut(|b| match ids.block_entity_type.up(b.kind) {
         Some(kind) => {
+            v1_20_3::upgrade_block_entity(session, b.kind, &mut b.tag);
             b.kind = kind;
             true
         }
@@ -696,6 +1053,7 @@ mod v1_21_11 {
 
     /// 1.21.11's serverbound `swing` and `interact` (play).
     pub const SWING: i32 = 60;
+    #[cfg(test)]
     const INTERACT: i32 = 25;
 
     /// Entity types (26.3 ids) whose class extends AgeableMob: 26.1 added a second boolean to it, after the
@@ -732,7 +1090,11 @@ mod v1_21_11 {
                 let n = r.count(r.remaining())?;
                 let mut kinds = session.kinds.lock().unwrap();
                 for _ in 0..n {
-                    kinds.remove(&r.varint()?);
+                    let entity = r.varint()?;
+                    kinds.remove(&entity);
+                    session.minecart_display.lock().unwrap().remove(&entity);
+                    session.legacy_boats.lock().unwrap().remove(&entity);
+                    session.legacy_metadata.lock().unwrap().forget(entity);
                 }
                 None
             }
@@ -823,6 +1185,12 @@ mod v1_21_11 {
     /// Horizon's interact (entity, hand, where on it, sneaking) is 1.21.11's INTERACT_AT (action 2: the
     /// point as floats, then the hand), followed as vanilla 1.21.11 did by INTERACT (action 0: the hand).
     pub fn interact(session: &Session, payload: &[u8]) -> Result<Option<(i32, Vec<u8>)>> {
+        let Some(interact) = session
+            .version
+            .serverbound_id(State::Play, packet_ids::play::serverbound::INTERACT)
+        else {
+            return Ok(None);
+        };
         let mut r = Reader::new(payload);
         let entity = r.varint()?;
         let hand = r.varint()?;
@@ -835,23 +1203,29 @@ mod v1_21_11 {
         first.varint(hand);
         first.bool(sneaking);
         let mut then = Writer::new();
-        then.varint(INTERACT);
+        then.varint(interact);
         then.varint(entity);
         then.varint(0);
         then.varint(hand);
         then.bool(sneaking);
         session.outgoing.lock().unwrap().push(then.data);
-        Ok(Some((INTERACT, first.data)))
+        Ok(Some((interact, first.data)))
     }
 
     /// 26.1's attack is 1.21.11's interact with action 1 (ATTACK).
-    pub fn attack(payload: &[u8]) -> Result<Option<(i32, Vec<u8>)>> {
+    pub fn attack(session: &Session, payload: &[u8]) -> Result<Option<(i32, Vec<u8>)>> {
+        let Some(interact) = session
+            .version
+            .serverbound_id(State::Play, packet_ids::play::serverbound::INTERACT)
+        else {
+            return Ok(None);
+        };
         let mut r = Reader::new(payload);
         let mut w = Writer::new();
         w.varint(r.varint()?);
         w.varint(1);
         w.bool(false);
-        Ok(Some((INTERACT, w.data)))
+        Ok(Some((interact, w.data)))
     }
 
     #[cfg(test)]
@@ -914,7 +1288,11 @@ mod v26_1 {
                 body.extend_from_slice(&[0; 16]);
                 Some(body)
             }
-            (State::Play, cb::LOGIN) => Some(login(payload)?),
+            (State::Play, cb::LOGIN) => Some(login(
+                payload,
+                session.version,
+                session.login_requires_authentication(),
+            )?),
             (State::Play, cb::SET_PLAYER_TEAM) => Some(team(payload)?),
             (State::Play, cb::ADD_ENTITY) => {
                 let mut r = Reader::new(payload);
@@ -936,9 +1314,8 @@ mod v26_1 {
         })
     }
 
-    /// 26.2 tells the client whether the server checks accounts (after the spawn info); 26.1 doesn't, so
-    /// it reads as an offline server's.
-    fn login(payload: &[u8]) -> Result<Vec<u8>> {
+    /// Before 26.2 the encryption request tells the client whether the server checks accounts.
+    fn login(payload: &[u8], version: ServerVersion, authenticates: bool) -> Result<Vec<u8>> {
         let mut r = Reader::new(payload);
         r.i32()?;
         r.bool()?;
@@ -952,10 +1329,10 @@ mod v26_1 {
         for _ in 0..3 {
             r.bool()?;
         }
-        super::spawn_info(&mut r)?;
+        super::spawn_info(&mut r, version)?;
         let at = r.position();
         let mut body = payload[..at].to_vec();
-        body.push(0);
+        body.push(u8::from(authenticates));
         body.extend_from_slice(&payload[at..]);
         Ok(body)
     }
@@ -1202,5 +1579,188 @@ mod tests {
         assert_eq!(action(0), Some(0)); // start destroying
         assert_eq!(action(1), None); // change_destroy_direction, new in 26.3
         assert_eq!(action(3), Some(2)); // stop destroying: 3 in 26.3, 2 in 26.2
+    }
+}
+
+#[cfg(test)]
+mod legacy_registry_tests {
+    use super::*;
+
+    #[test]
+    fn vanilla_765_login_and_respawn_resolve_the_synced_dimension_type() {
+        use horizon_world::nbt::Tag;
+        let session = Session::new(ServerVersion::V1_20_3);
+        let mut handshake = Writer::new();
+        handshake.varint(packet_ids::handshake::serverbound::INTENTION);
+        handshake.varint(crate::PROTOCOL_VERSION);
+        handshake.string("horizon.invalid");
+        handshake.u16(25565);
+        handshake.varint(2);
+        session.serverbound(&handshake.data).unwrap();
+        // Actual vanilla 1.20.3 and 1.20.4 GameProfile packet writers produce these bytes.
+        let bytes = |hex: &str| {
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        session
+            .clientbound(
+                2,
+                bytes("000000000000000000000000000000010b486f72697a6f6e5769726500"),
+            )
+            .unwrap();
+        let entry = |name: &str, id| {
+            Tag::compound([
+                ("name", Tag::String(name.into())),
+                ("id", Tag::Int(id)),
+                ("element", Tag::compound([] as [(&str, Tag); 0])),
+            ])
+        };
+        let registry = Tag::compound([(
+            "minecraft:dimension_type",
+            Tag::compound([
+                ("type", Tag::String("minecraft:dimension_type".into())),
+                (
+                    "value",
+                    Tag::List(vec![
+                        entry("horizon_wire:custom_type", 1),
+                        entry("minecraft:overworld", 0),
+                    ]),
+                ),
+            ]),
+        )]);
+        let mut config = Writer::new();
+        config.nbt(&registry);
+        session.clientbound(5, config.data).unwrap();
+        session.clientbound(2, vec![]).unwrap();
+        while session.next_incoming().is_some() {}
+        assert_eq!(session.reading(), State::Play);
+
+        // Independently encoded by each official release's full packet writer, including the
+        // dimension-type identifier, previous mode, last-death position and portal cooldown.
+        let old_login = bytes(
+            "0000002a0003136d696e6563726166743a6f766572776f726c64146d696e6563726166743a7468655f6e657468657213686f72697a6f6e5f776972653a637573746f6d14080600010118686f72697a6f6e5f776972653a637573746f6d5f7479706513686f72697a6f6e5f776972653a637573746f6d11223344556677880103000101146d696e6563726166743a7468655f6e65746865720000007fffffd04007",
+        );
+        let (id, body) = session.clientbound(41, old_login).unwrap().unwrap();
+        let play::Clientbound::Login(login) = play::Clientbound::decode(id, &body).unwrap() else {
+            panic!("login")
+        };
+        assert_eq!(login.player_id, 42);
+        assert_eq!(
+            login.levels,
+            [
+                "minecraft:overworld",
+                "minecraft:the_nether",
+                "horizon_wire:custom"
+            ]
+        );
+        assert_eq!(
+            (
+                login.max_players,
+                login.chunk_radius,
+                login.simulation_distance
+            ),
+            (20, 8, 6)
+        );
+        assert!(login.show_death_screen && login.limited_crafting);
+        assert!(!login.online_mode && !login.enforces_secure_chat);
+        assert_eq!(login.spawn.dimension_type, 1);
+        assert_eq!(login.spawn.dimension, "horizon_wire:custom");
+        assert_eq!(login.spawn.seed, 0x1122334455667788);
+        assert_eq!(
+            (login.spawn.game_type, login.spawn.previous_game_type),
+            (1, Some(3))
+        );
+        assert!(!login.spawn.debug && login.spawn.flat);
+        let death = login.spawn.last_death.as_ref().unwrap();
+        assert_eq!(death.dimension, "minecraft:the_nether");
+        assert_eq!(death.pos, [1, 64, -3]);
+        assert_eq!(
+            (login.spawn.portal_cooldown, login.spawn.sea_level),
+            (7, 63)
+        );
+        assert_eq!(*session.local_player.lock().unwrap(), Some((42, false)));
+        assert_eq!(*session.dimension.lock().unwrap(), "horizon_wire:custom");
+
+        let old_respawn = bytes(
+            "18686f72697a6f6e5f776972653a637573746f6d5f7479706513686f72697a6f6e5f776972653a637573746f6d11223344556677880103000101146d696e6563726166743a7468655f6e65746865720000007fffffd0400703",
+        );
+        let (id, body) = session.clientbound(69, old_respawn).unwrap().unwrap();
+        let play::Clientbound::Respawn(respawn) = play::Clientbound::decode(id, &body).unwrap()
+        else {
+            panic!("respawn")
+        };
+        assert_eq!(respawn.spawn, login.spawn);
+        assert_eq!(respawn.keep, 3);
+    }
+
+    #[test]
+    fn static_registries_arrive_before_clocks_and_configuration_finishes() {
+        let session = Session::new(ServerVersion::V1_20_5);
+        let finish = packet_ids::configuration::clientbound::FINISH_CONFIGURATION;
+        let registry = packet_ids::configuration::clientbound::REGISTRY_DATA;
+        let (id, body) = clientbound(&session, State::Configuration, finish, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(id, registry);
+        let enchantments =
+            configuration::RegistryData::read(&mut Reader::new(&body.unwrap())).unwrap();
+        assert_eq!(enchantments.registry, "minecraft:enchantment");
+        assert_eq!(enchantments.entries.len(), 42);
+        assert_eq!(enchantments.entries[0].id, "minecraft:protection");
+        assert_eq!(enchantments.entries[13].id, "minecraft:sharpness");
+        assert_eq!(enchantments.entries[40].id, "minecraft:mending");
+        assert!(
+            enchantments
+                .entries
+                .iter()
+                .all(|entry| entry.data.is_none())
+        );
+        let (id, body) = session.next_incoming().unwrap();
+        assert_eq!(id, registry);
+        let paintings = configuration::RegistryData::read(&mut Reader::new(&body)).unwrap();
+        assert_eq!(paintings.registry, "minecraft:painting_variant");
+        assert_eq!(paintings.entries.len(), 30);
+        assert_eq!(paintings.entries[0].id, "minecraft:kebab");
+        assert_eq!(paintings.entries[29].id, "minecraft:donkey_kong");
+        let (id, body) = session.next_incoming().unwrap();
+        assert_eq!(id, registry);
+        let instruments = configuration::RegistryData::read(&mut Reader::new(&body)).unwrap();
+        assert_eq!(instruments.registry, "minecraft:instrument");
+        assert_eq!(instruments.entries.len(), 8);
+        assert_eq!(instruments.entries[7].id, "minecraft:dream_goat_horn");
+        let (id, body) = session.next_incoming().unwrap();
+        assert_eq!(id, registry);
+        assert_eq!(
+            configuration::RegistryData::read(&mut Reader::new(&body))
+                .unwrap()
+                .registry,
+            "minecraft:world_clock"
+        );
+        assert_eq!(session.next_incoming(), Some((finish, vec![])));
+        assert!(session.next_incoming().is_none());
+    }
+
+    #[test]
+    fn item_cooldowns_use_the_target_registry_after_the_disc_insertions() {
+        let session = Session::new(ServerVersion::V1_20_5);
+        // Vanilla 1.20.5/1.20.6: trial_key is item 1325, versus 1328 in 1.21.
+        let mut old = Writer::new();
+        old.varint(1325);
+        old.varint(17);
+        let (_, body) = clientbound(
+            &session,
+            State::Play,
+            packet_ids::play::clientbound::COOLDOWN,
+            &old.data,
+        )
+        .unwrap()
+        .unwrap();
+        let body = body.unwrap();
+        let mut r = Reader::new(&body);
+        assert_eq!(r.string(32767).unwrap(), "minecraft:trial_key");
+        assert_eq!(r.varint().unwrap(), 17);
+        assert_eq!(r.remaining(), 0);
     }
 }
