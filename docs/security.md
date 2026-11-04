@@ -66,6 +66,18 @@ and some are waiting for Ludovic:
   a secret of GitHub's `release` environment, which only real releases from main can use. The job that signs runs
   nothing from the repository but a short script calling OpenSSL, so no pull request can read the key by changing
   the code that gets built. Nobody, Ludovic included, ever needs to see it.
+- **Nightly signatures.** A Nightly carries two signatures over the same `SHA256SUMS`. `SHA256SUMS.sig` is signed
+  for the channel (`horizon release nightly`), for launchers and servers from before this change, which read only
+  that one. `SHA256SUMS.v2.sig` is signed for the Nightly's own version (`horizon release nightly-<date>-<commit>`),
+  which its release title names (`Nightly <date> · <commit>`). Current launchers and `horizon-server update` parse
+  that title strictly, refuse a Nightly whose title doesn't parse, and install it only with a v2 signature for exactly
+  that version. That way an older Nightly can't be served as tonight's: its signature names its own date. Installing
+  an older Nightly on purpose still works as a rollback, with a warning, and never happens as an automatic update.
+  **When the old signature can go:** once every launcher and server still updating reads v2. That is, when the
+  telemetry live count shows no launcher (and the server update log no `horizon-server`) older than the first build
+  with this change, or at the latest 60 days after it shipped. Then drop `SHA256SUMS.sig` from nightly-build.yml's
+  publish step and the `--tag nightly` check before it, and remove `NIGHTLY` from horizon-release-sign. Releases (not
+  Nightlies) keep their single `SHA256SUMS.sig`, which is already signed for their tag.
 - **The release machinery needs Ludovic.** The workflows, the release and signing tools, the update-checking code
   and the installers are listed in `.github/CODEOWNERS`. Once main's protection requires code owners' reviews, a
   change to any of them waits for Ludovic's approval. Everything else still merges as soon as its checks pass.
