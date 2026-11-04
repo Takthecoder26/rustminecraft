@@ -3,18 +3,18 @@
 //! cell invalidates the prediction. No distance/velocity halo is assumed.
 use super::{
     Seen, Species,
-    seen_grid::{Cell, Columns, SeenGrid, SnapshotGrid, corner},
+    seen_grid::{Cell, Columns, SeenGrid, SnapshotGrid, corner, query_columns},
 };
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use horizon_core::geometry::Aabb;
 use std::{cell::RefCell, ops::Index};
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ReadSet {
-    all: bool,
-    slots: FxHashSet<usize>,
-    species: FxHashSet<Species>,
-    queries: Vec<(Aabb, Option<Columns>, bool)>,
+    pub(super) all: bool,
+    pub(super) slots: FxHashSet<usize>,
+    pub(super) species: FxHashSet<Species>,
+    pub(super) queries: Vec<(Aabb, Option<Columns>, bool)>,
 }
 impl ReadSet {
     pub fn query(&mut self, area: Aabb, columns: Option<Columns>) {
@@ -31,8 +31,117 @@ pub enum ReadConflict {
     Species,
 }
 
+/// What one owner's predictions would change, if they all commit.
+#[derive(Default)]
+pub struct OwnerWrites {
+    pub cells: Vec<Cell>,
+    pub species: Vec<Species>,
+    pub reach: f64,
+    /// Cells here that the tick's grid does not have yet.
+    pub new_cells: usize,
+}
+
+/// More than one owner writes this.
+const MANY: usize = usize::MAX;
+
+/// What every prediction of a round would change, so that a read can be judged
+/// against the whole round before anything is applied. It is stricter than
+/// [`SnapshotChanges`], which only knows the slots the walk has reached: when no
+/// read meets a foreign write here, none can there, at any point of the walk.
+pub struct RoundWrites {
+    cells: FxHashMap<Cell, usize>,
+    species: FxHashMap<Species, usize>,
+    writers: usize,
+    only_writer: usize,
+    reach: f64,
+    grid_cells: usize,
+}
+impl RoundWrites {
+    pub fn new(grid: &SeenGrid, cells: usize) -> Self {
+        Self {
+            cells: FxHashMap::with_capacity_and_hasher(cells, Default::default()),
+            species: Default::default(),
+            writers: 0,
+            only_writer: 0,
+            reach: grid.reach(),
+            grid_cells: grid.cell_count(),
+        }
+    }
+    pub fn add(&mut self, owner: usize, writes: &OwnerWrites) {
+        self.writers += 1;
+        self.only_writer = owner;
+        self.reach = self.reach.max(writes.reach);
+        // An upper bound: two owners may add the same cell. Too many cells can
+        // only make a read look changed.
+        self.grid_cells += writes.new_cells;
+        for &cell in &writes.cells {
+            let entry = self.cells.entry(cell).or_insert(owner);
+            if *entry != owner {
+                *entry = MANY;
+            }
+        }
+        for &species in &writes.species {
+            let entry = self.species.entry(species).or_insert(owner);
+            if *entry != owner {
+                *entry = MANY;
+            }
+        }
+    }
+    /// Whether anyone but `owner` writes.
+    fn foreign_writer(&self, owner: usize) -> bool {
+        self.writers > 1 || (self.writers == 1 && self.only_writer != owner)
+    }
+}
+impl ReadSet {
+    /// Whether this owner's read meets nothing another owner's prediction
+    /// writes, with every slot of `owners` written.
+    ///
+    /// A query's shape only grows with the grid's reach and cell count, and the
+    /// walk's grid lies between the prediction's and the round's final one, so a
+    /// shape that also holds on the final grid holds throughout the walk.
+    pub fn untouched_by_others(
+        &self,
+        owner: usize,
+        owners: &[usize],
+        writes: &RoundWrites,
+    ) -> bool {
+        if self.all && writes.foreign_writer(owner) {
+            return false;
+        }
+        if self
+            .species
+            .iter()
+            .any(|species| writes.species.get(species).is_some_and(|&o| o != owner))
+        {
+            return false;
+        }
+        if self.slots.iter().any(|&slot| owners[slot] != owner) {
+            return false;
+        }
+        self.queries.iter().all(|&(area, expected, spatial)| {
+            if query_columns(area, spatial, writes.reach, writes.grid_cells) != expected {
+                return false;
+            }
+            let Some(columns) = expected else {
+                return true;
+            };
+            if columns.count() <= writes.cells.len() as u64 {
+                !columns
+                    .cells()
+                    .any(|cell| writes.cells.get(&cell).is_some_and(|&o| o != owner))
+            } else {
+                !writes
+                    .cells
+                    .iter()
+                    .any(|(&cell, &o)| o != owner && columns.contains(cell))
+            }
+        })
+    }
+}
+
 /// Mutations already published in the original global entity order. Owner
 /// identity is frozen for this tick, even when an entity migrates spatially.
+#[derive(Clone)]
 pub struct SnapshotChanges {
     owners: Vec<usize>,
     slots: Vec<bool>,

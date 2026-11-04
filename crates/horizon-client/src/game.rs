@@ -84,6 +84,8 @@ mod cat_spawner;
 mod chat;
 mod chat_filter;
 mod chiseled_bookshelf;
+#[cfg(test)]
+mod clean_commit_tests;
 mod client_ambient;
 mod clipboard;
 mod code_of_conduct;

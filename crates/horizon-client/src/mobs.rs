@@ -2534,6 +2534,21 @@ pub struct PendingPushes {
 }
 impl PendingPushes {
     const LIST_MAX: usize = 64;
+    /// What each mob has waiting, in push order, however it is held.
+    pub fn waiting(&self) -> std::collections::BTreeMap<u32, Vec<[u64; 3]>> {
+        let mut waiting: std::collections::BTreeMap<u32, Vec<[u64; 3]>> = Default::default();
+        let bits = |v: &Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        for (id, pushes) in &self.by_mob {
+            waiting
+                .entry(*id)
+                .or_default()
+                .extend(pushes.iter().map(bits));
+        }
+        for (id, v) in &self.list {
+            waiting.entry(*id).or_default().push(bits(v));
+        }
+        waiting
+    }
     pub fn push(&mut self, id: u32, v: Vec3) {
         if self.by_mob.is_empty() && self.list.len() < Self::LIST_MAX {
             self.list.push((id, v));

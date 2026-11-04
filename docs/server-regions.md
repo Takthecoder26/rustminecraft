@@ -152,10 +152,15 @@ zombie,cow,villager` runs one.
   read tracking can't see: a new thread-local, a global counter, or a `MobWorld`
   override only one of the two paths sets. CI runs the server harnesses this way
   (`tools/ci/region-verify.sh`).
+- `HORIZON_PARALLEL_COMMIT=0`: every round takes the serial walk, with no
+  classification. Any other value, or none, leaves clean rounds on the workers
+  ([below](#parallel-commit)). `verify` runs a clean round on both paths and
+  compares them; `serial` has no workers, so it always walks.
 - `HORIZON_SIMULATION_WORKERS=1..8`: bounded pool size; defaults to the project's
   worker-count policy, capped at eight. Pool construction failure falls back
   to serial execution.
-- `HORIZON_REGION_METRICS=1`: region, predicted, committed and replayed counts.
+- `HORIZON_REGION_METRICS=1`: region, predicted, committed and replayed counts,
+  and whether the round was clean or fell back, with the reason.
 
 What a prediction replaces is guarded in debug builds too: `TickRound::commit`
 panics when the walk wrote to the mob since its prediction was made. Every event
@@ -164,6 +169,81 @@ match that the prediction, the invalidation and `apply_brain_events` all read.
 
 A panic during the mob tick leaves the mob list in `MobRescue`, and the crash save
 takes it back, so the save doesn't write the level's entities as if it had no mobs.
+
+## Parallel commit
+
+The commit walk (step 5 above) costs about 7 ms at 100 players and most of a
+tick's mobs have nothing for it to decide. A round that is provably independent
+skips it: each mob is applied from its own prediction on the workers, and only
+what needs an order runs on the coordinator. Everything else walks as before.
+
+What each step of the walk can observe, and where it goes in a clean round:
+
+| Step | Reads or writes | Clean round |
+| --- | --- | --- |
+| Loaded, ticking and canceled gates | The mob's position, tickets, native callbacks | Decided: a mob they stop has no prediction, which makes the round not clean; native mods already keep the round off the workers |
+| `apply_mob_pushes` before the commit | Pushes from earlier slots | Not run: only same-owner pushes are allowed, and the target's prediction applied them, so the walk's copy would be swapped out anyway |
+| `blocks_changed` | The tick's collision changes | Not run: the prediction did it |
+| Validation (`conflict`, RNG checkpoint) | Earlier foreign writes, the level random | Replaced by the classifier, which is stricter (below) |
+| Swap, `Committed` | The mob and its prediction | Worker |
+| `bindings` | Own id only | Worker decides, coordinator writes the changes in slot order |
+| `events` (cross-owner pushes void an owner) | Other owners | Not reachable: cross-owner pushes aren't clean |
+| Corpses, `gone`, `dead`, `died` | Own mob, own id | Worker decides, coordinator clones and records in slot order |
+| `take_mob_pushes` | Own events | Worker; those at a passed slot are merged in slot order for the end of the walk |
+| Shulker bullet target, guest events | Own events, guest ids | Worker; guest events are merged in slot order |
+| Snapshot entry | Own slot | Worker |
+| `grid.update` | Shared cell lists, `reach` | Worker decides, coordinator updates only the mobs that changed cell or reach, in slot order, so the lists come out identical |
+| `snapshot_changed` | The round's change log | Not needed: nothing validates after the classifier |
+| `apply_brain_events`, `immediate_brain_write` | Other mobs, `failed` | Not reachable: any event that writes to another mob isn't clean |
+| Event order, RNG, section order | Slot order; level random; reserved per slot before the jobs | Merged in slot order; a clean round draws nothing; unchanged |
+
+**Classifying.** Before anything changes, the workers look at each region's
+predictions against tick-start state, and the coordinator joins what they find.
+A round is clean only when all of these hold:
+
+- Every mob has a prediction. No mob is unloaded, outside the entity-ticking area
+  or a raider, no region is sitting out and no prediction was cut short.
+- No prediction drew from the level random.
+- No event writes to another mob (`MobEvent::immediate_write`). This counts writes
+  inside the region too.
+- Pushes only aim at mobs of the same owner.
+- No read meets a write of any other owner's prediction, whichever slot it came
+  from: a full scan, a slot, a species or a queried grid column. Query shapes are
+  checked against the round's final reach and an upper bound on its cell count.
+  The walk's grid always lies between the prediction's and that one, and a shape
+  only grows with them, so a shape that holds on both holds throughout.
+
+These are stricter than validation, which only knows the slots already walked, so
+a clean round is one the walk would commit whole. Any other round runs today's
+walk from the start: nothing has been applied, so there is nothing to undo. The
+walk also stays for `executor()` returning `None` and for pools with one worker.
+
+**The cost of falling back.** A round that fails on the first check pays nothing.
+One that fails later pays the classification and then the walk. How much this
+costs on a workload that falls back every round has not been measured.
+
+**Limits.** This only helps levels whose every mob is predicted, every tick. One
+mob outside the entity-ticking area sends the whole round to the walk, and a
+server's view distance is normally larger than its simulation distance, so mobs
+can stand there. Level RNG users (school leaders, nectar bees, villagers) and
+breeding do the same. The benchmark's zombies avoid all of these, so its result
+is the best case. The server harnesses are nearer the other end: in verify mode,
+`dedicated_server`, `server_entities`, `server_player_damage` and `natural_spawn`
+together had 2 clean rounds and 1,078 that fell back as `Unpredicted`. How often
+a real server's rounds are clean has not been measured.
+
+`clean_commit_matches_the_serial_walk` runs the same scenes through the real
+`tick_creature_entities` on the walk, the clean path and verify mode, and takes
+the walk's result as expected: mobs, snapshot, grid, level random, keep list,
+events in order, guest events, deaths, pushes, bindings and stats. Its scenes are
+a clean round with crowds pushing each other, a cross-region read, a brain write
+to another mob, a death and a removal, a guest hit and a mob with no prediction.
+It needs prepared resources, so it is `#[ignore]`d: set `HORIZON_TEST_RESOURCES`
+and pass `--include-ignored`. The classifier's own tests need no data. In verify
+mode, a clean round also runs on a copy and is compared with the walk's result,
+but the CI harnesses reach that in very few rounds (see the limits above), so
+this test is the clean path's main coverage. The benchmark's clean rounds were
+not compared with a walk.
 
 ## Validation and benchmark
 
@@ -347,3 +427,68 @@ The pool-against-serial tests need prepared resources, so they are `#[ignore]`d:
 The harnesses `tools/parity.py --changed-files` selects for these files were
 stopped before the run finished, at the user's request, and three of them failed
 without being looked into. `lan_e2e` was not run. The PR records the details.
+
+### Parallel commit (2026-11-04)
+
+One run of the same workload, with the same settings and build flags as above,
+on the same shared machine, from the commit that adds this section (on
+`2362e29c5`, which merges main at `23bbd8117`). The user's own Horizon client was
+running at about 17-24% of a core. Its full report is under `parallel_commit` in
+[the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | TPS | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 46.69 | 45.58 | 53.56 | 59.67 | 91.01 | 66 of 400 | 19.97 | 25.7 | 448.39 | 537.28 |
+
+Every round was clean: 409 clean, 0 fell back, counting the warmup. All 7,000
+predictions committed, with no replay.
+
+`mob_classify` is the classification and the clean commit together; `mob_walk`
+is empty when the walk is skipped. The "before" figures are the three earlier
+runs above.
+
+| Span | Before, wall ms | After, wall ms | Before, coordinator CPU ms | After, coordinator CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| `mob_walk` + `mob_classify` | 7.03, 7.26, 7.68 | 3.24 | 6.92, 7.17, 7.51 | 1.29 |
+
+So the walk's span saved 3.8 to 4.4 ms of wall time, at or just under the low end
+of the 4-5 ms estimated before the work. The clean commit did not take the span
+to zero, because the workers still do the work and the coordinator still merges.
+
+The whole tick is less clear. The average fell by 0.75, 2.37 and 4.07 ms against
+the three earlier runs (47.44, 49.06 and 50.76 ms). There is no run of this
+binary with `HORIZON_PARALLEL_COMMIT=0`, so these comparisons cross merges of main
+and the machine's load:
+
+- `mob_projectiles` fell from 0.70-0.85 ms to nothing because of main's early
+  return in `tick_projectiles`. That is part of the tick's drop and not this work.
+- Spans this work does not touch did not fall: `mob_predict` 15.82/16.25/16.80 to
+  17.39 ms, `tick_lan` 7.93/8.14/8.83 to 8.80 ms.
+- The process used more CPU in total (394.65/399.49/404.37 to 448.39%). One run
+  can't say how much of that is the commit.
+
+**Checks.** `cargo fmt --check`; clippy `-D warnings` on `horizon-client` and
+`horizon-client-lib`, all targets; `cargo test -p horizon-client --lib`;
+`cargo test -p horizon-client-lib --lib` for `mobs::` and `lan::`;
+`clean_commit_matches_the_serial_walk` with prepared resources. Ten deliberate
+breaks of the clean path were each caught by that test. With
+`HORIZON_SIMULATION_MODE=parallel`, `mob_ai`, `natural_spawn`, `dedicated_server`,
+`server_entities` and `server_player_damage` passed. `dedicated_server` failed
+its first attempt, then passed on the runner's retry without reused oracle
+results and on two more runs; the first attempt's log was overwritten, so why it
+failed is not known. `mob_ai`'s probe has its own mob loop, so it does not reach
+the clean path.
+
+**`tools/ci/region-verify.sh` fails on `dedicated_server`, with or without
+parallel commit.** The panic is "the commit and its replay differ" in a long
+jump's `chosen`. `optimal_jump_vector` follows vanilla's `Collections.shuffle`
+with no seeded random, so a commit and its replay can pick different angles for
+the same frog or goat. It failed 3 of 3 runs with `HORIZON_PARALLEL_COMMIT=0`. With
+the shuffle temporarily pinned, a local change that was not committed, all four
+verify harnesses passed, so this draw is the only cause there. It has not been
+fixed. The script's other tests pass when run on their own. It has not been run
+on the commit before this merge, so when it began to fail is not known.
+
+**Not run.** No control run of this binary, no second run, and no workload with
+mixed species, moving players or mobs outside the entity-ticking area. `lan_e2e`
+was not run.

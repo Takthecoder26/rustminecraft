@@ -36,7 +36,7 @@ pub trait SnapshotGrid: Sync {
     fn spatial_candidates(&self, area: Aabb, out: &mut Vec<u32>) -> bool;
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct SeenGrid {
     cells: FxHashMap<Cell, Vec<u32>>,
     cell_of: Vec<Cell>,
@@ -48,7 +48,7 @@ fn column(x: f64, z: f64) -> Cell {
 pub fn corner(b: Aabb) -> Cell {
     column(b.min(Axis::X), b.min(Axis::Z))
 }
-fn width(b: Aabb) -> f64 {
+pub(super) fn width(b: Aabb) -> f64 {
     (b.max(Axis::X) - b.min(Axis::X)).max(b.max(Axis::Z) - b.min(Axis::Z))
 }
 fn spatial_columns(area: Aabb, reach: f64) -> Option<Columns> {
@@ -59,6 +59,19 @@ fn spatial_columns(area: Aabb, reach: f64) -> Option<Columns> {
 }
 fn columns(area: Aabb, reach: f64, count: usize) -> Option<Columns> {
     spatial_columns(area, reach).filter(|columns| columns.count() <= count as u64)
+}
+/// The columns a query covers on a grid of this reach and this many cells.
+pub(super) fn query_columns(
+    area: Aabb,
+    spatial: bool,
+    reach: f64,
+    cells: usize,
+) -> Option<Columns> {
+    if spatial {
+        spatial_columns(area, reach)
+    } else {
+        columns(area, reach, cells)
+    }
 }
 
 impl SeenGrid {
@@ -71,6 +84,15 @@ impl SeenGrid {
             grid.cell_of.push(at);
         }
         grid
+    }
+    pub(super) fn reach(&self) -> f64 {
+        self.reach
+    }
+    pub(super) fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+    pub(super) fn has_cell(&self, cell: Cell) -> bool {
+        self.cells.contains_key(&cell)
     }
     pub fn update(&mut self, i: usize, b: Aabb) {
         self.reach = self.reach.max(width(b));

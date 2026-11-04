@@ -1214,7 +1214,7 @@ impl Game<'_> {
                 laps.lap("mob_inputs");
                 let predicted = executor.predict(inputs, &tick);
                 laps.lap("mob_predict");
-                TickRound::new(owners, predicted, section_base)
+                TickRound::new(owners, predicted, section_base).with_contexts(contexts)
             });
             // What a mob reads of the level, and the guest it sees (which binds
             // it). A prediction that commits read all this on its worker, so
@@ -1262,7 +1262,49 @@ impl Game<'_> {
                     (w, seen_guest)
                 }};
             }
-            for i in 0..mobs.len() {
+            // A clean round has nothing left for the walk to decide: it is applied
+            // on the workers, and any other round walks, untouched by this.
+            let mut rehearsal = None;
+            let mut walked = mobs.len();
+            if let (Some(transaction), Some(executor)) = (region_round.as_mut(), region_executor)
+                && self.simulation_server.commits_in_parallel(executor)
+                && let Some(plan) = transaction.classify(executor, &snapshot, &grid, &index)
+            {
+                let context = horizon_client::mobs::region_tick::CleanContext {
+                    guests: !guests.is_empty(),
+                    guest_ids: &guest_ids,
+                    acts_on_player: super::lan_mobs::acts_on_player,
+                    index: &index,
+                };
+                if verifying {
+                    rehearsal = Some(transaction.rehearse_clean(
+                        executor, plan, mobs, &snapshot, &grid, &scratch, &context, died, &bindings,
+                    ));
+                } else {
+                    transaction.commit_clean(
+                        executor,
+                        plan,
+                        mobs,
+                        &mut snapshot,
+                        &mut grid,
+                        &context,
+                        &mut horizon_client::mobs::region_tick::WalkOutput {
+                            keep: &mut keep,
+                            events: &mut events,
+                            guest_events: &mut guest_events,
+                            dead: &mut dead,
+                            corpses: &mut corpses,
+                            gone: &mut gone,
+                            pushes: &mut pushes,
+                            died,
+                            bindings: &mut bindings,
+                        },
+                    );
+                    walked = 0;
+                }
+            }
+            laps.lap("mob_classify");
+            for i in 0..walked {
                 let m = &mut mobs[i];
                 let (x, z) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
                 if !base.world.loaded(x, z) {
@@ -1409,6 +1451,42 @@ impl Game<'_> {
             }
             if let Some(transaction) = region_round.as_mut() {
                 retired = transaction.take_predictions();
+            }
+            if let (Some(rehearsal), Some(transaction)) = (&rehearsal, region_round.as_ref()) {
+                rehearsal.verify(
+                    mobs,
+                    &snapshot,
+                    &grid,
+                    &scratch,
+                    transaction.stats,
+                    &horizon_client::mobs::region_tick::WalkOutput {
+                        keep: &mut keep,
+                        events: &mut events,
+                        guest_events: &mut guest_events,
+                        dead: &mut dead,
+                        corpses: &mut corpses,
+                        gone: &mut gone,
+                        pushes: &mut pushes,
+                        died,
+                        bindings: &mut bindings,
+                    },
+                );
+            }
+            #[cfg(test)]
+            if self.simulation_server.walk_log.is_some() {
+                let walk_log = format!(
+                    "mobs {:?}\nsnapshot {snapshot:?}\ngrid {grid:?}\nrandom {scratch:?}\nstats {:?}\nkeep {keep:?}\nevents {events:?}\nguest_events {guest_events:?}\ndead {dead:?}\ncorpses {corpses:?}\ngone {gone:?}\npushes {:?}\nbindings {:?}",
+                    **mobs,
+                    region_round.as_ref().map(|round| round.stats.outcome()),
+                    pushes.waiting(),
+                    bindings
+                        .iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                );
+                self.simulation_server
+                    .walk_log
+                    .get_or_insert_default()
+                    .push(walk_log);
             }
             laps.lap("mob_walk");
             let mut flags = keep.into_iter();

@@ -156,6 +156,11 @@ pub(super) struct ServerCoordination {
     pub retiring: Vec<Vec<horizon_client::mobs::region_tick::TickPrediction>>,
     pub stats: TickStats,
     log_stats: bool,
+    /// What each walk finished with, for a test comparing the paths.
+    #[cfg(test)]
+    pub walk_log: Option<Vec<String>>,
+    /// `HORIZON_PARALLEL_COMMIT=0` keeps every round on the serial walk.
+    parallel_commit: bool,
 }
 
 pub(super) use horizon_client::mobs::region_tick::RegionStats as TickStats;
@@ -186,6 +191,9 @@ impl Default for ServerCoordination {
             retiring: Vec::new(),
             stats: Default::default(),
             log_stats: std::env::var_os("HORIZON_REGION_METRICS").is_some(),
+            #[cfg(test)]
+            walk_log: None,
+            parallel_commit: std::env::var("HORIZON_PARALLEL_COMMIT").as_deref() != Ok("0"),
         }
     }
 }
@@ -252,6 +260,23 @@ impl ServerCoordination {
         self.workers = workers.max(1);
         self.executor = Default::default();
     }
+    /// Whether a clean round may be applied on `executor`'s workers.
+    pub fn commits_in_parallel(
+        &self,
+        executor: &horizon_client::mobs::region_tick::RegionExecutor,
+    ) -> bool {
+        self.parallel_commit && executor.parallel()
+    }
+    /// Takes the given path through clean rounds, for a test comparing them,
+    /// and with `verify` runs the clean path against the walk as well.
+    #[cfg(test)]
+    pub fn force_commit(&mut self, parallel: bool, verify: bool) {
+        self.parallel_commit = parallel;
+        self.walk_log = Some(Vec::new());
+        if verify {
+            self.execution = Execution::Verify;
+        }
+    }
     /// Hands this tick's replaced mobs to the workers to free.
     pub fn retire_predictions(&mut self) {
         if self.retiring.is_empty() {
@@ -267,7 +292,7 @@ impl ServerCoordination {
         self.stats = stats;
         if self.log_stats {
             log::info!(
-                "region tick: regions={} predicted={} committed={} replayed={} rng_conflicts={} read_conflicts={} read_full={} read_slot={} read_shape={} read_cell={} read_species={}",
+                "region tick: regions={} predicted={} committed={} replayed={} rng_conflicts={} read_conflicts={} read_full={} read_slot={} read_shape={} read_cell={} read_species={} clean_rounds={} fallback_rounds={} fallback={:?}",
                 stats.regions,
                 stats.predicted,
                 stats.committed,
@@ -278,7 +303,10 @@ impl ServerCoordination {
                 stats.read_slot,
                 stats.read_shape,
                 stats.read_cell,
-                stats.read_species
+                stats.read_species,
+                stats.clean_rounds,
+                stats.fallback_rounds,
+                stats.fallback
             );
         }
     }

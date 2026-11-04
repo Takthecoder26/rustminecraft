@@ -153,6 +153,7 @@ pub struct MobContext {
     pub section_order: u64,
 }
 
+#[derive(Clone)]
 pub struct TickPrediction {
     pub slot: usize,
     pub owner: usize,
@@ -365,6 +366,23 @@ impl RegionExecutor {
             None => items.iter().enumerate().map(each).collect(),
         }
     }
+    /// `f` of every region's list on the workers, one task for each: unlike
+    /// [`Self::map`], which keeps short runs together, a region is a lot of work.
+    fn each_region<T: Sync, R: Send>(
+        &self,
+        lists: &[T],
+        f: impl Fn(&T) -> R + Send + Sync,
+    ) -> Vec<R> {
+        use rayon::prelude::*;
+        match &self.pool {
+            Some(pool) => pool.install(|| lists.par_iter().map(&f).collect()),
+            None => lists.iter().map(&f).collect(),
+        }
+    }
+    /// Whether anything runs on other threads.
+    pub fn parallel(&self) -> bool {
+        self.pool.is_some()
+    }
     /// The slots of the items `pick` chooses, in order, on the workers.
     pub fn slots<T: Sync>(
         &self,
@@ -448,11 +466,205 @@ pub struct RegionStats {
     pub read_shape: usize,
     pub read_cell: usize,
     pub read_species: usize,
+    /// 1 when this round's predictions could all be applied on the workers.
+    pub clean_rounds: usize,
+    /// 1 when they could not, and why: the round took the serial walk.
+    pub fallback_rounds: usize,
+    pub fallback: Option<NotClean>,
+}
+impl RegionStats {
+    /// The numbers any path through a round has to agree on.
+    pub fn outcome(self) -> Self {
+        Self {
+            clean_rounds: 0,
+            fallback_rounds: 0,
+            fallback: None,
+            ..self
+        }
+    }
+}
+
+/// Why a round can't be applied on the workers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotClean {
+    /// A mob has no prediction: unloaded or outside the entity-ticking area, a
+    /// raider, a region sitting out, or a prediction cut short.
+    Unpredicted,
+    /// A prediction drew from the level's random, which is a shared checkpoint.
+    SharedRandom,
+    /// A prediction writes another mob's brain, or more mobs than it names.
+    BrainWrite,
+    /// A prediction pushes a mob another region owns.
+    ForeignPush,
+    /// A prediction read what another region's prediction writes.
+    ForeignRead,
+}
+
+/// What a clean round's predictions need from the coordinator's tick.
+pub struct CleanContext<'a> {
+    /// Whether any guest is in play: only then do mobs keep a bound player.
+    pub guests: bool,
+    /// The guests' entity ids by connection.
+    pub guest_ids: &'a [(u32, u32)],
+    /// The events a guest's own turn handles (`lan_mobs.rs`).
+    pub acts_on_player: fn(&MobEvent) -> bool,
+    pub index: &'a crate::fast_hash::FxHashMap<u32, u32>,
+}
+
+/// What the walk leaves for the rest of the tick.
+pub struct WalkOutput<'a> {
+    pub keep: &'a mut Vec<bool>,
+    pub events: &'a mut Vec<MobEvent>,
+    pub guest_events: &'a mut Vec<(u32, u32, MobEvent)>,
+    pub dead: &'a mut Vec<Mob>,
+    pub corpses: &'a mut Vec<Mob>,
+    pub gone: &'a mut Vec<(u32, Vec3, f64, f64)>,
+    pub pushes: &'a mut PendingPushes,
+    pub died: &'a mut crate::fast_hash::FxHashSet<u32>,
+    pub bindings: &'a mut crate::fast_hash::FxHashMap<u32, u32>,
+}
+
+/// A classified round: each list's slots, read once so that nothing has to go
+/// back to the predictions' memory to find them.
+pub struct CleanPlan {
+    slots: Vec<Vec<u32>>,
+}
+
+/// One mob of a clean round, while the workers apply it and until the merge.
+struct CleanSlot<'a> {
+    mob: &'a mut Mob,
+    prediction: &'a mut TickPrediction,
+    seen: &'a mut Seen,
+    /// The pushes the walk would still hold after this mob: at itself or a mob
+    /// it has passed. One at a later mob reached it in its own prediction.
+    pushes: Vec<(u32, Vec3)>,
+    guest_events: Vec<(u32, u32, MobEvent)>,
+    corpse: bool,
+    gone: bool,
+    dead: bool,
+    grid_changes: bool,
+    binding_changes: bool,
+}
+impl CleanSlot<'_> {
+    /// Whether the merge has nothing to do here but note `kept`.
+    fn quiet(&self) -> bool {
+        self.prediction.kept
+            && self.prediction.events.is_empty()
+            && self.pushes.is_empty()
+            && self.guest_events.is_empty()
+            && !(self.corpse || self.gone || self.dead || self.grid_changes || self.binding_changes)
+    }
+}
+
+/// Runs in `HORIZON_SIMULATION_MODE=verify`: what the clean path made of a copy
+/// of a round the classifier called clean, for the serial walk to answer.
+pub struct CleanRehearsal {
+    mobs: Vec<Mob>,
+    snapshot: Vec<Seen>,
+    grid: seen_grid::SeenGrid,
+    random: LegacyRandom,
+    stats: RegionStats,
+    keep: Vec<bool>,
+    events: Vec<MobEvent>,
+    guest_events: Vec<(u32, u32, MobEvent)>,
+    dead: Vec<Mob>,
+    corpses: Vec<Mob>,
+    gone: Vec<(u32, Vec3, f64, f64)>,
+    pushes: PendingPushes,
+    died: crate::fast_hash::FxHashSet<u32>,
+    bindings: crate::fast_hash::FxHashMap<u32, u32>,
+}
+impl CleanRehearsal {
+    /// Panics at the first thing the clean path got differently from the walk,
+    /// given what the walk finished with.
+    pub fn verify(
+        &self,
+        mobs: &[Mob],
+        snapshot: &[Seen],
+        grid: &seen_grid::SeenGrid,
+        random: &LegacyRandom,
+        stats: RegionStats,
+        walk: &WalkOutput<'_>,
+    ) {
+        let (clean, serial) = (&self.mobs[..], mobs);
+        let same = |what: &str, clean: String, serial: String| {
+            assert!(
+                clean == serial,
+                "a clean round and the serial walk differ in the {what}\nclean:  {clean}\nserial: {serial}"
+            );
+        };
+        assert_eq!(clean.len(), serial.len(), "a clean round's mob count");
+        for (clean, serial) in clean.iter().zip(serial) {
+            same("mobs", format!("{clean:?}"), format!("{serial:?}"));
+        }
+        same(
+            "snapshot",
+            format!("{:?}", self.snapshot),
+            format!("{snapshot:?}"),
+        );
+        assert!(
+            self.grid == *grid,
+            "a clean round's grid differs from the walk's"
+        );
+        assert!(
+            self.random.same_stream(random),
+            "a clean round left the level random differently"
+        );
+        same(
+            "stats",
+            format!("{:?}", self.stats.outcome()),
+            format!("{:?}", stats.outcome()),
+        );
+        same(
+            "keep",
+            format!("{:?}", self.keep),
+            format!("{:?}", walk.keep),
+        );
+        same(
+            "events",
+            format!("{:?}", self.events),
+            format!("{:?}", walk.events),
+        );
+        same(
+            "guest events",
+            format!("{:?}", self.guest_events),
+            format!("{:?}", walk.guest_events),
+        );
+        same(
+            "dead",
+            format!("{:?}", self.dead),
+            format!("{:?}", walk.dead),
+        );
+        same(
+            "corpses",
+            format!("{:?}", self.corpses),
+            format!("{:?}", walk.corpses),
+        );
+        same(
+            "gone",
+            format!("{:?}", self.gone),
+            format!("{:?}", walk.gone),
+        );
+        same(
+            "pushes",
+            format!("{:?}", self.pushes.waiting()),
+            format!("{:?}", walk.pushes.waiting()),
+        );
+        assert!(
+            self.died == *walk.died,
+            "a clean round's death records differ"
+        );
+        assert!(
+            self.bindings == *walk.bindings,
+            "a clean round's bindings differ"
+        );
+    }
 }
 
 /// The authoritative ordered commit. A failed region prefix can never provide
 /// another prediction this tick. Conflicts replay against the live snapshot
 /// and RNG, before any dependent entity or event is published.
+#[derive(Clone)]
 pub struct TickRound {
     /// Each job's results, ascending by slot. They stay where the workers put
     /// them: a mob is thousands of bytes, and only a commit needs to touch it.
@@ -468,6 +680,8 @@ pub struct TickRound {
     changes: snapshot::SnapshotChanges,
     pub stats: RegionStats,
     section_base: u64,
+    /// Each mob's context, which a clean round reads its old binding from.
+    contexts: Vec<MobContext>,
 }
 impl TickRound {
     pub fn new(
@@ -506,7 +720,251 @@ impl TickRound {
             predicted,
             predictions,
             section_base,
+            contexts: Vec::new(),
         }
+    }
+    pub fn with_contexts(mut self, contexts: Vec<MobContext>) -> Self {
+        self.contexts = contexts;
+        self
+    }
+    /// Whether every prediction can be applied at once, on the workers, with
+    /// the result of the serial walk. Reads tick-start state and predictions
+    /// only: nothing changes here, so a round that isn't clean simply walks.
+    /// The round's stats say which it was.
+    pub fn classify(
+        &mut self,
+        executor: &RegionExecutor,
+        snapshot: &[Seen],
+        grid: &seen_grid::SeenGrid,
+        index: &crate::fast_hash::FxHashMap<u32, u32>,
+    ) -> Option<CleanPlan> {
+        let plan = self.clean_plan(executor, snapshot, grid, index);
+        match &plan {
+            Ok(_) => self.stats.clean_rounds = 1,
+            Err(reason) => {
+                self.stats.fallback_rounds = 1;
+                self.stats.fallback = Some(*reason);
+            }
+        }
+        plan.ok()
+    }
+    fn clean_plan(
+        &self,
+        executor: &RegionExecutor,
+        snapshot: &[Seen],
+        grid: &seen_grid::SeenGrid,
+        index: &crate::fast_hash::FxHashMap<u32, u32>,
+    ) -> Result<CleanPlan, NotClean> {
+        let owners = &self.owners[..];
+        if self.stats.predicted != snapshot.len() || self.contexts.len() != snapshot.len() {
+            return Err(NotClean::Unpredicted);
+        }
+        let summaries = executor.each_region(&self.predictions, |list| {
+            let mut writes = snapshot::OwnerWrites::default();
+            let mut slots = Vec::with_capacity(list.len());
+            for prediction in list {
+                prediction_is_self_contained(prediction, owners, index)?;
+                slots.push(prediction.slot as u32);
+                let before = &snapshot[prediction.slot];
+                let after = &prediction.seen;
+                writes.cells.push(seen_grid::corner(before.bounds));
+                writes.cells.push(seen_grid::corner(after.bounds));
+                writes.reach = writes.reach.max(seen_grid::width(after.bounds));
+                for species in [before.species, after.species] {
+                    if !writes.species.contains(&species) {
+                        writes.species.push(species);
+                    }
+                }
+            }
+            writes.cells.sort_unstable();
+            writes.cells.dedup();
+            writes.new_cells = writes.cells.iter().filter(|&&c| !grid.has_cell(c)).count();
+            Ok((writes, slots))
+        });
+        let mut round = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            round.push(summary?);
+        }
+        let cells = round.iter().map(|(writes, _)| writes.cells.len()).sum();
+        let mut writes = snapshot::RoundWrites::new(grid, cells);
+        for (list, (owner_writes, _)) in self.predictions.iter().zip(&round) {
+            if let Some(first) = list.first() {
+                writes.add(first.owner, owner_writes);
+            }
+        }
+        let untouched = executor.each_region(&self.predictions, |list| {
+            list.iter()
+                .all(|p| p.reads.untouched_by_others(p.owner, owners, &writes))
+        });
+        if !untouched.into_iter().all(|untouched| untouched) {
+            return Err(NotClean::ForeignRead);
+        }
+        Ok(CleanPlan {
+            slots: round.into_iter().map(|(_, slots)| slots).collect(),
+        })
+    }
+    /// Applies a classified round. The mobs and their snapshot entries go on
+    /// the workers, each from its own prediction; what needs an order is then
+    /// merged here, in slot order, as the walk would have left it.
+    pub fn commit_clean(
+        &mut self,
+        executor: &RegionExecutor,
+        plan: CleanPlan,
+        mobs: &mut [Mob],
+        snapshot: &mut [Seen],
+        grid: &mut seen_grid::SeenGrid,
+        context: &CleanContext<'_>,
+        walk: &mut WalkOutput<'_>,
+    ) {
+        let reach = grid.reach();
+        let died = &*walk.died;
+        let mut by_slot: Vec<Option<&mut TickPrediction>> =
+            std::iter::repeat_with(|| None).take(mobs.len()).collect();
+        for (list, slots) in self.predictions.iter_mut().zip(plan.slots) {
+            for (prediction, slot) in list.iter_mut().zip(slots) {
+                by_slot[slot as usize] = Some(prediction);
+            }
+        }
+        let mut slots: Vec<CleanSlot<'_>> = mobs
+            .iter_mut()
+            .zip(snapshot.iter_mut())
+            .zip(by_slot)
+            .map(|((mob, seen), prediction)| CleanSlot {
+                mob,
+                seen,
+                prediction: prediction.expect("a clean round predicted every slot"),
+                pushes: Vec::new(),
+                guest_events: Vec::new(),
+                corpse: false,
+                gone: false,
+                dead: false,
+                grid_changes: false,
+                binding_changes: false,
+            })
+            .collect();
+        executor.zip_each(
+            &mut slots,
+            &self.contexts,
+            || (),
+            |_, slot, mob_context| {
+                let p = &mut *slot.prediction;
+                // The replaced mob stays in the list for [`RegionExecutor::retire`].
+                std::mem::swap(slot.mob, &mut p.mob);
+                let m = &*slot.mob;
+                slot.grid_changes = seen_grid::corner(slot.seen.bounds)
+                    != seen_grid::corner(p.seen.bounds)
+                    || seen_grid::width(p.seen.bounds) > reach;
+                std::mem::swap(slot.seen, &mut p.seen);
+                if !p.events.is_empty() {
+                    split_events(
+                        &mut p.events,
+                        p.slot,
+                        m.id,
+                        p.conn,
+                        context,
+                        &mut slot.pushes,
+                        &mut slot.guest_events,
+                    );
+                }
+                let kept = p.kept;
+                let lying = !m.alive() && !m.removed;
+                slot.corpse = !kept && lying && !m.extra.effects.is_empty();
+                slot.gone = !kept && lying && m.death_time >= 20;
+                slot.dead = lying && !died.contains(&m.id);
+                slot.binding_changes = context.guests && p.conn != mob_context.bound_player;
+            },
+        );
+        walk.keep.reserve(slots.len());
+        for (i, slot) in slots.iter_mut().enumerate() {
+            walk.keep.push(slot.prediction.kept);
+            if slot.quiet() {
+                continue;
+            }
+            let (m, kept) = (&*slot.mob, slot.prediction.kept);
+            walk.events.append(&mut slot.prediction.events);
+            if slot.corpse {
+                walk.corpses.push(m.clone());
+            }
+            for &(id, velocity) in &slot.pushes {
+                walk.pushes.push(id, velocity);
+            }
+            if slot.gone {
+                let (width, height) = (f64::from(m.width()), f64::from(m.height()));
+                walk.gone.push((m.id, m.position, width, height));
+            }
+            walk.guest_events.append(&mut slot.guest_events);
+            if slot.dead && walk.died.insert(m.id) {
+                walk.dead.push(m.clone());
+            }
+            if !kept {
+                walk.died.remove(&m.id);
+            }
+            if slot.grid_changes {
+                grid.update(i, slot.seen.bounds);
+            }
+            if slot.binding_changes {
+                match slot.prediction.conn {
+                    Some(conn) => walk.bindings.insert(m.id, conn),
+                    None => walk.bindings.remove(&m.id),
+                };
+            }
+        }
+        self.stats.committed = self.stats.predicted;
+        self.committed.clone_from(&self.predicted);
+    }
+    /// Runs the clean path over copies, for the serial walk to answer
+    /// (`HORIZON_SIMULATION_MODE=verify`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehearse_clean(
+        &self,
+        executor: &RegionExecutor,
+        plan: CleanPlan,
+        mobs: &[Mob],
+        snapshot: &[Seen],
+        grid: &seen_grid::SeenGrid,
+        random: &LegacyRandom,
+        context: &CleanContext<'_>,
+        died: &crate::fast_hash::FxHashSet<u32>,
+        bindings: &crate::fast_hash::FxHashMap<u32, u32>,
+    ) -> CleanRehearsal {
+        let mut round = self.clone();
+        let mut rehearsal = CleanRehearsal {
+            mobs: mobs.to_vec(),
+            snapshot: snapshot.to_vec(),
+            grid: grid.clone(),
+            random: random.clone(),
+            stats: RegionStats::default(),
+            keep: Vec::new(),
+            events: Vec::new(),
+            guest_events: Vec::new(),
+            dead: Vec::new(),
+            corpses: Vec::new(),
+            gone: Vec::new(),
+            pushes: PendingPushes::default(),
+            died: died.clone(),
+            bindings: bindings.clone(),
+        };
+        round.commit_clean(
+            executor,
+            plan,
+            &mut rehearsal.mobs,
+            &mut rehearsal.snapshot,
+            &mut rehearsal.grid,
+            context,
+            &mut WalkOutput {
+                keep: &mut rehearsal.keep,
+                events: &mut rehearsal.events,
+                guest_events: &mut rehearsal.guest_events,
+                dead: &mut rehearsal.dead,
+                corpses: &mut rehearsal.corpses,
+                gone: &mut rehearsal.gone,
+                pushes: &mut rehearsal.pushes,
+                died: &mut rehearsal.died,
+                bindings: &mut rehearsal.bindings,
+            },
+        );
+        rehearsal.stats = round.stats;
+        rehearsal
     }
     /// Publishes this slot's prediction if it is still valid, returning what
     /// the tick returned and the guest the mob saw. `None`: nothing changed,
@@ -656,6 +1114,87 @@ impl TickRound {
             }
         }
     }
+}
+
+/// Whether a prediction leaves everything but its own mob alone: no shared
+/// random, no write to another mob, and pushes only at mobs of its own owner,
+/// which saw them when their own predictions ran.
+fn prediction_is_self_contained(
+    prediction: &TickPrediction,
+    owners: &[usize],
+    index: &crate::fast_hash::FxHashMap<u32, u32>,
+) -> Result<(), NotClean> {
+    if prediction.random_after.was_used() {
+        return Err(NotClean::SharedRandom);
+    }
+    for event in &prediction.events {
+        if !matches!(event.immediate_write(), ImmediateWrite::Nothing) {
+            return Err(NotClean::BrainWrite);
+        }
+        if let MobEvent::Push {
+            target: Who::Mob(id),
+            ..
+        } = event
+            && index
+                .get(id)
+                .is_some_and(|&target| owners[target as usize] != prediction.owner)
+        {
+            return Err(NotClean::ForeignPush);
+        }
+    }
+    Ok(())
+}
+
+/// A clean prediction's events, as the walk would leave them: the pushes it
+/// would still hold and the guest's events go out, and the rest keep their order.
+fn split_events(
+    events: &mut Vec<MobEvent>,
+    slot: usize,
+    id: u32,
+    conn: Option<u32>,
+    context: &CleanContext<'_>,
+    pushes: &mut Vec<(u32, Vec3)>,
+    guest_events: &mut Vec<(u32, u32, MobEvent)>,
+) {
+    let guest_entity = conn.and_then(|conn| {
+        context
+            .guest_ids
+            .iter()
+            .find(|guest| guest.0 == conn)
+            .map(|guest| guest.1)
+    });
+    events.retain_mut(|event| {
+        if let MobEvent::Push {
+            target: Who::Mob(target),
+            velocity,
+        } = event
+        {
+            // A later mob's own prediction had this one.
+            let passed = context
+                .index
+                .get(target)
+                .is_none_or(|&target_slot| target_slot as usize <= slot);
+            if passed {
+                pushes.push((*target, Vec3::new(velocity[0], velocity[1], velocity[2])));
+            }
+            return false;
+        }
+        let Some(conn) = conn else {
+            return true;
+        };
+        // ShulkerBullet.finalTarget is the guest's entity.
+        if let (MobEvent::Projectile(p), Some(entity)) = (&mut *event, guest_entity)
+            && let crate::projectiles::ProjectileKind::ShulkerBullet { target, .. } = &mut p.kind
+            && *target == Some(Who::Player)
+        {
+            *target = Some(Who::Mob(entity));
+        }
+        if (context.acts_on_player)(event) {
+            guest_events.push((conn, id, event.clone()));
+            return false;
+        }
+        true
+    });
 }
 
 /// Rounds in a row a region must waste before it sits out.
@@ -1237,6 +1776,270 @@ mod tests {
         mob.extra.age = 6000;
         let mut random = LegacyRandom::new(1);
         round.commit(0, &mut mob, &grid, &mut random, &mut Vec::new());
+    }
+
+    /// A prediction of a mob standing in `cell` of its owner's region.
+    fn predicted(id: u32, slot: usize, owner: usize, x: f64) -> (Mob, Seen, TickPrediction) {
+        let mut mob = test_mob(id);
+        mob.position = Vec3::new(x, 64.0, 0.0);
+        let before = mob.seen(None);
+        let mut after = mob.clone();
+        after.position.x += 0.01;
+        let seen = after.seen(None);
+        let prediction = TickPrediction {
+            slot,
+            owner,
+            mob: after,
+            conn: None,
+            seen,
+            kept: true,
+            events: Vec::new(),
+            reads: Default::default(),
+            random_before: LegacyRandom::new(1),
+            random_after: LegacyRandom::new(1),
+            #[cfg(debug_assertions)]
+            input: format!("{mob:?}"),
+        };
+        (mob, before, prediction)
+    }
+
+    struct CleanTest {
+        round: TickRound,
+        mobs: Vec<Mob>,
+        snapshot: Vec<Seen>,
+        grid: seen_grid::SeenGrid,
+        index: FxHashMap<u32, u32>,
+    }
+    /// Three mobs: slots 0 and 2 share owner 0, far from owner 1's slot 1.
+    fn clean_test(edit: impl FnOnce(&mut [TickPrediction; 3])) -> CleanTest {
+        let (m0, s0, p0) = predicted(10, 0, 0, 2.0);
+        let (m1, s1, p1) = predicted(11, 1, 1, 900.0);
+        let (m2, s2, p2) = predicted(12, 2, 0, 6.0);
+        let mut predictions = [p0, p1, p2];
+        edit(&mut predictions);
+        let [p0, p1, p2] = predictions;
+        let snapshot = vec![s0, s1, s2];
+        let grid = seen_grid::SeenGrid::new(snapshot.iter().map(|seen| seen.bounds));
+        let context = MobContext {
+            bound_player: None,
+            nearest_player: None,
+            difficulty: crate::mobs::spawning::LocalDifficulty::new(2, 0, 0, 1.0),
+            section_order: 0,
+        };
+        CleanTest {
+            round: TickRound::new(vec![0, 1, 0], vec![vec![p0, p2], vec![p1]], 1)
+                .with_contexts(vec![context; 3]),
+            mobs: vec![m0, m1, m2],
+            snapshot,
+            grid,
+            index: [(10, 0), (11, 1), (12, 2)].into_iter().collect(),
+        }
+    }
+    fn classify(mut test: CleanTest) -> RegionStats {
+        let executor = RegionExecutor::new(2).unwrap();
+        test.round
+            .classify(&executor, &test.snapshot, &test.grid, &test.index);
+        test.round.stats
+    }
+    fn push(target: u32) -> MobEvent {
+        MobEvent::Push {
+            target: Who::Mob(target),
+            velocity: [0.5, 0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn a_round_of_independent_predictions_is_clean() {
+        let stats = classify(clean_test(|_| {}));
+        assert_eq!((stats.clean_rounds, stats.fallback_rounds), (1, 0));
+        assert_eq!(stats.fallback, None);
+    }
+
+    #[test]
+    fn what_a_prediction_does_beyond_itself_sends_the_round_to_the_walk() {
+        let cases: [(fn(&mut [TickPrediction; 3]), NotClean); 8] = [
+            (
+                |p| {
+                    let _ = p[1].random_after.next_float();
+                },
+                NotClean::SharedRandom,
+            ),
+            (
+                |p| {
+                    p[0].events.push(MobEvent::BreedTarget {
+                        mob: 12,
+                        partner: 10,
+                    });
+                },
+                NotClean::BrainWrite,
+            ),
+            (
+                |p| {
+                    p[2].events.push(MobEvent::StartRiding {
+                        rider: 12,
+                        vehicle: 10,
+                    });
+                },
+                NotClean::BrainWrite,
+            ),
+            (|p| p[0].events.push(push(11)), NotClean::ForeignPush),
+            // A full scan, a foreign slot, the foreign mob's cell, its species.
+            (|p| p[0].reads.all = true, NotClean::ForeignRead),
+            (
+                |p| {
+                    p[0].reads.slots.insert(1);
+                },
+                NotClean::ForeignRead,
+            ),
+            (
+                |p| {
+                    let area = p[1].seen.bounds;
+                    let columns = Some(seen_grid::Columns {
+                        lo: seen_grid::corner(area),
+                        hi: seen_grid::corner(area),
+                    });
+                    p[0].reads.queries.push((area, columns, true));
+                },
+                NotClean::ForeignRead,
+            ),
+            (
+                |p| {
+                    p[0].reads.species.insert(p[1].seen.species);
+                },
+                NotClean::ForeignRead,
+            ),
+        ];
+        for (i, (edit, reason)) in cases.into_iter().enumerate() {
+            let stats = classify(clean_test(edit));
+            assert_eq!(
+                (stats.clean_rounds, stats.fallback_rounds, stats.fallback),
+                (0, 1, Some(reason)),
+                "case {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_and_pushes_inside_a_region_stay_clean() {
+        let stats = classify(clean_test(|p| {
+            p[0].reads.slots.insert(2);
+            p[2].events.push(push(10));
+            p[0].events.push(push(12));
+            p[0].events.push(push(999));
+        }));
+        assert_eq!(stats.clean_rounds, 1, "{stats:?}");
+    }
+
+    #[test]
+    fn a_read_that_the_rounds_growth_would_reshape_is_not_clean() {
+        let stats = classify(clean_test(|p| {
+            // The foreign mob grows: the reach of the grid the walk would query.
+            let wider = p[1].seen.bounds.inflate(Vec3::new(4.0, 0.0, 4.0));
+            p[1].seen.bounds = wider;
+            let area = Aabb::new(Vec3::new(2.0, 64.0, 0.0), Vec3::new(3.0, 65.0, 1.0));
+            let columns = Some(seen_grid::Columns {
+                lo: (0, -1),
+                hi: (0, 0),
+            });
+            p[0].reads.queries.push((area, columns, true));
+        }));
+        assert_eq!(stats.fallback, Some(NotClean::ForeignRead));
+    }
+
+    #[test]
+    fn a_mob_without_a_prediction_sends_the_round_to_the_walk() {
+        let mut test = clean_test(|_| {});
+        let (mob, seen, _) = predicted(13, 3, 1, 910.0);
+        test.mobs.push(mob);
+        test.snapshot.push(seen);
+        test.index.insert(13, 3);
+        assert_eq!(classify(test).fallback, Some(NotClean::Unpredicted));
+    }
+
+    #[test]
+    fn a_clean_commit_merges_in_slot_order_and_keeps_only_what_the_walk_would_hold() {
+        let attack = |amount| MobEvent::AttackPlayer(amount, [0.0; 3]);
+        let mut test = clean_test(|p| {
+            let sound = |id: &'static str| MobEvent::Sound(id, [0.0; 3], 1.0, 1.0);
+            p[0].events = vec![sound("a"), push(12), sound("b")];
+            p[1].events = vec![sound("c"), attack(1.0), sound("d")];
+            p[1].conn = Some(7);
+            p[2].events = vec![push(10), sound("e"), push(12)];
+            p[2].kept = false;
+            p[2].mob.health = 0.0;
+            p[2].mob.death_time = 20;
+            p[2].mob.extra.effects.push(("minecraft:speed", 1, 0));
+            p[2].seen.bounds = p[2].seen.bounds.inflate(Vec3::new(40.0, 0.0, 40.0));
+        });
+        let (mut keep, mut events, mut guest_events) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut dead, mut corpses, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+        let mut pushes = PendingPushes::default();
+        let mut died = crate::fast_hash::FxHashSet::default();
+        let mut bindings = FxHashMap::default();
+        bindings.insert(11, 3);
+        let executor = RegionExecutor::new(2).unwrap();
+        let plan = test
+            .round
+            .classify(&executor, &test.snapshot, &test.grid, &test.index);
+        let wanted_bounds = test.round.predictions[0][1].seen.bounds;
+        let mut expected_grid = test.grid.clone();
+        expected_grid.update(2, wanted_bounds);
+        test.round.contexts[1].bound_player = Some(3);
+        test.round.commit_clean(
+            &executor,
+            plan.expect("clean"),
+            &mut test.mobs,
+            &mut test.snapshot,
+            &mut test.grid,
+            &CleanContext {
+                guests: true,
+                guest_ids: &[(7, 70)],
+                acts_on_player: |event| matches!(event, MobEvent::AttackPlayer(..)),
+                index: &test.index,
+            },
+            &mut WalkOutput {
+                keep: &mut keep,
+                events: &mut events,
+                guest_events: &mut guest_events,
+                dead: &mut dead,
+                corpses: &mut corpses,
+                gone: &mut gone,
+                pushes: &mut pushes,
+                died: &mut died,
+                bindings: &mut bindings,
+            },
+        );
+        assert_eq!(keep, [true, true, false]);
+        let order: Vec<_> = events
+            .iter()
+            .map(|event| match event {
+                MobEvent::Sound(id, ..) => *id,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(order, ["a", "b", "c", "d", "e"]);
+        assert_eq!(guest_events.len(), 1);
+        assert!(matches!(
+            guest_events[0],
+            (7, 11, MobEvent::AttackPlayer(..))
+        ));
+        // Slot 0's push reached slot 2 in its prediction. Slot 2's at itself and
+        // at slot 0, which the walk has passed, wait for the end of the walk.
+        let waiting: Vec<_> = pushes.waiting().into_keys().collect();
+        assert_eq!(waiting, [10, 12]);
+        assert_eq!(gone.len(), 1);
+        assert_eq!(corpses.len(), 1);
+        assert_eq!(dead.len(), 1);
+        assert!(died.is_empty(), "a body that went needs no record");
+        assert_eq!(bindings.get(&11), Some(&7));
+        assert!(test.grid == expected_grid);
+        assert_eq!(test.snapshot[2].bounds, wanted_bounds);
+        assert_eq!(test.mobs[0].position.x, 2.01);
+        assert_eq!(test.round.stats.committed, 3);
+        assert_eq!(
+            test.round.outcomes().collect::<Vec<_>>(),
+            [(0, 2, 2), (1, 1, 1)]
+        );
     }
 
     #[test]

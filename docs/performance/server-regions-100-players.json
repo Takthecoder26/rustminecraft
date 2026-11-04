@@ -1657,5 +1657,506 @@
         ]
       }
     ]
+  },
+  "parallel_commit": {
+    "date": "2026-11-04",
+    "commit": "the commit that adds this entry, on 2362e29c5",
+    "main_included": "23bbd8117",
+    "build": "fast profile with frame pointers and line tables, without sccache",
+    "modes": "parallel",
+    "workers": 8,
+    "settle": 20,
+    "warmup": 10,
+    "seconds": 20,
+    "load": "one run on a shared desktop; bots on the same CPU; the user's own Horizon client running at about 17-24% of a core; load average 4.55 just before it",
+    "no_control": "No run of this binary with HORIZON_PARALLEL_COMMIT=0: the comparison crosses merges of main.",
+    "note": "mob_classify covers the classification and the clean commit; the empty mob_walk that follows it is the skipped walk. mob_projectiles falls to zero because of main's early return in tick_projectiles, not this commit.",
+    "runs": [
+      {
+        "mode": "parallel",
+        "players": 100,
+        "mobs": 7000,
+        "warmup_ticks": 200,
+        "ticks": {
+          "count": 400,
+          "cpu_ms_average": 20.59,
+          "mspt": {
+            "average": 46.69,
+            "max": 91.01,
+            "p50": 45.58,
+            "p95": 53.56,
+            "p99": 59.67
+          },
+          "over_100_ms": 0,
+          "over_50_ms": 66,
+          "tps": 19.97
+        },
+        "mob_ms": {
+          "median": 25.7,
+          "p95": 29.8,
+          "p99": 33.8
+        },
+        "cpu_percent": 448.39,
+        "rss_mib_mean": 537.28,
+        "rss_mib_max": 550.4,
+        "region_mean": {
+          "regions": 100.0,
+          "predicted": 7000.0,
+          "committed": 7000.0,
+          "replayed": 0.0,
+          "rng_conflicts": 0.0,
+          "read_conflicts": 0.0
+        },
+        "commit_rounds": {
+          "clean": 409,
+          "fallback": 0,
+          "fallback_reasons": {}
+        },
+        "mob_span_samples": 400,
+        "spans": [
+          {
+            "cpu_ms_per_tick": 6.72,
+            "ms_per_tick": 27.75,
+            "name": "tick_mobs",
+            "share_of_tick": 0.59,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 5.46,
+            "ms_per_tick": 26.36,
+            "name": "tick_creature_entities",
+            "share_of_tick": 0.56,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 17.39,
+            "name": "mob_predict",
+            "share_of_tick": 0.37,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 5.59,
+            "ms_per_tick": 8.8,
+            "name": "tick_lan",
+            "share_of_tick": 0.19,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 5.84,
+            "ms_per_tick": 6.05,
+            "name": "streaming",
+            "share_of_tick": 0.13,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 1.29,
+            "ms_per_tick": 3.24,
+            "name": "mob_classify",
+            "share_of_tick": 0.07,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 2.55,
+            "ms_per_tick": 2.63,
+            "name": "tick_blocks",
+            "share_of_tick": 0.06,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 2.11,
+            "ms_per_tick": 2.18,
+            "name": "mob_guest_events",
+            "share_of_tick": 0.05,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.77,
+            "ms_per_tick": 1.71,
+            "name": "tick_sculk_entities",
+            "share_of_tick": 0.04,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.72,
+            "ms_per_tick": 1.19,
+            "name": "entity_portals",
+            "share_of_tick": 0.03,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.18,
+            "ms_per_tick": 1.05,
+            "name": "mob_snapshot",
+            "share_of_tick": 0.02,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.92,
+            "ms_per_tick": 0.94,
+            "name": "mob_base",
+            "share_of_tick": 0.02,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.79,
+            "ms_per_tick": 0.81,
+            "name": "spawn_natural",
+            "share_of_tick": 0.02,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.13,
+            "ms_per_tick": 0.43,
+            "name": "mob_inputs",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.38,
+            "ms_per_tick": 0.38,
+            "name": "mob_retain",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.34,
+            "ms_per_tick": 0.35,
+            "name": "tick_lan_packets",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.29,
+            "ms_per_tick": 0.3,
+            "name": "lan_drain",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.11,
+            "ms_per_tick": 0.27,
+            "name": "mob_after",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.21,
+            "ms_per_tick": 0.24,
+            "name": "tick_block_entities",
+            "share_of_tick": 0.01,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.09,
+            "ms_per_tick": 0.18,
+            "name": "mob_rest",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.13,
+            "ms_per_tick": 0.14,
+            "name": "postprocess_chunks",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 0.08,
+            "name": "lan_note_joined",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.05,
+            "ms_per_tick": 0.05,
+            "name": "lan_poll",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.04,
+            "ms_per_tick": 0.05,
+            "name": "tick_block_entity_anims",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.04,
+            "ms_per_tick": 0.04,
+            "name": "lan_chunks",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 0.02,
+            "name": "mob_pre",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.01,
+            "name": "tick_hand",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 0.01,
+            "name": "random_ticks",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 0.01,
+            "name": "tick_items",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.01,
+            "ms_per_tick": 0.01,
+            "name": "mob_events",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_local_hand",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_particles",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "with_entities",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "mob_walk",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "mob_projectiles",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "poll_remote",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_boats",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_sleep",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_end",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_thunder",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "unload_entities",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "lan_events",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_effects",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_paintings",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_hud",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_sculk_blocks",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_bolts",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_carts",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_lecterns",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_ominous_item_spawners",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_maps",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_item_frames",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "spawn_loaded_entities",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_rockets",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_armor_stands",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_experience",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_fishing",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_tridents",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_using",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "tick_cushions",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "end_gateways",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "recheck_golem_openers",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          },
+          {
+            "cpu_ms_per_tick": 0.0,
+            "ms_per_tick": 0.0,
+            "name": "touch_arrows",
+            "share_of_tick": 0.0,
+            "ticks_seen": 400
+          }
+        ]
+      }
+    ]
   }
 }

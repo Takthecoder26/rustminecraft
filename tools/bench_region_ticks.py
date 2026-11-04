@@ -187,6 +187,12 @@ def run(mode, args, out):
                   if (match := re.search(r'\btick_creature_entities ([0-9.]+)', line))]
         region_samples = [tuple(map(int, match.groups())) for line in lines
                           if (match := re.search(r'regions=(\d+) predicted=(\d+) committed=(\d+) replayed=(\d+) rng_conflicts=(\d+) read_conflicts=(\d+)', line))]
+        commit_rounds = [match.groups() for line in lines
+                         if (match := re.search(r'clean_rounds=(\d+) fallback_rounds=(\d+) fallback=(?:Some\()?(\w+)', line))]
+        fallback_reasons = {}
+        for _, fallback, reason in commit_rounds:
+            if fallback == '1':
+                fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
         result = {
             'mode': mode, 'players': args.players, 'mobs': mob_count, 'warmup_ticks': warmup_ticks,
             'ticks': report['ticks'], 'mob_ms': summary(mob_ms),
@@ -195,6 +201,9 @@ def run(mode, args, out):
             'region_mean': dict(zip(('regions', 'predicted', 'committed', 'replayed', 'rng_conflicts', 'read_conflicts'),
                                     map(lambda values: round(statistics.fmean(values), 2),
                                         zip(*region_samples)))) if region_samples else None,
+            'commit_rounds': {'clean': sum(int(clean) for clean, _, _ in commit_rounds),
+                              'fallback': sum(int(fallback) for _, fallback, _ in commit_rounds),
+                              'fallback_reasons': fallback_reasons},
             'mob_span_samples': len(mob_ms), 'spans': report['spans'],
         }
         print(json.dumps({key: value for key, value in result.items() if key != 'spans'}), flush=True)
