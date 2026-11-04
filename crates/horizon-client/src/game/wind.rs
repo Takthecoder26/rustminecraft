@@ -667,6 +667,7 @@ mod tests {
             guest: None,
             no_gravity: false,
             power: 4.0,
+            block_state: None,
             join: Default::default(),
         };
         assert!(Entity::ticks_after_projectiles(&tnt));

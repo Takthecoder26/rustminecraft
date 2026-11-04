@@ -881,6 +881,9 @@ impl Game<'_> {
                 self.armor_stand_location_effects(i, true);
             }
             self.armor_stand_turtle_eggs(i, landed)?;
+            if landed {
+                self.post_landing_event(self.simulation.armor_stands[i].position, true);
+            }
             let a = &self.simulation.armor_stands[i];
             if !a.marker && !a.no_gravity {
                 self.entity_powder_snow_particles(

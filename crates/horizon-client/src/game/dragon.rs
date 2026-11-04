@@ -2900,12 +2900,7 @@ impl Breath {
     /// `AreaEffectCloud.isWaiting`: before its wait time (20 ticks, 10 for a
     /// lingering potion's).
     pub(super) fn waiting(&self) -> bool {
-        self.age
-            < if self.potion.is_some() {
-                super::potions::LINGERING_WAIT
-            } else {
-                20
-            }
+        self.age < self.potion.as_ref().map_or(20, |p| p.settings.wait_time)
     }
 }
 impl Game<'_> {

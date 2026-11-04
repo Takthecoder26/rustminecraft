@@ -663,6 +663,7 @@ impl Game<'_> {
             .chain(self.simulation.item_frames.iter().map(|e| e.id))
             .chain(self.simulation.paintings.iter().map(|e| e.id))
             .chain(self.simulation.others.iter().map(|e| e.id))
+            .chain(self.simulation.breath_clouds.iter().map(|e| e.id))
             .chain(self.simulation.fangs.list.iter().map(|e| e.id))
             .chain(self.simulation.crystals.iter().map(|e| e.id))
             .chain(self.simulation.dragon.iter().map(|e| e.id))

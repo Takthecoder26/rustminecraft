@@ -1085,6 +1085,7 @@ impl Game<'_> {
                 t.on_ground,
                 t.fuse,
                 t.power,
+                t.block_state_nbt(self.pack.assets.registry),
                 uuid,
                 self.persist_raw(id),
             );
@@ -1587,6 +1588,7 @@ mod tests {
                 guest: None,
                 no_gravity: false,
                 power: 4.0,
+                block_state: None,
                 join: Default::default(),
             });
 

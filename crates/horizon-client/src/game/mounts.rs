@@ -80,6 +80,44 @@ impl Game<'_> {
         let id = self.riding?;
         self.simulation.mobs.iter().position(|m| m.id == id)
     }
+    /// `Entity.interact` / `Mob.canShearEquipment` / `Mob.shearItem`:
+    /// the pig's ordinary saddle comes off before Pig.mobInteract can ride it.
+    /// An occupied pig consumes no equipment interaction and cannot be mounted.
+    pub(super) fn shear_pig_saddle(&mut self, index: usize, item: &str) -> Option<bool> {
+        let m = &self.simulation.mobs[index];
+        if item != "minecraft:shears" || m.species() != Species::Pig || m.is_baby() || !m.alive() {
+            return None;
+        }
+        let id = m.id;
+        if self.riding == Some(id)
+            || self.ridden_by_guest(id)
+            || equine::is_vehicle(m)
+            || self
+                .simulation
+                .mobs
+                .iter()
+                .any(|r| r.alive() && !r.removed && r.extra.mount == Some(id))
+        {
+            return Some(false);
+        }
+        if self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) {
+            return None;
+        }
+        let saddle = m.saddle_item()?;
+        if &*saddle.item != "minecraft:saddle" {
+            return None;
+        }
+        let at = m.position;
+        let offset = horizon_client::mobs::riders::passenger_attachment(m)[1];
+        self.damage_held_tool();
+        self.simulation.mobs[index].set_saddle(None);
+        let context = self.who_context(Some(Who::Player), None);
+        self.post_game_event("minecraft:shear", [at.x, at.y, at.z], context);
+        self.spawn_at_location(at, offset, saddle.clone());
+        let target = self.mob_entity(&self.simulation.mobs[index]);
+        self.trigger_item_entity("minecraft:player_sheared_equipment", &saddle, &target);
+        Some(true)
+    }
     /// `Pig` / `Strider.mobInteract`: saddle an adult, or ride a saddled one.
     fn interact_steerable(&mut self, index: usize, item: &str) -> bool {
         let held = self.inventory[self.selected].clone();
@@ -109,7 +147,7 @@ impl Game<'_> {
             return false;
         }
         let id = m.id;
-        if !self.native_may_board(id) {
+        if !self.may_board() || !self.native_may_board(id) {
             return true;
         }
         self.riding = Some(id);
@@ -276,7 +314,7 @@ impl Game<'_> {
         }
         // doPlayerRide
         let id = self.simulation.mobs[index].id;
-        if !self.native_may_board(id) {
+        if !self.may_board() || !self.native_may_board(id) {
             return true;
         }
         let m = &mut self.simulation.mobs[index];
