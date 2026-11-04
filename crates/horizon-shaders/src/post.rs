@@ -422,6 +422,8 @@ pub struct Post {
     pub lines: Option<PostProgram>,
     /// What draws rain and snow, after deferred.
     pub weather: Option<PostProgram>,
+    /// `rain.depth=true`: rain and snow also write the depth buffer. Off by default.
+    pub rain_depth: bool,
     /// What draws the first-person hand and held items.
     pub hand: Option<PostProgram>,
     /// `clouds=off`: no clouds at all, neither the game's nor the pack's program for them.
@@ -617,6 +619,7 @@ pub fn load_post(
         clouds: None,
         lines: None,
         weather: None,
+        rain_depth: properties.get("rain.depth").map(str::trim) == Some("true"),
         hand: None,
         clouds_off: false,
         shadow_pass: false,

@@ -38,6 +38,9 @@ mod higher_shadowcolor_tests;
 #[cfg(test)]
 mod forced_flip_tests;
 
+#[cfg(test)]
+mod rain_depth_tests;
+
 /// The texture behind a pack sampler name.
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
@@ -2189,7 +2192,7 @@ impl PackPost {
         let weather_geometry = world.weather.then(|| Geometry {
             buffers: &entity_buffers,
             table: None,
-            depth_write: true,
+            depth_write: post.rain_depth,
             atlas: None,
             material_maps: false,
             ids: None,

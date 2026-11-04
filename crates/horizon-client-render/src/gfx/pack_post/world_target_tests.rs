@@ -117,7 +117,11 @@ fn replacement(change: Change, final_shader: bool) {
     );
 }
 
-fn texture(device: &wgpu::Device, [width, height]: [u32; 2], format: T) -> wgpu::TextureView {
+pub(super) fn texture(
+    device: &wgpu::Device,
+    [width, height]: [u32; 2],
+    format: T,
+) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("Original world-target regression input"),
@@ -138,7 +142,7 @@ fn texture(device: &wgpu::Device, [width, height]: [u32; 2], format: T) -> wgpu:
         .create_view(&Default::default())
 }
 
-fn clear(
+pub(super) fn clear(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     colour: &wgpu::TextureView,
@@ -231,7 +235,7 @@ fn pack(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render(
+pub(super) fn render(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     post: &mut PackPost,
@@ -292,7 +296,7 @@ fn render(
         .collect()
 }
 
-fn frame(hud: &HudBatch) -> Frame<'_> {
+pub(super) fn frame(hud: &HudBatch) -> Frame<'_> {
     Frame {
         eye: glam::DVec3::ZERO,
         eye_rotation: [0.0; 2],
