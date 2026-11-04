@@ -250,16 +250,17 @@ impl CitGlintPass {
         // (`gfx::array_layers`): pad with empty layers, within the GPU's limit. Slots past the
         // layers kept sample the last one.
         let gl = device.adapter_info().backend == wgpu::Backend::Gl;
+        let metal = device.adapter_info().backend == wgpu::Backend::Metal;
         let max = device.limits().max_texture_array_layers.max(1);
         let slots = textures.slots.len() as u32;
         let mut kept = slots.min(max);
-        while kept > 1 && crate::gfx::array_layers(kept, gl) > max {
+        while kept > 1 && crate::gfx::array_layers(kept, gl, metal) > max {
             kept -= 1;
         }
         if kept < slots {
             log::warn!("custom item textures: the GPU holds {kept} of {slots} glint textures");
         }
-        let layers = crate::gfx::array_layers(kept, gl).min(max);
+        let layers = crate::gfx::array_layers(kept, gl, metal).min(max);
         let layer_bytes = textures.width as usize * textures.height as usize * 4;
         let mut data = std::borrow::Cow::Borrowed(&textures.pixels[..]);
         if layers != slots {

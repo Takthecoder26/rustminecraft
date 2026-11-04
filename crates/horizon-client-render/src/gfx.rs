@@ -1155,11 +1155,12 @@ fn sprite_split() -> u32 {
 fn layer_split(
     max_layers: u32,
     gl: bool,
+    metal: bool,
     requested: Option<u32>,
     layers: u32,
 ) -> std::result::Result<u32, String> {
     let mut split = requested.unwrap_or(SPRITE_SPLIT).min(max_layers).max(1);
-    if split > 1 && array_layers(split, gl) > max_layers {
+    if split > 1 && array_layers(split, gl, metal) > max_layers {
         split -= 1;
     }
     if layers > split * SPRITE_ARRAYS {
@@ -1176,13 +1177,19 @@ const SPRITE_ARRAYS: u32 = 8;
 /// array. wgpu's OpenGL backend picks a texture's target from its layer
 /// count when it is created: one layer makes a 2D texture and a multiple of
 /// six a cube map, neither of which can be viewed as an array.
-pub(crate) fn array_layers(count: u32, gl: bool) -> u32 {
-    match count {
-        _ if !gl => count,
-        0 | 1 => 2,
-        n if n % 6 == 0 => n + 1,
-        n => n,
+pub(crate) fn array_layers(count: u32, gl: bool, metal: bool) -> u32 {
+    // Metal creates a plain 2D texture for a single layer, so a 1-layer 2D
+    // array view (which Horizon always uses) cannot bind it: pad to 2 layers.
+    if count <= 1 {
+        if gl || metal {
+            return 2;
+        }
+        return count.max(0);
     }
+    if gl && count % 6 == 0 {
+        return count + 1;
+    }
+    count
 }
 /// The views of terrain.wgsl's sprite arrays, the unused ones a 1-layer
 /// stand-in.
@@ -1559,9 +1566,11 @@ fn describe_adapter(adapter: &wgpu::Adapter) {
 /// Whether an adapter's texture arrays hold the block textures Horizon puts
 /// in one array.
 fn check_layers(adapter: &wgpu::Adapter, layers: u32) -> Result<u32> {
+    let info = adapter.get_info();
     Ok(layer_split(
         adapter.limits().max_texture_array_layers,
-        adapter.get_info().backend == wgpu::Backend::Gl,
+        info.backend == wgpu::Backend::Gl,
+        info.backend == wgpu::Backend::Metal,
         requested_split(),
         layers,
     )?)
@@ -2501,13 +2510,14 @@ impl Renderer {
         };
         let mut mip_levels = 1;
         let gl = adapter.get_info().backend == wgpu::Backend::Gl;
+        let metal = adapter.get_info().backend == wgpu::Backend::Metal;
         // The resource packs' LabPBR maps, for native shader packs: one array each, cut to
         // the layers the GPU has (`block_normal_map` gives the default past them).
         let pbr_maps = prepared
             .pbr
             .map(|(normals, specular, levels, layers, size)| {
                 let kept = layers.min(device.limits().max_texture_array_layers);
-                let count = array_layers(kept, gl);
+                let count = array_layers(kept, gl, metal);
                 [("LabPBR normals", normals), ("LabPBR specular", specular)].map(
                     |(label, mut data)| {
                         // The extra layers are empty.
@@ -2542,7 +2552,7 @@ impl Renderer {
             .map(|(array, (mut mips, levels))| {
                 let first = array as u32 * split;
                 let used = layers.saturating_sub(first).clamp(1, split);
-                let count = array_layers(used, gl);
+                let count = array_layers(used, gl, metal);
                 // The extra layers are empty.
                 mips.resize(mips.len() / used as usize * count as usize, 0);
                 mip_levels = levels;
@@ -2587,7 +2597,7 @@ impl Renderer {
                 size: wgpu::Extent3d {
                     width: 1,
                     height: 1,
-                    depth_or_array_layers: array_layers(1, gl),
+                    depth_or_array_layers: array_layers(1, gl, metal),
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -10192,8 +10202,8 @@ mod tests {
     #[test]
     fn gl_sprite_arrays_are_neither_2d_textures_nor_cube_maps() {
         for (count, gl) in [(1, 2), (2, 2), (5, 5), (6, 7), (12, 13), (2048, 2048)] {
-            assert_eq!(super::array_layers(count, true), gl);
-            assert_eq!(super::array_layers(count, false), count);
+            assert_eq!(super::array_layers(count, true, false), gl);
+            assert_eq!(super::array_layers(count, false, false), count);
         }
     }
     #[test]
@@ -10556,22 +10566,22 @@ mod sprite_upload_tests {
     #[test]
     fn sprite_split_follows_the_adapters_layer_limit() {
         // The Discord report: 512 layers per array, 1291 block textures (3 arrays).
-        assert_eq!(layer_split(512, false, None, 1291), Ok(512));
-        assert_eq!(layer_split(512, true, None, 1291), Ok(512));
-        assert_eq!(layer_split(2048, false, None, 1291), Ok(SPRITE_SPLIT));
-        assert_eq!(layer_split(8192, false, None, 1291), Ok(SPRITE_SPLIT));
+        assert_eq!(layer_split(512, false, false, None, 1291), Ok(512));
+        assert_eq!(layer_split(512, true, false, None, 1291), Ok(512));
+        assert_eq!(layer_split(2048, false, false, None, 1291), Ok(SPRITE_SPLIT));
+        assert_eq!(layer_split(8192, false, false, None, 1291), Ok(SPRITE_SPLIT));
         // HORIZON_SPRITE_SPLIT only lowers it.
-        assert_eq!(layer_split(2048, false, Some(512), 1291), Ok(512));
-        assert_eq!(layer_split(256, false, Some(512), 1291), Ok(256));
+        assert_eq!(layer_split(2048, false, false, Some(512), 1291), Ok(512));
+        assert_eq!(layer_split(256, false, false, Some(512), 1291), Ok(256));
         // OpenGL pads a multiple of 6 by a layer: a full array must still fit.
-        assert_eq!(layer_split(600, true, None, 1291), Ok(599));
-        assert_eq!(layer_split(600, false, None, 1291), Ok(600));
-        assert_eq!(array_layers(599, true), 599);
+        assert_eq!(layer_split(600, true, false, None, 1291), Ok(599));
+        assert_eq!(layer_split(600, false, false, None, 1291), Ok(600));
+        assert_eq!(array_layers(599, true, false), 599);
         // Past the arrays terrain.wgsl binds.
-        assert_eq!(layer_split(256, false, None, 256 * SPRITE_ARRAYS), Ok(256));
-        let err = layer_split(128, false, None, 1291).unwrap_err();
+        assert_eq!(layer_split(256, false, false, None, 256 * SPRITE_ARRAYS), Ok(256));
+        let err = layer_split(128, false, false, None, 1291).unwrap_err();
         assert!(err.contains("128 texture layers per array"), "{err}");
-        assert!(layer_split(512, false, None, 512 * SPRITE_ARRAYS + 1).is_err());
+        assert!(layer_split(512, false, false, None, 512 * SPRITE_ARRAYS + 1).is_err());
     }
 
     #[test]
