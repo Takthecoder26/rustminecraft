@@ -378,7 +378,7 @@ fn gpu_material_routes_render_both_phases_ids_and_block_shadow_owner() {
     let early = read_target(&device, &mut encoder, &target);
     post.draw_entities(&device, &queue, &mut encoder, SIZE, true);
     let late = read_target(&device, &mut encoder, &target);
-    post.draw_shadow_entities(&device, &queue, &mut encoder, SIZE);
+    post.draw_shadow_pass(&device, &queue, &mut encoder, &mut |_, _, _, _| {});
     let shadow = read_target(
         &device,
         &mut encoder,
