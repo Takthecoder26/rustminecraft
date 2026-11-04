@@ -21,8 +21,5 @@
     }
   ],
   "rust_summary": "interaction entities as carriers of a mod's moving things: drawn by the mod (`native_entity_submit`) and with collision boxes of its own (`native_entity_collisions`).",
-  "doc_summary": "`native_entity_submit(id, kind, position, draw)` lets a client mod draw a `minecraft:interaction` entity under a block entity's frame, and `native_entity_collisions(id, kind, position, boxes)` adds boxes players collide with and stand on, asked on the server and the player's client alike. With `native_summon`, `native_move_entity` and a synced attachment, that carries a contraption. Bundles need \"hooks\": @API:entity_carriers@.",
-  "comments": [
-    "crates/horizon-client/src/game/native_hooks.rs"
-  ]
+  "doc_summary": "`native_entity_submit(id, kind, position, draw)` lets a client mod draw a `minecraft:interaction` entity under a block entity's frame, and `native_entity_collisions(id, kind, position, boxes)` adds boxes players collide with and stand on, asked on the server and the player's client alike. With `native_summon`, `native_move_entity` and a synced attachment, that carries a contraption. Bundles need \"hooks\": @API:entity_carriers@."
 }
