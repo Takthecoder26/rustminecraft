@@ -5,6 +5,21 @@ use arrayvec::ArrayVec;
 
 use super::{conv, Command as C};
 
+fn framebuffer_attachment_mask_bit(attachment: u32) -> u64 {
+    if let Some(index) = attachment.checked_sub(glow::COLOR_ATTACHMENT0) {
+        if index < 32 {
+            return 1 << index;
+        }
+    }
+    let index = match attachment {
+        glow::DEPTH_ATTACHMENT => 32,
+        glow::STENCIL_ATTACHMENT => 33,
+        glow::DEPTH_STENCIL_ATTACHMENT => 34,
+        _ => return 0,
+    };
+    1 << index
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TextureSlotDesc {
     tex_target: super::BindTarget,
@@ -534,6 +549,27 @@ impl crate::CommandEncoder for super::CommandEncoder {
             panic!("Multiple render attachments with external framebuffers are not supported.");
         }
 
+        // The queue keeps the draw FBO's attachment state between passes. Tell
+        // it which slots this pass will use so it only detaches stale ones.
+        let mut attachment_mask = 0;
+        if !rendering_to_external_framebuffer {
+            for (index, attachment) in desc.color_attachments.iter().enumerate() {
+                if attachment.is_some() {
+                    attachment_mask |= framebuffer_attachment_mask_bit(
+                        glow::COLOR_ATTACHMENT0 + index as u32,
+                    );
+                }
+            }
+            if let Some(attachment) = &desc.depth_stencil_attachment {
+                let point = match attachment.target.view.aspects {
+                    crate::FormatAspects::DEPTH => glow::DEPTH_ATTACHMENT,
+                    crate::FormatAspects::STENCIL => glow::STENCIL_ATTACHMENT,
+                    _ => glow::DEPTH_STENCIL_ATTACHMENT,
+                };
+                attachment_mask |= framebuffer_attachment_mask_bit(point);
+            }
+        }
+
         // `COLOR_ATTACHMENT0` to `COLOR_ATTACHMENT31` gives 32 possible color attachments.
         assert!(desc.color_attachments.len() <= 32);
 
@@ -547,13 +583,19 @@ impl crate::CommandEncoder for super::CommandEncoder {
             Some(&super::TextureInner::DefaultRenderbuffer) => {
                 self.cmd_buffer
                     .commands
-                    .push(C::ResetFramebuffer { is_default: true });
+                    .push(C::ResetFramebuffer {
+                        is_default: true,
+                        attachment_mask: 0,
+                    });
             }
             _ => {
                 // set the framebuffer
                 self.cmd_buffer
                     .commands
-                    .push(C::ResetFramebuffer { is_default: false });
+                    .push(C::ResetFramebuffer {
+                        is_default: false,
+                        attachment_mask,
+                    });
 
                 for (i, cat) in desc.color_attachments.iter().enumerate() {
                     if let Some(cat) = cat.as_ref() {

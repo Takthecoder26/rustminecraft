@@ -1492,6 +1492,7 @@ impl crate::Surface for Surface {
             inner: super::TextureInner::Renderbuffer {
                 raw: sc.renderbuffer,
             },
+            resource_id: super::next_texture_id(),
             drop_guard: None,
             array_layer_count: 1,
             mip_level_count: 1,

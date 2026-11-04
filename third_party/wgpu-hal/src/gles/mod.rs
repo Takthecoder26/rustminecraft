@@ -114,11 +114,7 @@ use self::wgl::AdapterContext;
 pub use self::wgl::{Instance, Surface};
 
 use alloc::{boxed::Box, string::String, string::ToString as _, sync::Arc, vec::Vec};
-use core::{
-    fmt,
-    ops::Range,
-    sync::atomic::{AtomicU32, AtomicU8},
-};
+use core::{fmt, ops::Range, sync::atomic::{AtomicU32, AtomicU8, Ordering}};
 use parking_lot::Mutex;
 
 use arrayvec::ArrayVec;
@@ -139,6 +135,11 @@ const ZERO_BUFFER_SIZE: usize = 256 << 10;
 const MAX_IMMEDIATES: usize = 64;
 // We have to account for each immediate data may need to be set for every shader.
 const MAX_IMMEDIATES_COMMANDS: usize = MAX_IMMEDIATES * crate::MAX_CONCURRENT_SHADER_STAGES;
+static NEXT_TEXTURE_ID: AtomicU32 = AtomicU32::new(1);
+
+pub(super) fn next_texture_id() -> u32 {
+    NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 impl crate::Api for Api {
     const VARIANT: wgt::Backend = wgt::Backend::Gl;
@@ -365,6 +366,9 @@ pub struct Queue {
     features: wgt::Features,
     draw_fbo: glow::Framebuffer,
     copy_fbo: glow::Framebuffer,
+    /// Attachment state belongs to this queue's private draw FBO and survives
+    /// command-buffer boundaries; `reset_state` only changes the binding.
+    attachment_state: Mutex<queue::FramebufferAttachmentState>,
     /// Shader program used to clear the screen for [`Workarounds::MESA_I915_SRGB_SHADER_CLEAR`]
     /// devices.
     shader_clear_program: Option<ShaderClearProgram>,
@@ -469,6 +473,7 @@ impl TextureInner {
 #[derive(Debug)]
 pub struct Texture {
     pub inner: TextureInner,
+    pub(super) resource_id: u32,
     pub mip_level_count: u32,
     pub array_layer_count: u32,
     pub format: wgt::TextureFormat,
@@ -493,6 +498,7 @@ impl Texture {
     pub fn default_framebuffer(format: wgt::TextureFormat) -> Self {
         Self {
             inner: TextureInner::DefaultRenderbuffer,
+            resource_id: 0,
             drop_guard: None,
             mip_level_count: 1,
             array_layer_count: 1,
@@ -583,6 +589,7 @@ impl Texture {
 #[derive(Clone, Debug)]
 pub struct TextureView {
     inner: TextureInner,
+    resource_id: u32,
     aspects: crate::FormatAspects,
     mip_levels: Range<u32>,
     array_layers: Range<u32>,
@@ -996,6 +1003,7 @@ enum Command {
     },
     ResetFramebuffer {
         is_default: bool,
+        attachment_mask: u64,
     },
     BindAttachment {
         attachment: u32,

@@ -469,6 +469,7 @@ impl crate::Surface for Surface {
                 raw: self.texture.lock().unwrap(),
                 target: glow::TEXTURE_2D,
             },
+            resource_id: super::next_texture_id(),
             drop_guard: None,
             array_layer_count: 1,
             mip_level_count: 1,
