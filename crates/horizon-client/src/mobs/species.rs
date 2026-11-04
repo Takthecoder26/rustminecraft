@@ -1496,6 +1496,7 @@ impl Def {
                         | S::ElderGuardian
                         | S::IronGolem
                         | S::SnowGolem
+                        | S::CopperGolem
                         | S::Ghast
                         | S::Blaze
                         | S::Nautilus

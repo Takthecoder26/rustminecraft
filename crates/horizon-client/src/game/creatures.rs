@@ -7645,6 +7645,31 @@ mod tests {
         )
     }
 
+    /// vanilla's `can_breathe_under_water` entity-type tag lists the copper
+    /// golem, so a submerged one must lose no air; `breathes_water` left it out
+    /// and it drowned (#9426).
+    #[test]
+    fn a_copper_golem_breathes_under_water() {
+        assert!(
+            crate::mobs::species::def(crate::mobs::Species::CopperGolem)
+                .flags(false)
+                .breathes_water,
+            "copper golem is in vanilla's can_breathe_under_water tag"
+        );
+        // Its golem siblings, already in the tag-backed list.
+        assert!(
+            crate::mobs::species::def(crate::mobs::Species::IronGolem)
+                .flags(false)
+                .breathes_water
+        );
+        // A land mob still drowns: the general air path is unchanged.
+        assert!(
+            !crate::mobs::species::def(crate::mobs::Species::Cow)
+                .flags(false)
+                .breathes_water
+        );
+    }
+
     #[test]
     fn nautilus_breath_lands_in_creative_as_ambient() {
         // AbstractNautilus.applyEffects: MobEffectInstance(BREATH_OF_THE_NAUTILUS,
