@@ -1438,7 +1438,9 @@ impl Game<'_> {
         guest: &mut horizon_client::lan::guest::Guest,
     ) {
         self.guest_attachments_into(guest);
-        if guest.placed {
+        // A player a proxy moved to another server (`player-release moved`) is saved
+        // there now, not here.
+        if guest.placed && !guest.released {
             let _ = self.finish_player_autosaves(true);
             if host.owner.as_ref().is_some_and(|o| o.uuid == guest.uuid) {
                 playerdata::save_owner(guest, &mut self.level, &self.world_root);
@@ -1588,7 +1590,7 @@ impl Game<'_> {
         host: &LanHost,
         guest: &horizon_client::lan::guest::Guest,
     ) {
-        if !guest.placed || self.adv.tree.list.is_empty() {
+        if !guest.placed || guest.released || self.adv.tree.list.is_empty() {
             return;
         }
         let Some(uuid) = self.records_uuid(host, guest.uuid) else {
@@ -1948,10 +1950,18 @@ impl Game<'_> {
                                 super::dedicated::java_double(z)
                             ),
                         );
-                        super::dedicated::log(
-                            "INFO",
-                            &format!("System chat: {} joined the game", g.name),
-                        );
+                        // A held player is not announced: it is not in the world yet.
+                        if g.held {
+                            super::dedicated::log(
+                                "INFO",
+                                &horizon_client::lan::arrivals::held_line(&g.name),
+                            );
+                        } else {
+                            super::dedicated::log(
+                                "INFO",
+                                &format!("System chat: {} joined the game", g.name),
+                            );
+                        }
                     } else if self.player.is_some()
                         && let Some(g) = host.hub.guest(conn)
                         && g.placed
@@ -2002,22 +2012,39 @@ impl Game<'_> {
                     self.guest_attachments.remove(&guest.uuid);
                     host.play.remove(&guest.conn);
                     self.guest_combat.remove(&guest.conn);
-                    if self.options.dedicated.is_some() && guest.placed {
+                    // A held player was recorded as joined at its login: it leaves too.
+                    if self.options.dedicated.is_some() && (guest.placed || guest.held) {
                         super::dedicated::events::record(
                             "leave",
                             &guest.name,
                             guest.uuid,
                             serde_json::json!({ "reason": guest.left_reason }),
                         );
-                        super::dedicated::log(
-                            "INFO",
-                            &format!("{} lost connection: {}", guest.name, guest.left_reason),
-                        );
-                        super::dedicated::log(
-                            "INFO",
-                            &format!("System chat: {} left the game", guest.name),
-                        );
-                    } else if self.player.is_some() && guest.placed {
+                        if guest.held && !guest.placed {
+                            // Never announced, so no "left the game" either.
+                            super::dedicated::log(
+                                "INFO",
+                                &horizon_client::lan::arrivals::dropped_line(
+                                    &guest.name,
+                                    &guest.left_reason,
+                                ),
+                            );
+                        } else {
+                            super::dedicated::log(
+                                "INFO",
+                                &format!("{} lost connection: {}", guest.name, guest.left_reason),
+                            );
+                        }
+                        // A player moved to another server without `announce` was not
+                        // announced as leaving, so the line is not logged either; a held
+                        // player was never announced at all.
+                        if guest.placed && !guest.quiet_leave {
+                            super::dedicated::log(
+                                "INFO",
+                                &format!("System chat: {} left the game", guest.name),
+                            );
+                        }
+                    } else if self.player.is_some() && guest.placed && !guest.quiet_leave {
                         // ServerGamePacketListenerImpl.removePlayerFromWorld.
                         let who = self.player_text(&guest.name, guest.uuid);
                         self.system_message(
@@ -2958,12 +2985,12 @@ impl Game<'_> {
         // distance + 1) and those chunks' lit neighbours.
         let radius = host.hub.config.view_distance + 1;
         let rule = self.ui.rules.bool("spectators_generate_chunks");
+        // The held players are sent the level, so their chunks are kept as the placed ones'.
         self.streaming.extra = host
             .hub
-            .guests
-            .iter()
-            .filter(|g| host.hub.here(g) && super::game_mode::loads_chunks(rule, g.spectator()))
-            .map(|g| (g.chunk(), radius))
+            .loading_chunks(|g| super::game_mode::loads_chunks(rule, g.spectator()))
+            .into_iter()
+            .map(|chunk| (chunk, radius))
             .chain(
                 self.arrival_chunks(self.dim)
                     .into_iter()
