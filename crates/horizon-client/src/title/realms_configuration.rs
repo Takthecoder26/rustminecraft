@@ -8,6 +8,7 @@ pub(super) struct Configuration {
     player_widths: Cell<[f32; 3]>,
     info_height: Cell<f32>,
     dragging_distance: Option<bool>,
+    slider_keys: Option<bool>,
     dragging_scroll: bool,
     pub(super) saving: bool,
 }
@@ -22,12 +23,25 @@ struct SettingsDraft {
     simulation: Option<u32>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigurationFocus {
+    Field(usize),
+    Button(u8),
+    Player(usize, bool),
+}
+
 const TABS: [(&str, Page); 4] = [
     ("mco.configure.worlds.title", Page::Configure),
     ("mco.configure.world.players.title", Page::Players),
     ("mco.configure.world.subscription.tab", Page::Subscription),
     ("mco.configure.world.settings.title", Page::Settings),
 ];
+
+fn template_image(id: &Value, image: &Value) -> Option<(String, String)> {
+    let id = id.as_i64().or_else(|| id.as_str()?.parse().ok())?;
+    let image = image.as_str().filter(|image| !image.is_empty())?;
+    (id != -1).then(|| (id.to_string(), image.to_owned()))
+}
 
 fn grid_y(h: f32, height: f32) -> f32 {
     24.0 + ((h - 57.0 - height) / 6.0).trunc()
@@ -110,6 +124,35 @@ impl State {
                 == Some(true)
         }
     }
+    fn configuration_template_image(&self, slot: i32) -> Option<(String, String)> {
+        let (id, image) = if slot == 4 {
+            (
+                self.server.get("minigameId")?,
+                self.server.get("minigameImage")?,
+            )
+        } else {
+            if self.slot_empty(slot) {
+                return None;
+            }
+            let options = self.slot_options_for(slot);
+            let id = options
+                .get("worldTemplateId")
+                .or_else(|| options.get("templateId"))?;
+            let image = options
+                .get("worldTemplateImage")
+                .or_else(|| options.get("templateImage"))?;
+            return template_image(id, image);
+        };
+        template_image(id, image)
+    }
+
+    /// Base64 DTO images share RealmsTextureManager's template-id cache with the picker.
+    pub fn configuration_template_images(&self) -> Vec<(String, String)> {
+        (1..=4)
+            .filter_map(|slot| self.configuration_template_image(slot))
+            .collect()
+    }
+
     fn slot_name(&self, slot: i32) -> String {
         if slot == 4 {
             return tr("mco.worldSlot.minigame");
@@ -145,13 +188,7 @@ impl State {
                 name: text(&self.server, "name"),
                 description: text(&self.server, "motd"),
                 preference: self
-                    .server
-                    .get("regionSelectionPreference")
-                    .filter(|v| v.is_object())
-                    .cloned()
-                    .unwrap_or_else(
-                        || json!({"regionSelectionPreference":0,"preferredRegion":null}),
-                    ),
+                    .region_normalize_preference(self.configuration_region_preference()),
                 render: self.distance(false).map(|v| v.2),
                 simulation: self.distance(true).map(|v| v.2),
             });
@@ -198,6 +235,15 @@ impl State {
         })
     }
     pub fn back_action(&mut self) -> (Action, bool) {
+        if let Some(result) = self
+            .world_back_action()
+            .or_else(|| self.reset_back_action())
+        {
+            return result;
+        }
+        if let Some(exit) = self.player_back() {
+            return (Action::None, exit);
+        }
         if self.configuration.saving {
             return (Action::None, false);
         }
@@ -228,6 +274,359 @@ impl State {
             .map(|a| self.dispatch(a))
             .unwrap_or(Action::None)
     }
+    pub(super) fn configuration_region_preference(&self) -> Value {
+        self.configuration
+            .draft
+            .as_ref()
+            .filter(|d| d.id == self.id())
+            .map(|d| d.preference.clone())
+            .or_else(|| {
+                self.server
+                    .get("regionSelectionPreference")
+                    .filter(|v| v.is_object())
+                    .cloned()
+            })
+            .unwrap_or_else(|| json!({"regionSelectionPreference":0,"preferredRegion":null}))
+    }
+
+    /// TabNavigationBar consumes Ctrl+digits even when that particular tab is disabled.
+    pub(in crate::title) fn configuration_tab_key(
+        &mut self,
+        key: winit::keyboard::KeyCode,
+        reverse: bool,
+        focus: &mut Option<u8>,
+    ) -> Option<(Action, bool)> {
+        if !self.is_configuration() {
+            return None;
+        }
+        let current = self.configuration_tab();
+        let mut next = super::super::create_world::next_tab_index(current, key, reverse)?;
+        if self.configuration.saving {
+            return Some((Action::None, false));
+        }
+        let controls = self.configuration_controls()?;
+        if key == winit::keyboard::KeyCode::Tab {
+            next = current;
+            for _ in 0..TABS.len() {
+                next = (next + if reverse { TABS.len() - 1 } else { 1 }) % TABS.len();
+                if controls[next].enabled {
+                    break;
+                }
+            }
+        }
+        next = next.min(TABS.len() - 1);
+        if next == current || !controls[next].enabled {
+            return Some((Action::None, false));
+        }
+        let bar_focused = focus.is_some_and(|id| (10..14).contains(&id));
+        let action = self.select_configuration_tab(TABS[next].1.clone());
+        self.focused = None;
+        *focus = bar_focused.then_some(10 + next as u8);
+        Some((action, true))
+    }
+
+    fn configuration_focus(&self, focus: Option<u8>) -> Option<ConfigurationFocus> {
+        self.focused.map(ConfigurationFocus::Field).or_else(|| {
+            focus.map(|id| {
+                if self.page == Page::Players && id >= 18 {
+                    ConfigurationFocus::Player(
+                        self.invite_visible.get().0 + usize::from(id - 18) / 2,
+                        (id - 18) % 2 == 1,
+                    )
+                } else {
+                    ConfigurationFocus::Button(id)
+                }
+            })
+        })
+    }
+
+    fn configuration_widgets(&self, size: (f32, f32)) -> Vec<(ConfigurationFocus, [f32; 4])> {
+        let buttons = self
+            .configuration_buttons(size.0, size.1)
+            .unwrap_or_default();
+        let mut widgets = Vec::new();
+        for button in buttons
+            .iter()
+            .filter(|b| b.enabled && (b.id == 10 + self.configuration_tab() as u8 || b.id >= 16))
+        {
+            if self.page != Page::Players || button.id < 18 {
+                widgets.push((
+                    ConfigurationFocus::Button(button.id),
+                    [
+                        button.x,
+                        button.y,
+                        button.w,
+                        self.configuration_button_height(button).unwrap_or(20.0),
+                    ],
+                ));
+            }
+        }
+        if self.page == Page::Settings && !self.loading {
+            let index = usize::from(
+                widgets
+                    .first()
+                    .is_some_and(|(f, _)| matches!(f, ConfigurationFocus::Button(10..=13))),
+            );
+            for i in (0..self.fields.len()).rev() {
+                widgets.insert(
+                    index,
+                    (
+                        ConfigurationFocus::Field(i),
+                        self.configuration_field_rect(i, size.0),
+                    ),
+                );
+            }
+        }
+        if self.page == Page::Players && !self.loading {
+            let widths = self.configuration.player_widths.get();
+            let c = (size.0 / 2.0).floor();
+            let rows = self
+                .server
+                .get("players")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten();
+            let mut row_widgets = Vec::new();
+            for (i, player) in rows.enumerate() {
+                let op = player.get("operator").and_then(Value::as_bool) == Some(true);
+                let rw = widths[2].max(48.0);
+                let ow = widths[usize::from(op)].max(64.0);
+                let y = self.players_top(size.1) + 29.0 + i as f32 * 36.0
+                    - self.pixel_scroll.get().floor();
+                row_widgets.push((
+                    ConfigurationFocus::Player(i, false),
+                    [c + 148.0 - rw - ow - 8.0, y, ow, 20.0],
+                ));
+                row_widgets.push((
+                    ConfigurationFocus::Player(i, true),
+                    [c + 148.0 - rw, y, rw, 20.0],
+                ));
+            }
+            let index = usize::from(
+                widgets
+                    .first()
+                    .is_some_and(|(f, _)| matches!(f, ConfigurationFocus::Button(10..=13))),
+            );
+            widgets.splice(index..index, row_widgets);
+        }
+        widgets.extend(
+            buttons
+                .iter()
+                .filter(|b| b.enabled && (14..16).contains(&b.id))
+                .map(|b| (ConfigurationFocus::Button(b.id), [b.x, b.y, b.w, 20.0])),
+        );
+        widgets
+    }
+
+    fn configuration_focus_widget(
+        &mut self,
+        target: ConfigurationFocus,
+        size: (f32, f32),
+        focus: &mut Option<u8>,
+        tab: bool,
+    ) {
+        self.configuration.slider_keys = None;
+        if let Some((_, [_, y, _, height])) = self
+            .configuration_widgets(size)
+            .into_iter()
+            .find(|(f, _)| *f == target)
+        {
+            let area = match target {
+                ConfigurationFocus::Field(_) | ConfigurationFocus::Button(16..=u8::MAX)
+                    if self.page == Page::Settings =>
+                {
+                    Some((self.settings_top(size.1), (size.1 - 59.0).max(1.0)))
+                }
+                ConfigurationFocus::Player(..) => {
+                    Some((self.players_top(size.1), (size.1 - 93.0).max(1.0)))
+                }
+                _ => None,
+            };
+            if let Some((top, view)) = area {
+                let delta = if y < top {
+                    y - top - 10.0
+                } else if y + height > top + view {
+                    y + height - top - view + 10.0
+                } else {
+                    0.0
+                };
+                self.pixel_scroll
+                    .set((self.pixel_scroll.get() + delta).max(0.0));
+                self.layout_configuration(size.1);
+            }
+        }
+        self.focused = None;
+        *focus = None;
+        match target {
+            ConfigurationFocus::Field(i) => self.focused = Some(i),
+            ConfigurationFocus::Button(id) => {
+                *focus = Some(id);
+                if tab
+                    && self.page == Page::Settings
+                    && self.settings_distances()
+                    && (16..18).contains(&id)
+                {
+                    self.configuration.slider_keys = Some(id == 17);
+                }
+            }
+            ConfigurationFocus::Player(row, remove) => {
+                let index = (row - self.invite_visible.get().0) * 2 + usize::from(remove);
+                *focus = u8::try_from(index + 18).ok();
+            }
+        }
+    }
+
+    pub(in crate::title) fn configuration_tab_focus(
+        &mut self,
+        reverse: bool,
+        size: (f32, f32),
+        focus: &mut Option<u8>,
+    ) -> bool {
+        if !self.is_configuration() {
+            return false;
+        }
+        if self.configuration.saving {
+            return true;
+        }
+        let current = self.configuration_focus(*focus);
+        let widgets = self.configuration_widgets(size);
+        if widgets.is_empty() {
+            return true;
+        }
+        let index = current.and_then(|f| widgets.iter().position(|(target, _)| *target == f));
+        let next = if reverse {
+            index.map_or(widgets.len() - 1, |i| {
+                (i + widgets.len() - 1) % widgets.len()
+            })
+        } else {
+            index.map_or(0, |i| (i + 1) % widgets.len())
+        };
+        self.configuration_focus_widget(widgets[next].0, size, focus, true);
+        true
+    }
+
+    pub(in crate::title) fn configuration_key(
+        &mut self,
+        key: winit::keyboard::KeyCode,
+        size: (f32, f32),
+        focus: &mut Option<u8>,
+    ) -> Option<Action> {
+        use winit::keyboard::KeyCode;
+        if !self.is_configuration() {
+            return None;
+        }
+        if self.configuration.saving {
+            return Some(Action::None);
+        }
+        let current = self.configuration_focus(*focus);
+        if let Some(ConfigurationFocus::Button(id @ 10..=13)) = current
+            && matches!(key, KeyCode::ArrowLeft | KeyCode::ArrowRight)
+        {
+            let controls = self.configuration_controls().unwrap_or_default();
+            let next = if key == KeyCode::ArrowLeft {
+                (10..id)
+                    .rev()
+                    .find(|i| controls[usize::from(*i - 10)].enabled)
+            } else {
+                (id + 1..14).find(|i| controls[usize::from(*i - 10)].enabled)
+            };
+            return Some(next.map_or(Action::None, |id| {
+                let action = self.select_configuration_tab(TABS[usize::from(id - 10)].1.clone());
+                self.focused = None;
+                *focus = Some(id);
+                action
+            }));
+        }
+        if let Some(ConfigurationFocus::Button(id @ 16..=17)) = current
+            && self.page == Page::Settings
+            && self.settings_distances()
+            && self.configuration.slider_keys == Some(id == 17)
+            && matches!(key, KeyCode::ArrowLeft | KeyCode::ArrowRight)
+        {
+            let simulation = id == 17;
+            if let Some((min, max, current)) = self.distance(simulation)
+                && let Some(draft) = &mut self.configuration.draft
+            {
+                let value = if simulation {
+                    &mut draft.simulation
+                } else {
+                    &mut draft.render
+                };
+                *value = Some(if key == KeyCode::ArrowLeft {
+                    value.unwrap_or(current).saturating_sub(1).max(min)
+                } else {
+                    value.unwrap_or(current).saturating_add(1).min(max)
+                });
+            }
+            return Some(Action::None);
+        }
+        if self.focused.is_some() && matches!(key, KeyCode::ArrowLeft | KeyCode::ArrowRight) {
+            return Some(Action::None);
+        }
+        let widgets = self.configuration_widgets(size);
+        let Some((_, [x, y, width, height])) = widgets.iter().find(|(f, _)| Some(*f) == current)
+        else {
+            if let Some((target, _)) = widgets.first() {
+                self.configuration_focus_widget(*target, size, focus, false);
+            }
+            return Some(Action::None);
+        };
+        let (cx, cy) = (x + width / 2.0, y + height / 2.0);
+        let candidates = widgets
+            .iter()
+            .filter_map(|(target, [x, y, width, height])| {
+                let (dx, dy) = (x + width / 2.0 - cx, y + height / 2.0 - cy);
+                let valid = match key {
+                    KeyCode::ArrowUp => dy < -4.0,
+                    KeyCode::ArrowDown => dy > 4.0,
+                    KeyCode::ArrowLeft => dx < -4.0,
+                    KeyCode::ArrowRight => dx > 4.0,
+                    _ => false,
+                };
+                let distance = if matches!(key, KeyCode::ArrowUp | KeyCode::ArrowDown) {
+                    dy.abs() + dx.abs() * 2.0
+                } else {
+                    dx.abs() + dy.abs() * 2.0
+                };
+                valid.then_some((*target, distance))
+            })
+            .collect::<Vec<_>>();
+        let content = |f: ConfigurationFocus| {
+            matches!(
+                f,
+                ConfigurationFocus::Field(_)
+                    | ConfigurationFocus::Player(..)
+                    | ConfigurationFocus::Button(16..=u8::MAX)
+            )
+        };
+        let prefer_content =
+            current.is_some_and(content) && candidates.iter().any(|(f, _)| content(*f));
+        if let Some((target, _)) = candidates
+            .into_iter()
+            .filter(|(f, _)| !prefer_content || content(*f))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+        {
+            self.configuration_focus_widget(target, size, focus, false);
+        }
+        Some(Action::None)
+    }
+
+    /// AbstractSliderButton.keyPressed toggles adjustment without a pointer press.
+    pub(in crate::title) fn configuration_activate(&mut self, focus: Option<u8>) -> bool {
+        if self.page != Page::Settings
+            || !self.settings_distances()
+            || !focus.is_some_and(|id| (16..18).contains(&id))
+        {
+            return false;
+        }
+        if !self.loading && !self.configuration.saving {
+            let simulation = focus == Some(17);
+            self.configuration.slider_keys =
+                (self.configuration.slider_keys != Some(simulation)).then_some(simulation);
+        }
+        true
+    }
+
     pub(super) fn configuration_controls(&self) -> Option<Vec<Control>> {
         if !self.is_configuration() {
             return None;
@@ -303,12 +702,15 @@ impl State {
                     },
                     !expired,
                     if self.minigame() {
-                        Event::Request(RealmsAction::Templates {
+                        Event::ResetScreen(reset_screens::ResetEvent::OpenTemplates {
                             world_type: "MINIGAME".into(),
-                            page: 1,
+                            warning: false,
                         })
                     } else {
-                        Event::Page(Page::Reset)
+                        Event::ResetScreen(reset_screens::ResetEvent::Open {
+                            slot: self.active_slot(),
+                            empty: self.slot_empty(self.active_slot()),
+                        })
                     },
                 );
             }
@@ -597,12 +999,20 @@ impl State {
     }
     pub(super) fn press_configuration_slot(&mut self, slot: i32) -> Action {
         if slot == 4 {
-            return self.dispatch(RealmsAction::Templates {
-                world_type: "MINIGAME".into(),
-                page: 1,
-            });
+            return self.reset_open_templates("MINIGAME", true);
         }
         self.slot = slot;
+        if self.slot_empty(slot) {
+            self.ask_action(
+                Action::None,
+                "mco.configure.world.slot.switch.question.line1",
+                String::new(),
+            );
+            if let Some(confirmation) = &mut self.confirmation {
+                confirmation.reset_slot = Some(slot);
+            }
+            return Action::None;
+        }
         self.ask(
             RealmsAction::SwitchSlot {
                 id: self.id(),
@@ -617,9 +1027,8 @@ impl State {
         let Some((min, max, _)) = self.distance(simulation) else {
             return;
         };
-        let value = min
-            + (ui::slider_value((width / 2.0).floor() - 106.0, 212.0, x) * (max - min) as f32)
-                .round() as u32;
+        let ratio = ui::slider_value((width / 2.0).floor() - 106.0, 212.0, x);
+        let value = (min + (ratio * (max - min + 1) as f32).floor() as u32).min(max);
         if let Some(draft) = &mut self.configuration.draft {
             if simulation {
                 draft.simulation = Some(value);
@@ -627,6 +1036,8 @@ impl State {
                 draft.render = Some(value);
             }
         }
+        self.focused = None;
+        self.configuration.slider_keys = Some(simulation);
         self.configuration.dragging_distance = Some(simulation);
     }
     pub(super) fn set_configuration_region(&mut self, preference: Value) -> bool {
@@ -714,6 +1125,7 @@ impl State {
     }
     pub(super) fn clear_configuration_drag(&mut self) {
         self.release_configuration();
+        self.configuration.slider_keys = None;
     }
     pub(super) fn draw_configuration_tooltip(
         &self,
@@ -818,7 +1230,15 @@ impl State {
             } else {
                 rgba(143, 143, 143, 255)
             };
-            let texture = if self.slot_empty(slot) || slot == 4 {
+            let dynamic = self
+                .configuration_template_image(slot)
+                .map(|(id, _)| format!("realms/dynamic/{id}"));
+            let texture = if let Some(texture) = dynamic
+                .as_deref()
+                .filter(|texture| atlas.sprites.contains_key(*texture))
+            {
+                texture
+            } else if self.slot_empty(slot) || slot == 4 {
                 "gui/realms/empty_frame"
             } else {
                 match slot {
@@ -966,22 +1386,28 @@ impl State {
                 ui::nine_slice(
                     batch,
                     atlas,
-                    "gui/sprites/widget/slider",
+                    if highlighted && self.configuration.slider_keys != Some(simulation) {
+                        "gui/sprites/widget/slider_highlighted"
+                    } else {
+                        "gui/sprites/widget/slider"
+                    },
                     b.x,
                     b.y,
                     b.w,
                     20.0,
                     u32::MAX,
                 );
-                let ratio = if max == min {
+                let ratio = if value <= min {
                     0.0
+                } else if value >= max {
+                    1.0
                 } else {
-                    (value - min) as f32 / (max - min) as f32
+                    (value - min) as f32 / (max - min + 1) as f32 + 0.5 / (max - min + 1) as f32
                 };
                 ui::nine_slice(
                     batch,
                     atlas,
-                    if highlighted {
+                    if highlighted || self.configuration.slider_keys == Some(simulation) {
                         "gui/sprites/widget/slider_handle_highlighted"
                     } else {
                         "gui/sprites/widget/slider_handle"
@@ -1002,16 +1428,24 @@ impl State {
                     true,
                 );
             } else {
-                ui::button(
+                // The title's button loop already records this widget and its narration;
+                // painting here only keeps one accessibility entry per button.
+                let sprite = if !b.enabled {
+                    "gui/sprites/widget/button_disabled"
+                } else if highlighted {
+                    "gui/sprites/widget/button_highlighted"
+                } else {
+                    "gui/sprites/widget/button"
+                };
+                crate::ui::nine_slice(batch, atlas, sprite, b.x, b.y, b.w, 20.0, u32::MAX);
+                b.draw_label(
                     batch,
                     atlas,
-                    b.x,
-                    b.y,
-                    b.w,
-                    20.0,
-                    &Text::literal(&b.label),
-                    b.enabled,
-                    highlighted,
+                    if b.enabled {
+                        u32::MAX
+                    } else {
+                        rgba(160, 160, 160, 255)
+                    },
                 );
             }
             batch.clip_since(first, 0.0, 24.0, batch.width, batch.height - 35.0);
@@ -1203,14 +1637,9 @@ impl State {
             u32::MAX,
             true,
         );
-        let preference = self
-            .configuration
-            .draft
-            .as_ref()
-            .map(|d| &d.preference)
-            .unwrap_or(&Value::Null);
-        let region = text(preference, "preferredRegion");
-        let pref = number(preference, "regionSelectionPreference");
+        let preference = self.configuration_region_preference();
+        let region = text(&preference, "preferredRegion");
+        let pref = number(&preference, "regionSelectionPreference");
         let key = if pref == 2 {
             REGIONS
                 .iter()
@@ -1235,7 +1664,7 @@ impl State {
         if pref == 2 {
             batch.sprite_scaled(
                 atlas,
-                "gui/sprites/icon/ping_unknown",
+                self.region_preference_icon(&preference),
                 left + 202.0,
                 y + 13.0,
                 10.0,

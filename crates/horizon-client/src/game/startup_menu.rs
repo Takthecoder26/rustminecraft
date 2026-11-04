@@ -17,6 +17,8 @@ pub(super) struct StartupMenu {
     online: super::online_options::OnlineState,
     realms: super::realms::RealmsRuntime,
     realms_entry: super::realms_entry::RealmEntryState,
+    realms_ui: super::realms_ui::RealmsUi,
+    skin_profiles: horizon_client::skins::Resolver,
     options_open: bool,
     /// The credits from Credits & Attribution, and their last frame.
     win: Option<(horizon_client::win_screen::WinScreen, Instant)>,
@@ -131,6 +133,8 @@ impl StartupMenu {
         game.online = std::mem::take(&mut self.online);
         game.realms = std::mem::take(&mut self.realms);
         game.realms_entry = std::mem::take(&mut self.realms_entry);
+        game.realms_ui = std::mem::take(&mut self.realms_ui);
+        *game.skin_profiles.get_mut() = std::mem::take(&mut self.skin_profiles);
         game.cursor = self.cursor;
         game.modifiers = self.modifiers;
         game.physical_keys = std::mem::take(&mut self.physical_keys);
@@ -283,12 +287,14 @@ impl StartupMenu {
         } else {
             self.modifiers.control_key()
         };
-        if let PhysicalKey::Code(key) = event.physical_key
-            && title
-                .tab_bar_key(key, ctrl, self.modifiers.shift_key())
-                .is_some()
-        {
-            return Action::None;
+        if let PhysicalKey::Code(key) = event.physical_key {
+            let tab = title.tab_bar_key(key, ctrl, self.modifiers.shift_key());
+            if let Some(action) = title.take_pending_action() {
+                return action;
+            }
+            if tab.is_some() {
+                return Action::None;
+            }
         }
         match event.physical_key {
             PhysicalKey::Code(KeyCode::Escape) => return title.escape_action(),
@@ -299,9 +305,7 @@ impl StartupMenu {
             PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
                 return title.confirm_key_size(viewport).0;
             }
-            PhysicalKey::Code(KeyCode::Space)
-                if title.list_focused() || title.focused_button.is_some() =>
-            {
+            PhysicalKey::Code(KeyCode::Space) if title.space_selects() => {
                 return title.confirm_key_size(viewport).0;
             }
             PhysicalKey::Code(
@@ -325,6 +329,7 @@ impl StartupMenu {
                 | KeyCode::ArrowDown),
             ) => {
                 title.arrow_key(key, viewport, self.modifiers.shift_key());
+                return title.take_pending_action().unwrap_or(Action::None);
             }
             _ => {
                 let cleared = !title.has_caret_field()
@@ -826,7 +831,13 @@ impl Loading {
             return false;
         };
         let options = &self.menu.options;
-        if self.gui.is_none()
+        if (!self.menu.options_open
+            && self
+                .menu
+                .title
+                .as_ref()
+                .is_some_and(|title| matches!(title.mode, horizon_client::title::Mode::Realms(_))))
+            || self.gui.is_none()
             || self.menu.pending.is_some()
             || self.menu.win.is_some()
             || (self.menu.options_open
@@ -1137,6 +1148,20 @@ impl Loading {
                     }
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let batch = HudBatch::new(self.menu_size());
+                if let Some(title) = &mut self.menu.title {
+                    title.realms_right_click(
+                        self.menu.cursor.0,
+                        self.menu.cursor.1,
+                        (batch.width, batch.height),
+                    );
+                }
+            }
             // AbstractSelectionList.mouseClicked: a world row takes a click
             // of any button, so the middle one selects it without joining.
             WindowEvent::MouseInput {
@@ -1263,6 +1288,21 @@ impl Loading {
             true,
         );
         self.poll_startup_realms();
+        if let Some(gui) = &mut self.gui {
+            let draw_title = self.menu.pending.is_none()
+                && self.menu.win.is_none()
+                && (!self.menu.options_open || self.menu.options.page() == Page::Friends);
+            self.menu.realms_ui.prepare(
+                if draw_title {
+                    self.menu.title.as_mut()
+                } else {
+                    None
+                },
+                &mut gui.atlas,
+                batch,
+                &mut self.menu.skin_profiles,
+            );
+        }
         let logs = horizon_client::logging::recent_lines();
         let Some(gui) = &self.gui else {
             // The pack's screens do not exist yet: the boot screen holds the

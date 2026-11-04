@@ -463,6 +463,8 @@ pub struct Title {
     pub onboarding_finished: bool,
     /// Focused button id, for keyboard navigation.
     pub focused_button: Option<u8>,
+    /// Navigation may save the outgoing Realms settings tab before its continuation.
+    pending_action: Option<Action>,
     /// CreateWorldScreen's Experiments screen, over Create New World.
     experiments: RefCell<Option<experiments::ExperimentsScreen>>,
     /// ConfirmExperimentalFeaturesScreen, over Create New World.
@@ -804,6 +806,7 @@ impl Title {
             rules: RefCell::new(None),
             onboarding_finished: false,
             focused_button: None,
+            pending_action: None,
             experiments: RefCell::new(None),
             confirm_experiments: RefCell::new(None),
             preparing: false,
@@ -1164,7 +1167,12 @@ impl Title {
             return screen.drag(cursor.1, size);
         }
         if let Mode::Realms(state) = &mut self.mode {
-            if !state.drag_configuration(cursor, size) {
+            if !state.region_drag(cursor, size)
+                && !state.world_drag(cursor, size)
+                && !state.player_drag(cursor, size)
+                && !state.reset_drag(cursor.0, cursor.1, size)
+                && !state.drag_configuration(cursor, size)
+            {
                 state.drag_scrollbar(cursor.1, size.1);
             }
             return;
@@ -1195,6 +1203,10 @@ impl Title {
         if let Mode::Realms(state) = &mut self.mode {
             state.release_scrollbar();
             state.release_configuration();
+            state.region_release();
+            state.world_release();
+            state.player_release();
+            state.reset_release();
         }
         if let Mode::CreateFlat { flat, .. } = &mut self.mode {
             flat::release(flat);
@@ -3209,7 +3221,8 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 && cursor.1 < b.y + height;
             crate::widgets::narratable(|| self.button_narration(&b).hovered(inside));
             crate::widgets::widget_cursor(inside, b.enabled);
-            let is_focused = self.focused_button == Some(b.id);
+            let is_focused = self.focused_button == Some(b.id)
+                && !matches!(&self.mode, Mode::Realms(state) if state.focus_needs_reset());
             let hover = b.enabled && (inside || is_focused);
             if let Mode::Realms(state) = &self.mode
                 && state.draw_button(atlas, batch, &b, hover)
@@ -3371,6 +3384,19 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
         changed
     }
+    fn sync_realms_focus(&mut self) {
+        if let Mode::Realms(state) = &self.mode
+            && state.take_focus_reset()
+        {
+            self.focused_button = None;
+        }
+    }
+
+    /// Runtime owners dispatch this after keyboard/controller navigation, just as a click action.
+    pub fn take_pending_action(&mut self) -> Option<Action> {
+        self.pending_action.take()
+    }
+
     /// `TabNavigationBar.keyPressed`: with Ctrl held, a digit picks a tab and
     /// Tab steps to the next one, or to the previous with Shift. `None` for a
     /// key the bar leaves alone, so a digit still reaches the field; otherwise
@@ -3381,6 +3407,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         ctrl: bool,
         shift: bool,
     ) -> Option<bool> {
+        self.sync_realms_focus();
         // The rules and the experiments take the keys, and so does the read
         // that prepares the world.
         if !ctrl
@@ -3390,6 +3417,18 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             || self.confirm_experiments.get_mut().is_some()
         {
             return None;
+        }
+        if let Mode::Realms(state) = &mut self.mode {
+            if self.pending_action.is_some() {
+                return Some(false);
+            }
+            let (action, sound) =
+                state.configuration_tab_key(key, shift, &mut self.focused_button)?;
+            state.take_focus_reset();
+            if !matches!(action, Action::None) {
+                self.pending_action = Some(action);
+            }
+            return Some(sound);
         }
         let Mode::Create { options, .. } = &self.mode else {
             return None;
@@ -3421,9 +3460,25 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         true
     }
 
+    /// CycleButton's right click cycles backwards, with the same focus and sound as a left press.
+    pub fn realms_right_click(&mut self, x: f32, y: f32, size: (f32, f32)) -> bool {
+        self.sync_realms_focus();
+        let Mode::Realms(state) = &mut self.mode else {
+            return false;
+        };
+        let hit = state.pointer_hit(x, y, size);
+        if hit.is_some() && state.world_reverse_cycle(x, y, size) {
+            self.focused_button = hit;
+            state.blur();
+            return true;
+        }
+        false
+    }
+
     /// The action and whether to play `AbstractWidget.playButtonClickSound`.
     /// Navigation buttons can return `Action::None` while still sounding.
     pub fn click(&mut self, x: f32, y: f32, size: (f32, f32)) -> (Action, bool) {
+        self.sync_realms_focus();
         self.remember_direct_address();
         // The game rules take the press in `press_rules`, which has the atlas.
         if self.rules.get_mut().is_some()
@@ -3461,17 +3516,27 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 return (Action::Credits, true);
             }
         }
-        let hit = self
-            .buttons(w, h)
-            .into_iter()
-            .find(|b| {
-                b.enabled
-                    && x >= b.x
-                    && x < b.x + b.w
-                    && y >= b.y
-                    && y < b.y + self.button_height(b)
-            })
-            .map(|b| b.id);
+        let hit = if let Mode::Realms(state) = &self.mode {
+            state.pointer_hit(x, y, (w, h))
+        } else {
+            self.buttons(w, h)
+                .into_iter()
+                .find(|b| {
+                    b.enabled
+                        && x >= b.x
+                        && x < b.x + b.w
+                        && y >= b.y
+                        && y < b.y + self.button_height(b)
+                })
+                .map(|b| b.id)
+        };
+        if hit.is_none()
+            && let Mode::Realms(state) = &mut self.mode
+            && state.page == realms::Page::Region
+        {
+            self.focused_button = None;
+            return (Action::None, state.region_press(x, y, (w, h)));
+        }
         if hit.is_some() {
             self.focused_button = hit;
         } else if matches!(
@@ -3509,11 +3574,16 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             (Mode::Main, Some(2)) => Action::Quit,
             (Mode::Main, Some(0)) => self.open_realms(),
             (Mode::Realms(state), hit) => {
+                if hit.is_some() {
+                    state.player_button_focus(hit);
+                }
+                let page = state.page.clone();
                 let (action, exit) = state.press(hit, x, y, (w, h));
+                let changed_page = page != state.page;
                 if exit {
                     self.mode = Mode::Main;
                 }
-                if hit.is_none() {
+                if hit.is_none() || changed_page {
                     self.focused_button = None;
                 }
                 action
@@ -4052,6 +4122,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     /// `confirm_key` with actual viewport size for button geometry lookup.
     /// Returns the triggered action and whether a UI button click sound should play.
     pub fn confirm_key_size(&mut self, size: (f32, f32)) -> (Action, bool) {
+        self.sync_realms_focus();
         self.remember_direct_address();
         if self.rules.get_mut().is_some() {
             return (Action::None, false);
@@ -4065,17 +4136,24 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             let sound = matches!(action, Action::Play { .. });
             return (action, sound);
         }
-        if self.focused_button.is_none()
-            && matches!(&self.mode, Mode::Realms(state) if state.page == realms::Page::List && state.selected.is_some())
-        {
-            if let Some(button) = self
-                .buttons(size.0, size.1)
-                .into_iter()
-                .find(|b| b.id == 13 && b.enabled)
+        if let Mode::Realms(state) = &mut self.mode {
+            if state.configuration_activate(self.focused_button)
+                || state.player_activate(self.focused_button)
             {
-                return (self.click_action(button.x, button.y, size, Some(13)), true);
+                return (Action::None, false);
             }
-            return (Action::None, false);
+            if let Some(action) = state.world_confirm(self.focused_button, size, false) {
+                self.sync_realms_focus();
+                return (action, false);
+            }
+            if self.focused_button.is_none() {
+                if state.page == realms::Page::Region {
+                    return (Action::None, state.region_activate());
+                }
+                if let Some(result) = state.main_activate().or_else(|| state.reset_activate()) {
+                    return result;
+                }
+            }
         }
         if let Some(id) = self.focused_button {
             let (w, h) = size;
@@ -4101,6 +4179,14 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             _ => (Action::None, false),
         }
     }
+    /// Space selects list entries and buttons; a focused text box still receives a space.
+    pub fn space_selects(&mut self) -> bool {
+        self.sync_realms_focus();
+        self.list_focused()
+            || self.focused_button.is_some()
+            || (matches!(self.mode, Mode::Realms(_)) && !self.has_caret_field())
+    }
+
     /// The world list has the keyboard: no search box focus.
     pub fn list_focused(&self) -> bool {
         matches!(self.mode, Mode::Select { .. }) && !self.search_focused
@@ -4123,6 +4209,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     }
     /// Tab navigation through widgets and fields in either forward or reverse order.
     pub fn tab_dir(&mut self, reverse: bool, size: (f32, f32)) {
+        self.sync_realms_focus();
         if self.rules.get_mut().is_some() {
             return;
         }
@@ -4133,7 +4220,11 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 .filter(|b| b.enabled)
                 .map(|b| b.id)
                 .collect();
-            if let Mode::Realms(state) = &mut self.mode {
+            if let Mode::Realms(state) = &mut self.mode
+                && !state.world_tab(reverse, size, &mut self.focused_button)
+                && !state.reset_tab(reverse, size, &mut self.focused_button)
+                && !state.configuration_tab_focus(reverse, size, &mut self.focused_button)
+            {
                 state.tab(reverse, &enabled, &mut self.focused_button);
             }
             return;
@@ -4283,14 +4374,46 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     /// 2D spatial arrow key navigation across enabled buttons.
     pub fn arrow_key(&mut self, key: winit::keyboard::KeyCode, size: (f32, f32), shift: bool) {
         use winit::keyboard::KeyCode;
+        self.sync_realms_focus();
         if self.rules.get_mut().is_some() {
             return;
         }
-        if self.has_caret_field() {
+        if let Mode::Realms(state) = &mut self.mode {
+            if self.pending_action.is_some() {
+                return;
+            }
+            if let Some(action) = state.configuration_key(key, size, &mut self.focused_button) {
+                state.take_focus_reset();
+                if !matches!(action, Action::None) {
+                    self.pending_action = Some(action);
+                }
+                return;
+            }
+            if state.region_arrow(key, size, &mut self.focused_button)
+                || state.world_key(key, size, &mut self.focused_button)
+                || state.player_key(key, &mut self.focused_button, size)
+            {
+                return;
+            }
+        }
+        let caret = self.has_caret_field();
+        if caret
+            && (!matches!(self.mode, Mode::Realms(_))
+                || !matches!(key, KeyCode::ArrowUp | KeyCode::ArrowDown))
+        {
             return;
         }
         if self.focused_button.is_none()
+            && !caret
             && let Mode::Realms(state) = &mut self.mode
+            && matches!(
+                state.page,
+                realms::Page::List
+                    | realms::Page::Pdp
+                    | realms::Page::Invites
+                    | realms::Page::Templates
+                    | realms::Page::Upload
+            )
             && matches!(key, KeyCode::ArrowUp | KeyCode::ArrowDown)
         {
             state.arrow(key == KeyCode::ArrowUp, size);
@@ -4330,10 +4453,12 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
         let Some(cur_id) = self.focused_button else {
             self.focused_button = Some(enabled[0].id);
+            self.realms_button_focus();
             return;
         };
         let Some(cur_b) = enabled.iter().find(|b| b.id == cur_id) else {
             self.focused_button = Some(enabled[0].id);
+            self.realms_button_focus();
             return;
         };
         let (cx, cy) = (cur_b.x + cur_b.w / 2.0, cur_b.y + 10.0);
@@ -4365,6 +4490,16 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
         if let Some((next_id, _)) = best {
             self.focused_button = Some(next_id);
+            self.realms_button_focus();
+        }
+    }
+    fn realms_button_focus(&mut self) {
+        if let Mode::Realms(state) = &mut self.mode {
+            state.blur();
+            state.player_button_focus(self.focused_button);
+            if let Some(id) = self.focused_button {
+                state.entry_focus(id);
+            }
         }
     }
     /// The keyboard's focus landed on the world row at `point`

@@ -52,10 +52,13 @@ struct PackDownload {
 struct CreateTarget {
     id: i64,
     slot: i32,
+    initialize: Option<(String, String)>,
     identity: Arc<auth::AuthSession>,
+    state_generation: u64,
 }
 struct Upload {
     identity: Arc<auth::AuthSession>,
+    state_generation: u64,
     control: TransferControl,
     result: Receiver<Result<(), String>>,
 }
@@ -150,7 +153,21 @@ impl RealmEntryState {
                     error(title, "mco.create.world.failed");
                     return None;
                 }
-                self.create_target = Some(CreateTarget { id, slot, identity });
+                let initialize = match super::realms::reset_initialize(&options) {
+                    Ok(initialize) => initialize,
+                    Err(_) => {
+                        error(title, "mco.create.world.failed");
+                        return None;
+                    }
+                };
+                let state_generation = title.realms_mut()?.request_generation;
+                self.create_target = Some(CreateTarget {
+                    id,
+                    slot,
+                    initialize,
+                    identity,
+                    state_generation,
+                });
                 let seed = options
                     .get("seed")
                     .and_then(Value::as_str)
@@ -218,9 +235,17 @@ impl RealmEntryState {
         };
         title.finish_realms_create();
         let creation_packs = options.pack_dir.clone().map(TemporaryWorld);
+        if !matches!(&title.mode, Mode::Realms(state)
+            if state.request_generation == target.state_generation)
+        {
+            return true;
+        }
         if !same_account(&target.identity) || !title.allows_multiplayer {
             error(title, "mco.error.invalid.session.message");
             return true;
+        }
+        if let Some(state) = title.realms_mut() {
+            state.reset_begin_upload(name.clone());
         }
         let (name, seed, creative, options, resources) = (
             name.clone(),
@@ -230,6 +255,7 @@ impl RealmEntryState {
             resources.to_path_buf(),
         );
         let identity = target.identity.clone();
+        let state_generation = target.state_generation;
         let control = TransferControl::default();
         let worker_control = control.clone();
         let (send, result) = mpsc::channel();
@@ -240,6 +266,11 @@ impl RealmEntryState {
                 // its callback accepts Create; ownership passes to this worker.
                 let _creation_packs = creation_packs;
                 let outcome = (|| {
+                    if worker_control.cancel.load(Ordering::Acquire)
+                        || !same_account(&target.identity)
+                    {
+                        return Err("mco.upload.cancelled".into());
+                    }
                     let world = prepare_world(&resources, &name, seed, creative, &options)?;
                     if worker_control.cancel.load(Ordering::Acquire)
                         || !same_account(&target.identity)
@@ -260,6 +291,15 @@ impl RealmEntryState {
                     {
                         return Err("mco.upload.cancelled".into());
                     }
+                    super::realms::prepare_target(
+                        &client,
+                        &target.identity,
+                        target.id,
+                        target.slot,
+                        target.initialize.as_ref(),
+                        &worker_control,
+                    )
+                    .map_err(|e| e.to_string())?;
                     let slot_options = new_slot_options(target.slot, &name, creative, &options);
                     realms_transfer::upload_world_with_options_control(
                         &client,
@@ -274,14 +314,19 @@ impl RealmEntryState {
                 let _ = send.send(outcome);
             });
         if started.is_err() {
-            error(title, "mco.create.world.failed");
+            if let Some(state) = title.realms_mut() {
+                state.reset_upload_finished(Some(lang::get("mco.create.world.failed")));
+            }
         } else {
             self.upload = Some(Upload {
                 identity,
+                state_generation,
                 control,
                 result,
             });
-            loading(title, "mco.upload.preparing");
+            if let Some(state) = title.realms_mut() {
+                state.reset_upload_progress(0, 0, false);
+            }
         }
         true
     }
@@ -312,10 +357,13 @@ impl RealmEntryState {
             .download
             .as_ref()
             .is_some_and(|download| !active || !download.offer.join.valid())
-            || self
-                .upload
-                .as_ref()
-                .is_some_and(|upload| !active || !same_account(&upload.identity))
+            || self.upload.as_ref().is_some_and(|upload| {
+                !active
+                    || !same_account(&upload.identity)
+                    || !matches!(&title.mode, Mode::Realms(state)
+                            if state.page == Page::Upload
+                                && state.request_generation == upload.state_generation)
+            })
         {
             self.cancel();
             return None;
@@ -359,26 +407,10 @@ impl RealmEntryState {
         }
         if let Some(upload) = &self.upload {
             let stage = upload.control.stage.load(Ordering::Acquire);
-            let key = match stage {
-                1 => "mco.upload.preparing",
-                2 => "mco.upload.verifying",
-                _ => "mco.upload.preparing",
-            };
             if let Some(state) = title.realms_mut() {
                 let total = upload.control.bytes_total.load(Ordering::Relaxed);
                 let done = upload.control.bytes_done.load(Ordering::Relaxed);
-                state.status = Some(if total == 0 {
-                    lang::get(key)
-                } else {
-                    format!(
-                        "{} · {}%",
-                        lang::get(key),
-                        done.saturating_mul(100)
-                            .checked_div(total)
-                            .unwrap_or(0)
-                            .min(100)
-                    )
-                });
+                state.reset_upload_progress(done, total, stage == 2);
             }
             let result = match upload.result.try_recv() {
                 Ok(result) => Some(result),
@@ -388,11 +420,9 @@ impl RealmEntryState {
             if let Some(result) = result {
                 self.upload = None;
                 if let Some(state) = title.realms_mut() {
-                    state.return_page(Page::Slots);
-                    match result {
-                        Ok(()) => state.set_status(lang::get("mco.upload.done")),
-                        Err(_) => state.set_error(lang::get("mco.create.world.failed")),
-                    }
+                    state.reset_upload_finished(
+                        result.err().map(|_| lang::get("mco.create.world.failed")),
+                    );
                 }
             }
         }

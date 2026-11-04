@@ -271,6 +271,7 @@ mod ram_limit;
 mod random_textures;
 mod realms;
 mod realms_entry;
+mod realms_ui;
 mod recipe_book;
 mod remote;
 mod remote_camera;
@@ -2651,6 +2652,7 @@ struct Game<'a> {
     online: online_options::OnlineState,
     realms: realms::RealmsRuntime,
     realms_entry: realms_entry::RealmEntryState,
+    realms_ui: realms_ui::RealmsUi,
     /// Armor slots: head, chest, legs, feet.
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
@@ -8315,6 +8317,27 @@ impl Game<'_> {
         if self.screen != Screen::Options && self.ui.options.calibration_fullscreen.is_some() {
             self.show_calibration(h);
         }
+        let draw_title = self.screen != Screen::Win
+            && (self.screen != Screen::Options
+                || self.ui.options.page() == horizon_client::options_ui::Page::Friends);
+        if draw_title
+            && self
+                .title
+                .as_ref()
+                .is_some_and(|title| matches!(title.mode, horizon_client::title::Mode::Realms(_)))
+        {
+            self.flush_skin_slots();
+        }
+        self.realms_ui.prepare(
+            if draw_title {
+                self.title.as_mut()
+            } else {
+                None
+            },
+            &mut self.gui.atlas,
+            &mut batch,
+            &mut self.skin_profiles.borrow_mut(),
+        );
         if self.screen == Screen::Win {
             self.draw_win_screen(&mut batch);
             // The early return skips the match below: the hook still sees the
@@ -17376,6 +17399,10 @@ impl Game<'_> {
         } = &event
             && key_event.state == ElementState::Pressed
             && let PhysicalKey::Code(key) = key_event.physical_key
+            && !(self.screen != Screen::Options
+                && self.title.as_ref().is_some_and(|title| {
+                    matches!(title.mode, horizon_client::title::Mode::Realms(_))
+                }))
             && self.key_focus_key(event_loop, key)
         {
             // The keyboard's focus took the key; its characters are a separate
@@ -17790,6 +17817,18 @@ impl Game<'_> {
                         title.select_world_at(self.cursor.0, self.cursor.1, (b.width, b.height));
                     }
                 }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Right,
+                    ..
+                } if self.title.is_some() => {
+                    let viewport = self.gui_size();
+                    if self.title.as_mut().is_some_and(|title| {
+                        title.realms_right_click(self.cursor.0, self.cursor.1, viewport)
+                    }) {
+                        self.audio.play_button_click();
+                    }
+                }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
                 WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
@@ -18155,6 +18194,11 @@ impl Game<'_> {
                                 .title
                                 .as_mut()
                                 .and_then(|t| t.tab_bar_key(key, ctrl, shift));
+                            let pending = self.title.as_mut().and_then(Title::take_pending_action);
+                            if let Some(action) = pending {
+                                self.save_title_options();
+                                self.title_action(event_loop, action)?;
+                            }
                             if let Some(sound) = tab {
                                 if sound {
                                     self.audio.play_button_click();
@@ -18168,9 +18212,7 @@ impl Game<'_> {
                             PhysicalKey::Code(
                                 code @ (KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space),
                             ) if code != KeyCode::Space
-                                || self.title.as_ref().is_some_and(|t| {
-                                    t.list_focused() || t.focused_button.is_some()
-                                }) =>
+                                || self.title.as_mut().is_some_and(Title::space_selects) =>
                             {
                                 let (action, sound) = self
                                     .title
@@ -18205,6 +18247,12 @@ impl Game<'_> {
                                 let shift = self.has_shift_down();
                                 if let Some(t) = self.title.as_mut() {
                                     t.arrow_key(key, (w, h), shift);
+                                }
+                                if let Some(action) =
+                                    self.title.as_mut().and_then(Title::take_pending_action)
+                                {
+                                    self.save_title_options();
+                                    self.title_action(event_loop, action)?;
                                 }
                             }
                             PhysicalKey::Code(KeyCode::Backspace) => self.title_edit(None, true),
@@ -18876,6 +18924,7 @@ impl<'a> Game<'a> {
             online: Default::default(),
             realms: Default::default(),
             realms_entry: Default::default(),
+            realms_ui: Default::default(),
             armor: [None, None, None, None],
             offhand: None,
             hotbar_pop: [0; 10],

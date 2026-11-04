@@ -1,6 +1,9 @@
 //! Entry, main list and product page layouts from Minecraft 26.3 Realms screens.
 use super::*;
 
+const NOTIFICATION_LINK: u8 = 19;
+const NOTIFICATION_DISMISS: u8 = 20;
+
 impl State {
     pub(super) fn draw_join(
         &self,
@@ -192,6 +195,27 @@ impl State {
             ));
         }
         controls.push(control("gui.back", true, Event::Back));
+        // Main's header and footer remain 10..=18 (Play is always 13).
+        if self.page == Page::List
+            && self.servers_loaded
+            && let Some(notification) = self.visit_notification()
+        {
+            controls.push(Control {
+                label: notification_button_label(notification),
+                enabled: !self.loading && valid_link(&text(notification, "url")),
+                event: Event::Link(text(notification, "url")),
+            });
+            if flag(notification, "dismissable") {
+                controls.push(control(
+                    "mco.notification.dismiss",
+                    !self.loading && !text(notification, "notificationUuid").is_empty(),
+                    Event::Request(RealmsAction::DismissNotification(text(
+                        notification,
+                        "notificationUuid",
+                    ))),
+                ));
+            }
+        }
         Some(controls)
     }
 
@@ -242,6 +266,18 @@ impl State {
                             }
                             _ => (c - 100.0, h - 52.0, 200.0, None),
                         }
+                    } else if self.page == Page::List && i >= 9 {
+                        let y = 46.0 - self.pixel_scroll.get().floor();
+                        if i == 9 {
+                            (
+                                c - 75.0,
+                                y + self.notification_height.get() - 25.0,
+                                150.0,
+                                None,
+                            )
+                        } else {
+                            (c + 129.0, y + 9.0, 14.0, None)
+                        }
                     } else if i == 0 {
                         (c - 154.0, 12.0, self.join_button_width.get(), None)
                     } else if i == 1 || i == 2 {
@@ -279,6 +315,42 @@ impl State {
         )
     }
 
+    pub(super) fn entry_button_height(&self, button: &Button) -> Option<f32> {
+        (self.page == Page::List && button.id == NOTIFICATION_DISMISS).then_some(14.0)
+    }
+
+    pub(super) fn entry_hit(
+        &self,
+        x: f32,
+        y: f32,
+        size: (f32, f32),
+        hit: Option<u8>,
+    ) -> Option<u8> {
+        if self.page != Page::List {
+            return hit;
+        }
+        self.entry_buttons(size.0, size.1)?
+            .into_iter()
+            .find(|button| {
+                let height = self.entry_button_height(button).unwrap_or(20.0);
+                (button.x..button.x + button.w).contains(&x)
+                    && (button.y..button.y + height).contains(&y)
+                    && (button.id < NOTIFICATION_LINK
+                        || (44.0..self.list_bottom(size.1)).contains(&y))
+            })
+            .map(|button| button.id)
+    }
+
+    pub(in crate::title) fn entry_focus(&mut self, id: u8) {
+        self.list_focused.set(false);
+        if self.page == Page::List && matches!(id, NOTIFICATION_LINK | NOTIFICATION_DISMISS) {
+            self.notification_selected = true;
+            self.snapshot_selected = None;
+            self.selected = None;
+            self.pixel_scroll.set(0.0);
+        }
+    }
+
     /// Draw after the caller records focus/narration, in place of its ordinary button paint.
     pub(in crate::title) fn draw_button(
         &self,
@@ -292,6 +364,62 @@ impl State {
         }
         if !matches!(self.page, Page::List | Page::Pdp) {
             return false;
+        }
+        if self.page == Page::List && button.id >= NOTIFICATION_LINK {
+            let first = batch.vertices.len();
+            let highlighted = highlighted
+                || (button.id == NOTIFICATION_LINK
+                    && self.notification_selected
+                    && self.list_focused.get());
+            if button.id == NOTIFICATION_DISMISS {
+                batch.sprite_scaled(
+                    atlas,
+                    if highlighted && button.enabled {
+                        "gui/sprites/widget/cross_button_highlighted"
+                    } else {
+                        "gui/sprites/widget/cross_button"
+                    },
+                    button.x,
+                    button.y,
+                    14.0,
+                    14.0,
+                    u32::MAX,
+                );
+            } else {
+                crate::ui::nine_slice(
+                    batch,
+                    atlas,
+                    if !button.enabled {
+                        "gui/sprites/widget/button_disabled"
+                    } else if highlighted {
+                        "gui/sprites/widget/button_highlighted"
+                    } else {
+                        "gui/sprites/widget/button"
+                    },
+                    button.x,
+                    button.y,
+                    button.w,
+                    20.0,
+                    u32::MAX,
+                );
+                button.draw_label(
+                    batch,
+                    atlas,
+                    if button.enabled {
+                        u32::MAX
+                    } else {
+                        rgba(160, 160, 160, 255)
+                    },
+                );
+            }
+            batch.clip_since(
+                first,
+                0.0,
+                44.0,
+                batch.width,
+                self.list_bottom(batch.height),
+            );
+            return true;
         }
         let trial_id = if self.page == Page::List && self.main_has_list() {
             17
@@ -400,10 +528,76 @@ impl State {
         };
         if let Some(key) = key {
             crate::ui::tooltip(batch, atlas, &[Text::translate(key, &[])], cursor);
+        } else if self.draw_main_tooltip(atlas, batch, cursor) {
+            // Active-player and notification child tooltips take precedence.
         } else if let Some(message) = self.realm_status_tooltip(cursor, (batch.width, batch.height))
         {
             crate::ui::tooltip(batch, atlas, &[message], cursor);
         }
+    }
+
+    fn draw_main_tooltip(
+        &self,
+        atlas: &HudAtlas,
+        batch: &mut HudBatch,
+        cursor: (f32, f32),
+    ) -> bool {
+        if self.page != Page::List
+            || !self.servers_loaded
+            || !(44.0..self.list_bottom(batch.height)).contains(&cursor.1)
+        {
+            return false;
+        }
+        let left = (batch.width / 2.0).floor() - 150.0;
+        let local_y = cursor.1 - 46.0 + self.pixel_scroll.get().floor();
+        if local_y < self.notification_height.get() {
+            if self
+                .visit_notification()
+                .is_some_and(|n| flag(n, "dismissable"))
+                && (left + 279.0..left + 293.0).contains(&cursor.0)
+                && (9.0..23.0).contains(&local_y)
+            {
+                crate::ui::tooltip(
+                    batch,
+                    atlas,
+                    &[Text::translate("mco.notification.dismiss", &[])],
+                    cursor,
+                );
+                return true;
+            }
+            return false;
+        }
+        let row = ((local_y - self.notification_height.get()) / 36.0) as usize;
+        if row < self.snapshot_realms.len() {
+            if (left..left + 300.0).contains(&cursor.0) {
+                crate::ui::tooltip(
+                    batch,
+                    atlas,
+                    &[Text::translate("mco.snapshot.tooltip", &[])],
+                    cursor,
+                );
+                return true;
+            }
+            return false;
+        }
+        let Some(server) = self.servers.get(row - self.snapshot_realms.len()) else {
+            return false;
+        };
+        if text(server, "state") == "UNINITIALIZED" {
+            return false;
+        }
+        let players = self.online_profiles(server);
+        let y = 46.0 + self.notification_height.get() + row as f32 * 36.0
+            - self.pixel_scroll.get().floor();
+        let [x, y, width, height] = online_player_rect(left, y, players.len());
+        if !players.is_empty()
+            && (x..=x + width).contains(&cursor.0)
+            && (y..=y + height).contains(&cursor.1)
+        {
+            draw_online_tooltip(atlas, batch, &players, cursor);
+            return true;
+        }
+        false
     }
 
     pub(super) fn draw_entry(
@@ -692,6 +886,38 @@ impl State {
             .find(|n| text(n, "type") == "visitUrl")
     }
 
+    /// RealmsMainScreen.refreshEntries marks only the first VisitUrl entry seen.
+    /// The runtime owns the request, retry and successful handled-ID set.
+    pub fn visible_unseen_notification_ids(&self) -> Vec<String> {
+        if self.page != Page::List || !self.servers_loaded {
+            return Vec::new();
+        }
+        self.visit_notification()
+            .filter(|notification| !flag(notification, "seen"))
+            .map(|notification| text(notification, "notificationUuid"))
+            .filter(|id| !id.is_empty())
+            .into_iter()
+            .collect()
+    }
+
+    fn online_profiles(&self, server: &Value) -> Vec<(u128, String)> {
+        let mut players = online_player_profiles(
+            &self.online_players,
+            number(server, "id"),
+            self.profile_uuid.as_deref(),
+        );
+        for (id, name) in &mut players {
+            if let Some(resolved) = self.online_player_names.get(&format!("{id:032x}")) {
+                name.clone_from(resolved);
+            } else if name.is_empty()
+                && crate::auth::parse_uuid(&text(server, "ownerUUID")) == Some(*id)
+            {
+                *name = text(server, "owner");
+            }
+        }
+        players
+    }
+
     fn draw_notification(&self, atlas: &HudAtlas, batch: &mut HudBatch, left: f32, y: f32) {
         let Some(notification) = self.visit_notification() else {
             return;
@@ -711,43 +937,8 @@ impl State {
             let x = left + 150.0 - (atlas.font.width_text(line) / 2.0).floor();
             batch.text_styled(atlas, line, x, y + 9.0 + i as f32 * 9.0, u32::MAX, true);
         }
-        let label = notification
-            .get("buttonText")
-            .map(|v| notification_text(&json!({"message":v})))
-            .unwrap_or_else(|| tr("mco.notification.visitUrl.buttonText.default"));
-        let button = Button {
-            x: left + 75.0,
-            y: y + 13.0 + lines.len() as f32 * 9.0,
-            w: 150.0,
-            label,
-            enabled: true,
-            id: 0,
-            icon: None,
-            trailing: None,
-        };
-        crate::widgets::record(&button.label, [button.x, button.y, button.w, 20.0], true);
-        crate::ui::nine_slice(
-            batch,
-            atlas,
-            "gui/sprites/widget/button",
-            button.x,
-            button.y,
-            button.w,
-            20.0,
-            u32::MAX,
-        );
-        button.draw_label(batch, atlas, u32::MAX);
-        if flag(notification, "dismissable") {
-            batch.sprite_scaled(
-                atlas,
-                "gui/sprites/widget/cross_button",
-                left + 279.0,
-                y + 9.0,
-                14.0,
-                14.0,
-                u32::MAX,
-            );
-        }
+        // The link and cross are normal controls, drawn by draw_button so that
+        // pointer, Tab, selection-key activation and narration share their IDs.
     }
 
     fn draw_server_list(
@@ -767,13 +958,59 @@ impl State {
         self.prepare_list(
             atlas,
             batch,
-            notification_height + self.servers.len() as f32 * 36.0 + 4.0,
+            notification_height
+                + (self.snapshot_realms.len() + self.servers.len()) as f32 * 36.0
+                + 4.0,
         );
         let first = batch.vertices.len();
         let left = (batch.width / 2.0).floor() - 150.0;
+        if self.notification_selected && notification_height > 0.0 {
+            selection(
+                atlas,
+                batch,
+                left,
+                46.0 - self.pixel_scroll.get().floor(),
+                300.0,
+                notification_height,
+                self.list_focused.get(),
+            );
+        }
         self.draw_notification(atlas, batch, left, 46.0 - self.pixel_scroll.get().floor());
-        for (i, server) in self.servers.iter().enumerate() {
+        for (i, server) in self.snapshot_realms.iter().enumerate() {
             let y = 46.0 + notification_height + i as f32 * 36.0 - self.pixel_scroll.get().floor();
+            if self.snapshot_selected == Some(i) {
+                selection(atlas, batch, left, y, 300.0, 36.0, self.list_focused.get());
+            }
+            batch.sprite_scaled(
+                atlas,
+                "gui/sprites/icon/new_realm",
+                left - 3.0,
+                y + 8.0,
+                40.0,
+                20.0,
+                u32::MAX,
+            );
+            batch.text(
+                atlas,
+                &tr("mco.snapshot.start"),
+                left + 40.0,
+                y + 9.0,
+                rgba(127, 255, 127, 255),
+                true,
+            );
+            clamped(
+                atlas,
+                batch,
+                &translated("mco.snapshot.description", &[text(server, "name")]),
+                left + 40.0,
+                y + 19.0,
+                left + 298.0,
+                rgba(128, 128, 128, 255),
+            );
+        }
+        for (i, server) in self.servers.iter().enumerate() {
+            let y = 46.0 + notification_height + (self.snapshot_realms.len() + i) as f32 * 36.0
+                - self.pixel_scroll.get().floor();
             if self.selected == Some(i) {
                 selection(atlas, batch, left, y, 300.0, 36.0, self.list_focused.get());
             }
@@ -924,6 +1161,18 @@ impl State {
                     true,
                 );
             }
+            let players = self.online_profiles(server);
+            let [players_x, players_y, _, _] = online_player_rect(left, y, players.len());
+            for (index, (id, _)) in players.iter().enumerate() {
+                draw_online_face(
+                    atlas,
+                    batch,
+                    *id,
+                    players_x + index as f32 * 12.0,
+                    players_y,
+                    9.0,
+                );
+            }
         }
         batch.clip_since(
             first,
@@ -968,32 +1217,20 @@ impl State {
             });
         } else {
             if local_y < self.notification_height.get() {
-                if let Some(notification) = self.visit_notification().cloned() {
-                    if flag(&notification, "dismissable")
-                        && x >= c + 129.0
-                        && (9.0..23.0).contains(&local_y)
-                    {
-                        return (
-                            self.dispatch(RealmsAction::DismissNotification(text(
-                                &notification,
-                                "notificationUuid",
-                            ))),
-                            false,
-                        );
-                    }
-                    let button_y = self.notification_height.get() - 25.0;
-                    if (c - 75.0..c + 75.0).contains(&x)
-                        && (button_y..button_y + 20.0).contains(&local_y)
-                    {
-                        let url = text(&notification, "url");
-                        if valid_link(&url) {
-                            self.ask_action(Action::OpenUri(url.clone()), "chat.link.confirm", url);
-                        }
-                    }
-                }
+                self.notification_selected = true;
+                self.snapshot_selected = None;
+                self.selected = None;
                 return (Action::None, false);
             }
-            let i = ((local_y - self.notification_height.get()) / 36.0) as usize;
+            self.notification_selected = false;
+            let row = ((local_y - self.notification_height.get()) / 36.0) as usize;
+            if row < self.snapshot_realms.len() {
+                self.snapshot_selected = Some(row);
+                self.selected = None;
+                return self.main_activate().unwrap_or((Action::None, false));
+            }
+            self.snapshot_selected = None;
+            let i = row - self.snapshot_realms.len();
             if let Some(server) = self.servers.get(i).cloned() {
                 let now = std::time::Instant::now();
                 let double = self.last_row_click.is_some_and(|(previous, time)| {
@@ -1001,18 +1238,55 @@ impl State {
                 });
                 self.last_row_click = Some((i, now));
                 self.selected = Some(i);
-                if text(&server, "state") == "UNINITIALIZED" {
-                    self.server = server;
-                    self.enter(Page::Initialize);
-                } else if double && self.playable(&server) {
-                    return (
-                        self.dispatch(RealmsAction::Join(number(&server, "id"))),
-                        false,
-                    );
+                if text(&server, "state") == "UNINITIALIZED" || double {
+                    return self.main_activate().unwrap_or((Action::None, false));
                 }
             }
         }
         (Action::None, false)
+    }
+
+    /// Selection-key activation of Main's list, independently of footer Play (13).
+    pub(in crate::title) fn main_activate(&mut self) -> Option<(Action, bool)> {
+        if self.page != Page::List {
+            return None;
+        }
+        if !self.servers_loaded || self.loading {
+            return Some((Action::None, false));
+        }
+        if self.notification_selected {
+            if let Some(notification) = self.visit_notification() {
+                let url = text(notification, "url");
+                if valid_link(&url) {
+                    self.ask_action(Action::OpenUri(url.clone()), "chat.link.confirm", url);
+                    return Some((Action::None, true));
+                }
+            }
+            return Some((Action::None, false));
+        }
+        if let Some(parent) = self
+            .snapshot_selected
+            .and_then(|i| self.snapshot_realms.get(i))
+        {
+            self.snapshot_parent = Some(number(parent, "id"));
+            self.enter(Page::CreateSnapshot);
+            return Some((Action::None, true));
+        }
+        let Some(server) = self.selected.and_then(|i| self.servers.get(i)).cloned() else {
+            return Some((Action::None, false));
+        };
+        if text(&server, "state") == "UNINITIALIZED" {
+            self.server = server;
+            self.enter(Page::Initialize);
+            return Some((Action::None, true));
+        }
+        if self.playable(&server) {
+            return Some((
+                self.dispatch(RealmsAction::Join(number(&server, "id"))),
+                true,
+            ));
+        }
+        Some((Action::None, false))
     }
 
     pub(in crate::title) fn drag_scrollbar(&mut self, y: f32, height: f32) -> bool {
@@ -1044,34 +1318,178 @@ impl State {
 
     pub(super) fn arrow_entry(&mut self, up: bool, size: (f32, f32)) {
         self.list_focused.set(true);
+        let notification =
+            usize::from(self.page == Page::List && self.visit_notification().is_some());
+        let snapshots = if self.page == Page::List {
+            self.snapshot_realms.len()
+        } else {
+            0
+        };
         let heights = if self.page == Page::Pdp {
             self.pdp_heights.get().to_vec()
         } else {
-            vec![36.0; self.servers.len()]
+            let mut heights = Vec::new();
+            if notification != 0 {
+                heights.push(self.notification_height.get());
+            }
+            heights.extend(std::iter::repeat_n(36.0, snapshots + self.servers.len()));
+            heights
         };
         if heights.is_empty() {
             return;
         }
-        let index = self.selected.map_or(0, |i| {
-            if up {
-                i.saturating_sub(1)
-            } else {
-                (i + 1).min(heights.len() - 1)
-            }
-        });
-        self.selected = Some(index);
-        let top = heights[..index].iter().sum::<f32>()
-            + if self.page == Page::List {
-                self.notification_height.get()
-            } else {
-                0.0
-            };
+        let current = if self.notification_selected && notification != 0 {
+            Some(0)
+        } else if let Some(i) = self.snapshot_selected.filter(|i| *i < snapshots) {
+            Some(notification + i)
+        } else {
+            self.selected.map(|i| notification + snapshots + i)
+        };
+        let index = current
+            .map_or(0, |i| if up { i.saturating_sub(1) } else { i + 1 })
+            .min(heights.len() - 1);
+        self.notification_selected = notification != 0 && index == 0;
+        self.snapshot_selected = (index >= notification && index < notification + snapshots)
+            .then(|| index - notification);
+        self.selected =
+            (index >= notification + snapshots).then(|| index - notification - snapshots);
+        let top = heights[..index].iter().sum::<f32>();
         let bottom = top + heights[index];
         let visible = self.list_bottom(size.1) - 44.0;
         if top < self.pixel_scroll.get() {
             self.pixel_scroll.set(top);
         } else if bottom > self.pixel_scroll.get() + visible {
             self.pixel_scroll.set((bottom - visible).max(0.0));
+        }
+    }
+}
+
+fn notification_button_label(notification: &Value) -> String {
+    notification
+        .get("buttonText")
+        .map(|value| notification_text(&json!({"message": value})))
+        .unwrap_or_else(|| tr("mco.notification.visitUrl.buttonText.default"))
+}
+
+/// RealmsServerPlayerLists: playerList is JSON encoded inside a string, not
+/// the Realm's invited-player list. Preserve service order and exclude self.
+fn online_player_profiles(
+    value: &Value,
+    server_id: i64,
+    local: Option<&str>,
+) -> Vec<(u128, String)> {
+    let Some(list) = value
+        .get("lists")
+        .and_then(Value::as_array)
+        .and_then(|lists| {
+            lists
+                .iter()
+                .find(|list| number(list, "serverId") == server_id)
+        })
+        .and_then(|list| list.get("playerList"))
+        .and_then(Value::as_str)
+        .and_then(|list| serde_json::from_str::<Value>(list).ok())
+    else {
+        return Vec::new();
+    };
+    let local = local.and_then(crate::auth::parse_uuid);
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|player| {
+            let id = player
+                .get("playerId")
+                .and_then(Value::as_str)
+                .and_then(crate::auth::parse_uuid)?;
+            (Some(id) != local).then(|| (id, text(player, "name")))
+        })
+        .collect()
+}
+
+fn online_player_rect(left: f32, row_y: f32, count: usize) -> [f32; 4] {
+    let width = if count == 0 {
+        0.0
+    } else {
+        count as f32 * 12.0 - 3.0
+    };
+    // Entry content: x+2, y+2, width 296, height 32.
+    [left + 298.0 - 21.0 - width, row_y + 23.0, width, 9.0]
+}
+
+fn draw_online_face(atlas: &HudAtlas, batch: &mut HudBatch, id: u128, x: f32, y: f32, size: f32) {
+    // UUID alone makes this an unresolved dynamic profile; id+name would skip
+    // the existing Resolver and never retrieve the remote skin properties.
+    batch
+        .inline_profiles
+        .push(json!({"id": format!("{id:032x}")}));
+    let skin = atlas
+        .object_skins
+        .get(&format!("id:{id:032x}"))
+        .filter(|skin| atlas.sprites.contains_key(*skin))
+        .map(String::as_str)
+        .unwrap_or_else(|| crate::tab_list::default_skin(id));
+    if let Some(r) = atlas.sprites.get(skin).copied() {
+        for u in [8.0, 40.0] {
+            let mut face = r;
+            face.u0 = r.u0 + (r.u1 - r.u0) * u / 64.0;
+            face.u1 = r.u0 + (r.u1 - r.u0) * (u + 8.0) / 64.0;
+            face.v0 = r.v0 + (r.v1 - r.v0) * 8.0 / 64.0;
+            face.v1 = r.v0 + (r.v1 - r.v0) * 16.0 / 64.0;
+            batch.rect_uv(x, y, size, size, face, u32::MAX);
+        }
+    }
+}
+
+fn draw_online_tooltip(
+    atlas: &HudAtlas,
+    batch: &mut HudBatch,
+    players: &[(u128, String)],
+    cursor: (f32, f32),
+) {
+    let header = Text::translate("mco.onlinePlayers", &[]);
+    // ClientActivePlayersTooltip: 10px faces, 12px rows, name at x+14/y+2.
+    let width = players
+        .iter()
+        .map(|(_, name)| HudBatch::text_width(atlas, name) + 16.0)
+        .fold(atlas.font.width_text(&header), f32::max);
+    let height = 12.0 + players.len() as f32 * 12.0 + 2.0;
+    let mut x = cursor.0 + 12.0;
+    let mut y = cursor.1 - 12.0;
+    if x + width > batch.width {
+        x = (cursor.0 - 24.0 - width).max(4.0);
+    }
+    if y + height + 3.0 > batch.height {
+        y = batch.height - height - 3.0;
+    }
+    let mut narration = vec![header.clone()];
+    narration.extend(
+        players
+            .iter()
+            .filter(|(_, name)| !name.is_empty())
+            .map(|(_, name)| Text::literal(name)),
+    );
+    crate::widgets::frame_tooltip(&narration);
+    for sprite in [
+        "gui/sprites/tooltip/background",
+        "gui/sprites/tooltip/frame",
+    ] {
+        crate::ui::nine_slice(
+            batch,
+            atlas,
+            sprite,
+            x - 12.0,
+            y - 12.0,
+            width + 24.0,
+            height + 24.0,
+            u32::MAX,
+        );
+    }
+    batch.text_styled(atlas, &header, x, y, u32::MAX, true);
+    for (index, (id, name)) in players.iter().enumerate() {
+        let row_y = y + 14.0 + index as f32 * 12.0;
+        draw_online_face(atlas, batch, *id, x + 2.0, row_y, 10.0);
+        if !name.is_empty() {
+            batch.text(atlas, name, x + 14.0, row_y + 2.0, u32::MAX, true);
         }
     }
 }

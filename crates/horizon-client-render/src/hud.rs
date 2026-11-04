@@ -1089,7 +1089,7 @@ impl HudAtlas {
                         | "gui/title/background/panorama_2.png"
                         | "gui/title/background/panorama_3.png"
                 ))
-                && !s.starts_with("gui/presets/")
+                && (!s.starts_with("gui/presets/") || s == "gui/presets/isles.png")
         });
         // OptiFine random entity variants, under the names their scan gives them (those
         // outside `textures/` are `<ns>:optifine/random/...`).

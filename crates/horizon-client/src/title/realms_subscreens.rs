@@ -3,6 +3,12 @@ use super::*;
 
 impl State {
     pub(in crate::title) fn button_height(&self, button: &Button) -> f32 {
+        if let Some(height) = self
+            .entry_button_height(button)
+            .or_else(|| self.reset_button_height(button))
+        {
+            return height;
+        }
         if let Some(height) = self.configuration_button_height(button) {
             return height;
         }
@@ -107,7 +113,11 @@ impl State {
         button: &Button,
         highlighted: bool,
     ) -> bool {
-        if self.draw_configuration_button(atlas, batch, button, highlighted) {
+        if self.world_draw_button(atlas, batch, button, highlighted)
+            || self.player_draw_button(atlas, batch, button, highlighted)
+            || self.reset_draw_button(atlas, batch, button, highlighted)
+            || self.draw_configuration_button(atlas, batch, button, highlighted)
+        {
             return true;
         }
         if self.page != Page::Invites || button.id == 10 {
@@ -154,7 +164,9 @@ impl State {
         batch: &mut HudBatch,
         cursor: (f32, f32),
     ) -> bool {
-        if self.draw_configuration_tooltip(atlas, batch, cursor) {
+        if self.reset_draw_tooltip(atlas, batch, cursor)
+            || self.draw_configuration_tooltip(atlas, batch, cursor)
+        {
             return true;
         }
         if self.page != Page::Invites {
@@ -342,7 +354,9 @@ impl State {
             return None;
         }
         for (i, server) in self.servers.iter().enumerate() {
-            let y = 50.0 + self.notification_height.get() + i as f32 * 36.0
+            let y = 50.0
+                + self.notification_height.get()
+                + (self.snapshot_realms.len() + i) as f32 * 36.0
                 - self.pixel_scroll.get().floor();
             if !(y..=y + 28.0).contains(&cursor.1) || text(server, "state") == "UNINITIALIZED" {
                 continue;

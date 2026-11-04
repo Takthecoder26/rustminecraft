@@ -11,6 +11,7 @@ use horizon_client::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::{
         Arc,
@@ -69,7 +70,10 @@ enum Update {
     Subscription(Value),
     Templates(Value),
     Links(Value),
-    DeletedCode(String),
+    CodeRefreshFailed {
+        id: i64,
+        error: RealmsError,
+    },
     Notifications(Value),
     TermsAccepted,
     Done(&'static str, Option<Page>),
@@ -158,8 +162,10 @@ struct Subscription {
     trial: FetchTask<bool>,
     invites: FetchTask<usize>,
     news: FetchTask<Value>,
+    online_players: FetchTask<Value>,
     notifications: FetchTask<Value>,
-    news_link: Option<String>,
+    seen: FetchTask<Vec<String>>,
+    handled_seen: HashSet<String>,
 }
 #[derive(Default)]
 pub(super) struct RealmsRuntime {
@@ -219,7 +225,11 @@ impl RealmsRuntime {
             };
             self.cancel_pending();
             if let Some(state) = title.realms_mut() {
-                state.set_status(lang::get(key));
+                if state.page == Page::Upload {
+                    state.reset_upload_cancelled();
+                } else {
+                    state.set_status(lang::get(key));
+                }
             }
             return;
         }
@@ -240,7 +250,18 @@ impl RealmsRuntime {
             return;
         };
         let Some(identity) = auth::current().filter(|_| state.eligible) else {
-            state.set_error(lang::get("mco.error.invalid.session.message"));
+            let message = lang::get("mco.error.invalid.session.message");
+            if matches!(action, RealmsAction::Upload { .. }) {
+                state.reset_upload_finished(Some(message));
+            } else if matches!(action, RealmsAction::Templates { .. })
+                && state.reset_templates_failed()
+            {
+                log::warn!("Realms templates: invalid session");
+            } else if !state.player_request_failed(&action, message.clone())
+                && !state.world_request_failed(&action, &message)
+            {
+                state.set_error(message);
+            }
             return;
         };
         state.set_loading(true);
@@ -313,8 +334,10 @@ impl RealmsRuntime {
             trial: FetchTask::default(),
             invites: FetchTask::default(),
             news: FetchTask::default(),
+            online_players: FetchTask::default(),
             notifications: FetchTask::default(),
-            news_link: None,
+            seen: FetchTask::default(),
+            handled_seen: HashSet::new(),
         });
     }
     fn poll_subscription(&mut self, title: &mut Title) {
@@ -399,16 +422,7 @@ impl RealmsRuntime {
                     .len())
             });
             if let Some(news) = subscription.news.poll(300, 1, "news") {
-                let link = news
-                    .get("newsLink")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                // Publishing only a changed link preserves a read badge after the
-                // player opens it. Persistence across launches belongs to the UI.
-                if link.is_some() && link != subscription.news_link {
-                    state.set_header_news(link.clone(), true);
-                    subscription.news_link = link;
-                }
+                state.update_news(news.get("newsLink").and_then(Value::as_str));
             }
             let client = client.clone();
             let identity = subscription.identity.clone();
@@ -424,6 +438,37 @@ impl RealmsRuntime {
             subscription
                 .notifications
                 .start(move || client.notifications(&credentials(&identity)));
+        }
+        if state.page == Page::List {
+            if let Some(players) = subscription.online_players.poll(10, 1, "online players") {
+                // RealmsServerPlayerLists uses `lists` containing a JSON-encoded
+                // `playerList`; State owns decoding and filtering the local profile.
+                state.set_online_players(players);
+            }
+            let client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription
+                .online_players
+                .start(move || client.live_stats(&credentials(&identity)));
+        }
+        // A seen acknowledgement has no foreground action or loading state. The
+        // subscription's identity/generation fence also owns this receiver.
+        if let Some(ids) = subscription.seen.poll(10, 1, "notifications seen") {
+            subscription.handled_seen.extend(ids);
+            subscription.seen.due = None;
+        }
+        let ids: Vec<_> = state
+            .visible_unseen_notification_ids()
+            .into_iter()
+            .filter(|id| !subscription.handled_seen.contains(id))
+            .collect();
+        if !ids.is_empty() {
+            let client = client.clone();
+            let identity = subscription.identity.clone();
+            subscription.seen.start(move || {
+                client.notifications_seen(&credentials(&identity), &ids)?;
+                Ok(ids)
+            });
         }
     }
     pub(super) fn poll(&mut self, title: &mut Title) -> Option<Completion> {
@@ -462,16 +507,18 @@ impl RealmsRuntime {
                     RealmsAction::Upload { .. } | RealmsAction::Download { .. }
                 ) {
                     let stage = pending.control.stage.load(Ordering::Acquire);
-                    let key = match stage {
-                        1 => "mco.upload.preparing",
-                        2 => "mco.upload.verifying",
-                        3 => "mco.download.downloading",
-                        4 | 5 => "mco.download.extracting",
-                        _ => "mco.download.preparing",
-                    };
                     let done = pending.control.bytes_done.load(Ordering::Relaxed);
                     let total = pending.control.bytes_total.load(Ordering::Relaxed);
                     if let Some(state) = title.realms_mut() {
+                        if matches!(pending.action, RealmsAction::Upload { .. }) {
+                            state.reset_upload_progress(done, total, stage == 2);
+                            return None;
+                        }
+                        let key = match stage {
+                            3 => "mco.download.downloading",
+                            4 | 5 => "mco.download.extracting",
+                            _ => "mco.download.preparing",
+                        };
                         let percent = if total > 0 {
                             format!(
                                 " · {}%",
@@ -505,6 +552,9 @@ impl RealmsRuntime {
         let completed_action = self.pending.take()?.action;
         let state = title.realms_mut()?;
         state.set_loading(false);
+        if result.is_ok() {
+            state.world_operation_finished();
+        }
         match result {
             Err(error) if matches!(completed_action, RealmsAction::Configure(_)) => {
                 state.set_configuration_error(error_text(&error));
@@ -512,24 +562,29 @@ impl RealmsRuntime {
             Err(error) if matches!(completed_action, RealmsAction::SaveSettings { .. }) => {
                 state.set_error(error_text(&error));
             }
-            Err(RealmsError::TermsRequired) => state.require_terms(),
             Err(error) => {
-                let message = if matches!(error, RealmsError::Transport) {
-                    match completed_action {
-                        RealmsAction::Upload { .. } => horizon_client::text::format_translation(
-                            &lang::get("mco.upload.failed"),
-                            &[horizon_client::text::Text::literal(lang::get(
-                                "mco.errorMessage.connectionFailure",
-                            ))],
-                        )
-                        .plain(),
-                        RealmsAction::Download { .. } => lang::get("mco.download.failed"),
-                        _ => error_text(&error),
-                    }
+                let message = if matches!(error, RealmsError::Transport)
+                    && matches!(completed_action, RealmsAction::Download { .. })
+                {
+                    lang::get("mco.download.failed")
                 } else {
                     error_text(&error)
                 };
-                state.set_error(message);
+                if matches!(completed_action, RealmsAction::Upload { .. }) {
+                    state.reset_upload_finished(Some(message));
+                } else if matches!(completed_action, RealmsAction::Templates { .. })
+                    && state.reset_templates_failed()
+                {
+                    log::warn!("Realms templates: {error}");
+                } else if !state.player_request_failed(&completed_action, message.clone())
+                    && !state.world_request_failed(&completed_action, &message)
+                {
+                    if matches!(error, RealmsError::TermsRequired) {
+                        state.require_terms();
+                    } else {
+                        state.set_error(message);
+                    }
+                }
             }
             Ok(Update::Servers { realms, snapshots }) => {
                 state.return_page(Page::List);
@@ -655,18 +710,15 @@ impl RealmsRuntime {
             Ok(Update::Distance(tier)) => state.set_tier_configuration(tier),
             Ok(Update::Backups(value)) => state.set_backups(value),
             Ok(Update::Subscription(value)) => state.set_subscription(value),
-            Ok(Update::Templates(value)) => state.set_templates(value),
-            Ok(Update::Links(value)) => state.set_invite_links(value),
-            Ok(Update::DeletedCode(code)) => {
-                let mut codes = state
-                    .invite_links
-                    .get("inviteCodes")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                codes
-                    .retain(|item| item.get("code").and_then(Value::as_str) != Some(code.as_str()));
-                state.set_invite_links(invite_links(json!(codes)));
+            Ok(Update::Templates(value)) => {
+                if let Some(action) = state.reset_set_templates(value) {
+                    self.start(action, title);
+                }
+            }
+            Ok(Update::Links(value)) => state.player_links_loaded(value),
+            Ok(Update::CodeRefreshFailed { id, error }) => {
+                state.return_page(Page::InviteLink);
+                state.player_request_failed(&RealmsAction::InviteLink(id), error_text(&error));
             }
             Ok(Update::Notifications(value)) => {
                 self.notifications = value.clone();
@@ -675,10 +727,14 @@ impl RealmsRuntime {
             }
             Ok(Update::TermsAccepted) => state.terms_accepted(),
             Ok(Update::Done(key, page)) => {
-                if let Some(page) = page {
-                    state.return_page(page);
+                if matches!(completed_action, RealmsAction::Upload { .. }) {
+                    state.reset_upload_finished(None);
+                } else {
+                    if let Some(page) = page {
+                        state.return_page(page);
+                    }
+                    state.set_status(lang::get(key));
                 }
-                state.set_status(lang::get(key));
             }
             Ok(Update::Completion(completion)) => return Some(completion),
         }
@@ -962,6 +1018,13 @@ fn execute(
     let invites = || -> RealmsResult<Update> {
         Ok(Update::Invites(to_value(client.pending_invites(&auth)?)?))
     };
+    let refresh_codes = |id| -> RealmsResult<Update> {
+        active(control)?;
+        Ok(match client.invite_codes(&auth, id) {
+            Ok(value) => Update::Links(invite_links(value)),
+            Err(error) => Update::CodeRefreshFailed { id, error },
+        })
+    };
     match action {
         ConfirmJoinPack(_) => Err(RealmsError::InvalidInput),
         Refresh => servers(),
@@ -1190,6 +1253,9 @@ fn execute(
         }
         SaveSlot { id, slot, options } => {
             let realm = client.get_own_realm(&auth, id)?;
+            if realm.active_slot != slot {
+                return Err(RealmsError::InvalidInput);
+            }
             let (mut merged, _settings) = slot_options(&realm.slots, slot)?;
             let changes = options.as_object().ok_or(RealmsError::InvalidInput)?;
             let object = merged.as_object_mut().ok_or(RealmsError::InvalidResponse)?;
@@ -1218,10 +1284,16 @@ fn execute(
             client.restore_world(&auth, id, &backup_id)?;
             server(id, Some(Page::Slots))
         }
-        Upload { id, slot, folder } => {
+        Upload {
+            id,
+            slot,
+            folder,
+            initialize,
+        } => {
+            prepare_target(&client, identity, id, slot, initialize.as_ref(), control)?;
             realms_transfer::upload_world_with_control(&client, &auth, id, slot, &folder, control)
                 .map_err(|_| RealmsError::Transport)?;
-            Ok(Update::Done("mco.upload.done", Some(Page::Slots)))
+            Ok(Update::Done("mco.upload.done", None))
         }
         Download { id, slot } => {
             let realm = client.get_own_realm(&auth, id)?;
@@ -1281,10 +1353,10 @@ fn execute(
             client.leave(&auth, id)?;
             Ok(Update::RefreshServers)
         }
-        InvitePlayer { id, name } => {
-            client.invite(&auth, id, &name)?;
-            server(id, Some(Page::Players))
-        }
+        InvitePlayer { id, name } => Ok(Update::Server(
+            to_value(client.invite(&auth, id, &name)?)?,
+            Some(Page::Players),
+        )),
         RemovePlayer { id, uuid } => {
             client.uninvite(&auth, id, &uuid)?;
             server(id, Some(Page::Players))
@@ -1298,20 +1370,29 @@ fn execute(
             server(id, Some(Page::Players))
         }
         Reset { id, options } => {
-            if let Some(template) = options
+            let slot = reset_slot(&options)?;
+            let initialize = reset_initialize(&options)?;
+            let template = options
                 .get("worldTemplateId")
                 .and_then(Value::as_i64)
-                .filter(|id| *id >= 0)
-            {
-                success(client.reset_world_with_template(&auth, id, template)?)?;
-                server(id, Some(Page::Slots))
-            } else {
-                let realm = client.get_own_realm(&auth, id)?;
+                .filter(|template| *template >= -1)
+                .ok_or(RealmsError::InvalidInput)?;
+            if id <= 0 {
+                return Err(RealmsError::InvalidInput);
+            }
+            if template == -1 {
+                // The editor may be cancelled. Defer all mutations until its
+                // temporary world metadata has been prepared successfully.
                 Ok(Update::Completion(Completion::CreateWorldForRealm {
                     id,
-                    slot: realm.active_slot,
+                    slot,
                     options,
                 }))
+            } else {
+                prepare_target(&client, identity, id, slot, initialize.as_ref(), control)?;
+                success(client.reset_world_with_template(&auth, id, template)?)?;
+                active(control)?;
+                server(id, Some(Page::Slots))
             }
         }
         Templates { world_type, page } => Ok(Update::Templates(client.templates(
@@ -1331,7 +1412,7 @@ fn execute(
         InviteLink(id) => Ok(Update::Links(invite_links(client.invite_codes(&auth, id)?))),
         CreateInviteCode { id } => {
             client.create_invite_code(&auth, id, true, None)?;
-            Ok(Update::Links(invite_links(client.invite_codes(&auth, id)?)))
+            refresh_codes(id)
         }
         UpdateInviteCode {
             id,
@@ -1340,11 +1421,11 @@ fn execute(
             expiration_ms,
         } => {
             client.update_invite_code(&auth, id, &code, enabled, expiration_ms)?;
-            Ok(Update::Links(invite_links(client.invite_codes(&auth, id)?)))
+            refresh_codes(id)
         }
-        DeleteInviteCode { code } => {
+        DeleteInviteCode { id, code } => {
             client.delete_invite_code(&auth, &code)?;
-            Ok(Update::DeletedCode(code))
+            refresh_codes(id)
         }
         RedeemInvite(code) => {
             client.redeem_invite_code(&auth, &code)?;
@@ -1359,6 +1440,79 @@ fn execute(
             Ok(Update::Notifications(client.notifications(&auth)?))
         }
     }
+}
+fn reset_slot(options: &Value) -> RealmsResult<i32> {
+    options
+        .get("slotId")
+        .and_then(Value::as_i64)
+        .filter(|slot| (1..=3).contains(slot))
+        .map(|slot| slot as i32)
+        .ok_or(RealmsError::InvalidInput)
+}
+pub(super) fn reset_initialize(options: &Value) -> RealmsResult<Option<(String, String)>> {
+    let Some(initialize) = options.get("initialize").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let name = initialize
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or(RealmsError::InvalidInput)?;
+    let description = initialize
+        .get("description")
+        .and_then(Value::as_str)
+        .ok_or(RealmsError::InvalidInput)?;
+    validate_initialize(name, description)?;
+    Ok(Some((name.to_owned(), description.to_owned())))
+}
+fn validate_initialize(name: &str, description: &str) -> RealmsResult<()> {
+    if name.trim().is_empty()
+        || name.chars().count() > 32
+        || description.chars().count() > 256
+        || name.chars().any(char::is_control)
+        || description.chars().any(char::is_control)
+    {
+        Err(RealmsError::InvalidInput)
+    } else {
+        Ok(())
+    }
+}
+/// RealmsResetWorldScreen.runResetTasks / RealmsUploadScreen.init. Called for
+/// generated worlds only after RealmsCreateWorldFlow's metadata preparation.
+pub(super) fn prepare_target(
+    client: &RealmsClient,
+    identity: &auth::AuthSession,
+    id: i64,
+    slot: i32,
+    initialize: Option<&(String, String)>,
+    control: &TransferControl,
+) -> RealmsResult<()> {
+    let check = || {
+        active(control)?;
+        if auth::current().is_some_and(|current| std::ptr::eq(current.as_ref(), identity)) {
+            Ok(())
+        } else {
+            Err(RealmsError::Cancelled)
+        }
+    };
+    if id <= 0 || !(1..=3).contains(&slot) {
+        return Err(RealmsError::InvalidInput);
+    }
+    if let Some((name, description)) = initialize {
+        validate_initialize(name, description)?;
+    }
+    check()?;
+    let auth = credentials(identity);
+    let realm = client.get_own_realm(&auth, id)?;
+    check()?;
+    if let Some((name, description)) = initialize {
+        client.initialize(&auth, id, name, description)?;
+        check()?;
+    }
+    if realm.active_slot != slot {
+        success(client.switch_slot(&auth, id, slot)?)?;
+        check()?;
+    }
+    Ok(())
 }
 fn owned_realm(realm: &realms_service::RealmsServer, auth: &RealmsAuth) -> bool {
     realm.owner_uuid.as_deref().is_some_and(|owner| {
