@@ -2870,10 +2870,17 @@ pieces.
 ### Chunk tickets
 
 `crates/horizon-client/src/game/native_chunk_tickets.rs`: `native_force_chunk(owner, [x, z], hold)` holds a chunk of the
-level in place for `owner` (`create:train/<uuid>`), as NeoForge's `TicketController.forceChunk` does. The chunk stays
+level in place for `owner` (`create:train/<uuid>`), after NeoForge's `TicketController.forceChunk`. The chunk stays
 held while any owner holds it. It is kept as a `/forceload`ed chunk is: it is loaded with the ring around it, it ticks,
 and its level stays open. `/forceload` neither lists nor releases it. `native_forced_chunks(owner)` lists what an owner
-holds. Tickets are not saved: keep what you hold (a level attachment) and hold it again in `native_level_load`.
+holds. A chunk past 30,000,000 blocks is refused, as `/forceload` refuses it. Unlike NeoForge's tickets, an owner is a
+name and not a block or an entity, a held chunk always ticks, and tickets are not saved: keep what you hold (a level
+attachment) and hold it again in `native_level_load`.
+
+That restores a level only once it opens. The level the world opens in opens at start, before `WorldOpenReady`, but the
+others open when someone first goes there: after a restart, chunks a mod held in the Nether or the End stay unloaded
+until then, as `/forceload`ed ones do. `WorldOpenReady` doesn't help: `native_force_chunk` reaches only the level in
+place, and no helper opens another.
 
 ### Mod messages
 

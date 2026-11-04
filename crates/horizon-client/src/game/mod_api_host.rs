@@ -87,6 +87,9 @@ impl Game<'_> {
         }
     }
 
+    /// Whether this Game is a server's. The integrated server's options carry
+    /// `dedicated` from before its world opens (`server_thread_options`), so
+    /// this holds through its open, while `serving` is still unset.
     pub(super) fn native_authoritative(&self) -> bool {
         self.serving.is_some() || self.options.dedicated.is_some()
     }
