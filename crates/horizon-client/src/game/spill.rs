@@ -24,6 +24,24 @@ use horizon_world::{
 };
 use std::collections::HashMap;
 
+/// A mod's machine breaking one block (`native_machine_destroy_block`): for
+/// that block, `Block.dropResources` rolls the loot with `tool` and keeps the
+/// drops in `kept`. What pops off because of the break (`destroyBlock` runs
+/// neighbour shape updates inline) drops as it would with no machine.
+pub(super) struct MachineBreak {
+    pub(super) pos: BlockPos,
+    pub(super) tool: Option<ItemStack>,
+    pub(super) kept: Vec<ItemStack>,
+}
+
+/// Whether `tool` takes away the experience of breaking `block`. Silk touch
+/// does (`BlockBehaviour.spawnAfterBreak` with the tool), except for a spawner:
+/// `SpawnerBlock.spawnAfterBreak` pops its experience whatever the tool.
+pub(super) fn silk_touch_denies_experience(tool: Option<&ItemStack>, block: &str) -> bool {
+    block != "minecraft:spawner"
+        && tool.is_some_and(|t| t.enchantment_level("minecraft:silk_touch") > 0)
+}
+
 /// What a broken block's entity gives its own dropped item (`copy_components`
 /// in the block loot tables): a shulker box's contents, a banner's layers, a
 /// container's custom name.
@@ -397,10 +415,9 @@ impl GameLevel<'_> {
     }
     /// `Block.dropResources(state, level, pos, blockEntity)`: the block's loot
     /// (from its random sequence, else the level random), with what its block
-    /// entity copies into it, popped at once. While a mod's machine breaks
-    /// the block (`native_machine_destroy_block`), the loot is rolled with its
-    /// `drop_tool` (`dropResources(.., entity, tool)`) and, given `drop_into`,
-    /// kept there instead of popped.
+    /// entity copies into it, popped at once. When this is the block a mod's
+    /// machine is breaking (`MachineBreak`), the loot is rolled with its tool
+    /// (`dropResources(.., entity, tool)`) and kept instead of popped.
     pub(super) fn drop_resources_now(&mut self, pos: BlockPos, state: BlockStateId) {
         let key = (pos.x, pos.y, pos.z);
         let at = [pos.x, pos.y, pos.z];
@@ -413,7 +430,11 @@ impl GameLevel<'_> {
             self.pending.record_saved(at, &tag);
         }
         let dynamic = self.pending.dynamic(at);
-        let tool = self.drop_tool.as_ref();
+        let tool = self
+            .machine_break
+            .as_ref()
+            .filter(|machine| machine.pos == pos)
+            .and_then(|machine| machine.tool.as_ref());
         let drops = match self.items.block_loot_sequence(self.registry, state) {
             Some(sequence) => {
                 let random = self.rand_sequences.get(&sequence, self.seed);
@@ -428,23 +449,30 @@ impl GameLevel<'_> {
                 &mut self.world.random,
             ),
         };
+        let name = self.facts.get(state).name.clone();
+        let denied = silk_touch_denies_experience(tool, &name);
         for mut stack in drops {
             if &*stack.item == "minecraft:air" || stack.count == 0 {
                 continue;
             }
-            match self.drop_into.as_mut() {
-                Some(kept) => {
+            match self
+                .machine_break
+                .as_mut()
+                .filter(|machine| machine.pos == pos)
+            {
+                Some(machine) => {
                     self.pending.attach(at, &mut stack);
-                    kept.push(stack);
+                    machine.kept.push(stack);
                 }
                 None => self.pop_resource(at, stack),
             }
         }
         self.pending.clear(at);
-        // BlockBehaviour.spawnAfterBreak with no tool: ores, sculk and spawners
-        // award experience at the block's centre.
-        let name = self.facts.get(state).name.clone();
+        // BlockBehaviour.spawnAfterBreak: ores, sculk and spawners award
+        // experience at the block's centre. The amount is drawn even when the
+        // tool then takes it away (Block.tryDropExperience samples it first).
         if let Some(mut xp) = removal::break_experience(&mut self.world.random, &name)
+            && !denied
             && self.rules.block_drops
         {
             if self.native_authoritative {
@@ -751,6 +779,31 @@ mod tests {
     use super::*;
     use horizon_client::{block_entity_item, item_data, mobs::raider, save};
     use horizon_world::nbt::Tag;
+
+    #[test]
+    fn silk_touch_takes_the_experience_of_all_but_a_spawner() {
+        let enchanted = |id: &str| {
+            let mut pick = ItemStack::new("minecraft:diamond_pickaxe", 1);
+            pick.enchant(id, 1);
+            pick
+        };
+        let silk = enchanted("minecraft:silk_touch");
+        let fortune = enchanted("minecraft:fortune");
+        let plain = ItemStack::new("minecraft:diamond_pickaxe", 1);
+
+        assert!(silk_touch_denies_experience(
+            Some(&silk),
+            "minecraft:diamond_ore"
+        ));
+        assert!(silk_touch_denies_experience(Some(&silk), "minecraft:sculk"));
+        assert!(!silk_touch_denies_experience(
+            Some(&silk),
+            "minecraft:spawner"
+        ));
+        for tool in [Some(&fortune), Some(&plain), None] {
+            assert!(!silk_touch_denies_experience(tool, "minecraft:diamond_ore"));
+        }
+    }
 
     #[test]
     fn a_used_run_is_retold_in_place() {
