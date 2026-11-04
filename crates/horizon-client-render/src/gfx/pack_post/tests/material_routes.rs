@@ -138,7 +138,7 @@ fn gpu_material_routes_render_both_phases_ids_and_block_shadow_owner() {
         ("gbuffers_beaconbeam", "", "vec4(0.0,1.0,1.0,1.0)"),
         (
             "shadow_block",
-            "const int shadowMapResolution=32; uniform int blockEntityId;",
+            "const int shadowMapResolution=32;\nuniform int blockEntityId;",
             "vec4(float(blockEntityId)/255.0,0.0,0.0,1.0)",
         ),
     ] {

@@ -506,7 +506,7 @@ impl DrawPlan<'_> {
                 };
                 let start = self.scratch.len() as u32;
                 match part {
-                    Part::Beam => beam_segments(run, &mut self.scratch),
+                    Part::Beam => beam_segments(run, self.scratch),
                     _ => self.scratch.extend_from_slice(run),
                 }
                 if program == DESTROY {
