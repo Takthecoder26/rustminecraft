@@ -256,6 +256,28 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// A claim for `uuid` came back. Its answer goes over what is kept now, anything still waiting on
+/// top, and on disk. None when the page has moved on to another account: only `uuid`'s file hears
+/// of it.
+fn claim_landed(
+    w: Option<&Wardrobe>,
+    uuid: &str,
+    result: Result<Me, Error>,
+    dir: &std::path::Path,
+) -> Option<Result<Saved, Error>> {
+    let here = w.filter(|w| w.uuid == uuid);
+    let result = result.map(|mut me| {
+        let mut saved = here.map_or_else(|| Saved::load(dir, uuid), |w| w.saved.clone());
+        for change in &saved.pending {
+            me.apply(change);
+        }
+        saved.me = Some(me);
+        let _ = saved.save(dir, uuid);
+        saved
+    });
+    here.map(|_| result)
+}
+
 impl Launcher {
     /// Whether the Shop tab shows: the service's public answer, or the account's own (a preview,
     /// a claim), gives it something to show (`shop::shown`), whatever the cosmetics switch says.
@@ -977,22 +999,21 @@ impl Launcher {
         w.busy = true;
         self.shop.claiming = true;
         self.shop.failed = None;
-        let (uuid, mut saved) = (w.uuid.clone(), w.saved.clone());
-        let task = cx.background_executor().spawn(async move {
-            let result = Service::live()
-                .claim(&session)
-                .map(|me| saved.me = Some(me));
-            if result.is_ok() {
-                let _ = saved.save(&dir(), &uuid);
-            }
-            (saved, result)
-        });
+        let uuid = w.uuid.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { Service::live().claim(&session) });
         cx.spawn(async move |this, cx| {
-            let (saved, result) = task.await;
+            let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.shop.claiming = false;
+                let Some(result) = claim_landed(this.wardrobe.as_ref(), &uuid, result, &dir())
+                else {
+                    cx.notify();
+                    return;
+                };
                 match result {
-                    Ok(()) => {
+                    Ok(saved) => {
                         this.shop.claimed_now = true;
                         let trip = Trip {
                             saved,
@@ -1135,5 +1156,123 @@ impl Launcher {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_launcher::wardrobe::{Claim, ClaimState};
+
+    /// An empty folder for this test's outfits.
+    fn folder(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-launcher-shop-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn me(uuid: &str, owned: &[&str]) -> Me {
+        Me {
+            uuid: uuid.into(),
+            name: "Notch".into(),
+            owned: owned.iter().map(|id| id.to_string()).collect(),
+            equipped: Default::default(),
+            visible: true,
+            claim: Claim {
+                state: ClaimState::Open,
+                items: Vec::new(),
+                starts_at: None,
+                ends_at: None,
+                claimed: None,
+                open: true,
+                preview: false,
+            },
+        }
+    }
+
+    /// `uuid`'s page, mid-trip.
+    fn page(uuid: &str, saved: Saved) -> Wardrobe {
+        Wardrobe {
+            uuid: uuid.into(),
+            saved,
+            items: HashMap::new(),
+            session: None,
+            skin: None,
+            status: Status::Ready,
+            busy: true,
+            slot: "head",
+            turn: 0,
+            seen: None,
+            toast: None,
+        }
+    }
+
+    #[test]
+    fn a_change_made_during_the_claim_survives_it() {
+        let dir = folder("survives");
+        let cap = Change::Equip {
+            slot: "head".into(),
+            item: Some("cap".into()),
+        };
+        let mut w = page(
+            "a",
+            Saved {
+                me: Some(me("a", &["cap"])),
+                ..Default::default()
+            },
+        );
+        w.saved.change(cap.clone());
+
+        let answer = me("a", &["cap", "visor", "owl"]);
+        let saved = claim_landed(Some(&w), "a", Ok(answer), &dir)
+            .expect("still this account's page")
+            .unwrap();
+
+        let kept = saved.me.as_ref().unwrap();
+        assert_eq!(kept.owned, ["cap", "visor", "owl"]);
+        assert_eq!(kept.equipped["head"], "cap");
+        assert_eq!(saved.pending, [cap]);
+        assert_eq!(Saved::load(&dir, "a"), saved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_landing_after_a_switch_goes_to_its_own_account_only() {
+        let dir = folder("switch");
+        let mut theirs = Saved {
+            me: Some(me("a", &[])),
+            ..Default::default()
+        };
+        theirs.change(Change::Visible(false));
+        theirs.save(&dir, "a").unwrap();
+        let w = page("b", Saved::default());
+
+        let answer = me("a", &["visor"]);
+        assert!(claim_landed(Some(&w), "a", Ok(answer), &dir).is_none());
+
+        assert!(!Saved::path(&dir, "b").exists());
+        let kept = Saved::load(&dir, "a");
+        let got = kept.me.as_ref().unwrap();
+        assert_eq!(got.owned, ["visor"]);
+        assert!(!got.visible, "what waits for that account stays on top");
+        assert_eq!(kept.pending, [Change::Visible(false)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_claim_saves_nothing_and_only_its_own_page_hears_of_it() {
+        let dir = folder("failed");
+        let w = page("b", Saved::default());
+
+        let late = claim_landed(Some(&w), "a", Err(Error::ClaimClosed), &dir);
+        assert!(late.is_none());
+        let own = claim_landed(Some(&w), "b", Err(Error::ClaimClosed), &dir);
+        assert_eq!(own, Some(Err(Error::ClaimClosed)));
+
+        assert!(!Saved::path(&dir, "a").exists());
+        assert!(!Saved::path(&dir, "b").exists());
     }
 }
