@@ -645,6 +645,10 @@ pub fn tick(
         super::villager_brain::woken(m, w.game_time);
     }
     if m.no_ai {
+        // Dolphin.tick: without AI it stops there, with its air full.
+        if m.species() == Species::Dolphin {
+            m.air = m.max_air_supply();
+        }
         // Mob.aiStep still runs without AI (only serverAiStep is skipped),
         // so undead still burn in daylight and the endermite's life keeps
         // counting.
@@ -4799,6 +4803,111 @@ mod ravager_noai_tests {
                     }
                 }
             }
+        });
+    }
+}
+
+#[cfg(test)]
+mod air_supply_tests {
+    use super::*;
+    use horizon_world::registry::BlockRegistry;
+    use std::sync::Arc;
+
+    /// Water up to y=71 over a stone floor, above every tested mob's eyes.
+    fn pool(world: &mut crate::world::World, registry: &BlockRegistry) {
+        let stone = registry.default_state("minecraft:stone").unwrap();
+        let water = registry.default_state("minecraft:water").unwrap();
+        for cx in -1..1 {
+            for cz in -1..1 {
+                world
+                    .chunks
+                    .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
+            }
+        }
+        for x in -6..6 {
+            for z in -6..6 {
+                world.set(x, 63, z, stone).unwrap();
+                for y in 64..72 {
+                    world.set(x, y, z, water).unwrap();
+                }
+            }
+        }
+    }
+
+    fn mob(types: &crate::mobs::MobTypes, name: &str, at: Vec3, air: i32) -> Mob {
+        let kind = Arc::new(types.types[name].clone());
+        let mut m = Mob::new(1, kind, at, 0.0);
+        m.persistent = true;
+        m.air = air;
+        m
+    }
+
+    const IN_POOL: Vec3 = Vec3::new(0.5, 64.0, 0.5);
+
+    /// `LivingEntity.baseTick` with the eyes under water, then each class's
+    /// `handleAirSupply`: only the `can_breathe_under_water` tag spares the air,
+    /// or `IronGolem.decreaseAirSupply`, which returns what it is given.
+    #[test]
+    fn a_tick_under_water_changes_air_as_vanilla_does() {
+        let cases = [
+            ("minecraft:dolphin", 4800, 4799),
+            ("minecraft:ghast", 300, 299),
+            ("minecraft:blaze", 300, 299),
+            ("minecraft:snow_golem", 300, 299),
+            ("minecraft:pig", 300, 299),
+            ("minecraft:iron_golem", 300, 300),
+            ("minecraft:cod", 100, 300),
+        ];
+        crate::mobs::world::with_built_test_world(&[], pool, |w, types| {
+            for (name, before, after) in cases {
+                let mut m = mob(types, name, IN_POOL, before);
+                base_tick(&mut m, w, &mut Vec::new());
+                assert_eq!(m.air, after, "{name} from {before}");
+            }
+        });
+    }
+
+    /// A dolphin that runs out drowns like any other mob: `shouldTakeDrowningDamage`
+    /// at -20, air set to 0, entity event 67 and 2 damage.
+    #[test]
+    fn a_submerged_dolphin_drowns_when_its_air_runs_out() {
+        crate::mobs::world::with_built_test_world(&[], pool, |w, types| {
+            let mut m = mob(types, "minecraft:dolphin", IN_POOL, -18);
+            let start = m.health;
+            let mut events = Vec::new();
+            base_tick(&mut m, w, &mut events);
+            assert_eq!((m.air, m.health), (-19, start));
+            base_tick(&mut m, w, &mut events);
+            assert_eq!((m.air, m.health), (0, start - 2.0));
+            let drowned = events
+                .iter()
+                .filter(|e| matches!(e, MobEvent::Drown { .. }));
+            assert_eq!(drowned.count(), 1);
+        });
+    }
+
+    /// `Dolphin.tick`: without AI the air is set to full after `super.tick`.
+    #[test]
+    fn a_dolphin_without_ai_keeps_full_air_under_water() {
+        crate::mobs::world::with_built_test_world(&[], pool, |w, types| {
+            let mut m = mob(types, "minecraft:dolphin", IN_POOL, 100);
+            m.no_ai = true;
+            let (mut random, mut events) = (LegacyRandom::new(0), Vec::new());
+            tick(&mut m, w, &mut random, &mut events);
+            assert_eq!(m.air, 4800);
+        });
+    }
+
+    /// `Dolphin.increaseAirSupply` returns the maximum: one breath fills it.
+    #[test]
+    fn a_dolphin_out_of_water_refills_at_once() {
+        crate::mobs::world::with_test_world(&[], |w, types| {
+            let at = Vec3::new(10.5, 200.0, 10.5);
+            let mut m = mob(types, "minecraft:dolphin", at, 100);
+            m.no_gravity = true;
+            let (mut random, mut events) = (LegacyRandom::new(0), Vec::new());
+            tick(&mut m, w, &mut random, &mut events);
+            assert_eq!(m.air, 4800);
         });
     }
 }

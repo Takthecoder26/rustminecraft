@@ -1485,7 +1485,9 @@ impl Def {
                     | S::ZombieNautilus
             ),
             undead,
-            breathes_water: aquatic
+            // The `can_breathe_under_water` tag. An iron golem isn't in it, but its
+            // `decreaseAirSupply` keeps the air. A dolphin isn't either, and drowns.
+            breathes_water: (aquatic && s != S::Dolphin)
                 || undead
                 || matches!(
                     s,
@@ -1495,13 +1497,11 @@ impl Def {
                         | S::Guardian
                         | S::ElderGuardian
                         | S::IronGolem
-                        | S::SnowGolem
-                        | S::Ghast
-                        | S::Blaze
                         | S::Nautilus
                 ),
-            // Nautilus.handleAirSupply: it dries out on land.
-            needs_water: aquatic || s == S::Nautilus,
+            // `handleAirSupply` of `WaterAnimal`, `AgeableWaterCreature` and
+            // Nautilus: it dries out on land. `Dolphin` overrides it to do nothing.
+            needs_water: (aquatic && s != S::Dolphin) || s == S::Nautilus,
             water_sensitive: matches!(s, S::Enderman | S::Blaze | S::SnowGolem | S::Strider),
             animal: !matches!(s, S::Bat | S::SulfurCube | S::Mannequin)
                 && !self.hostile_class()
