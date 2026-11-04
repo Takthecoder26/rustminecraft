@@ -1575,6 +1575,7 @@ mod tests {
             ticks: 0,
             needs_sync: false,
             stuck: Vec3::ZERO,
+            was_touching_water: false,
         };
 
         pull_item(&mut item, Vec3::new(0.5, 0.1, -0.2));

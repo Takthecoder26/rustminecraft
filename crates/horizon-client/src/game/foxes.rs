@@ -17,14 +17,22 @@ impl Game<'_> {
     /// `Fox.ALLOWED_ITEMS` and the looting block of `Mob.aiStep` for foxes, once a tick.
     pub(super) fn tick_foxes(&mut self) {
         let griefing = self.ui.rules.bool("mob_griefing");
+        let mut near = super::item_areas::ItemAreas::default();
         for i in 0..self.simulation.mobs.len() {
             let m = &self.simulation.mobs[i];
             if m.species() != Species::Fox || !m.alive() || m.removed {
                 continue;
             }
             // `Mob.aiStep`: the items in the box grown by (1, 0, 1), in order.
-            if griefing && m.can_pick_up_loot() {
-                let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
+            let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
+            if griefing
+                && m.can_pick_up_loot()
+                && near.may_meet(
+                    &self.simulation.dropped,
+                    self.simulation_server.next_entity,
+                    reach,
+                )
+            {
                 let mut j = 0;
                 while j < self.simulation.dropped.len() {
                     let e = &self.simulation.dropped[j];
@@ -49,12 +57,19 @@ impl Game<'_> {
             // `FoxSearchForItemsGoal`: the first allowed item within 8 blocks.
             let m = &self.simulation.mobs[i];
             let area = m.bounds().inflate(Vec3::new(8.0, 8.0, 8.0));
-            let at = self
-                .simulation
-                .dropped
-                .iter()
-                .find(|e| e.pickup_delay == 0 && e.health > 0 && area.intersects(e.bounds()))
-                .map(|e| [e.position.x, e.position.y, e.position.z]);
+            let at = if near.may_meet(
+                &self.simulation.dropped,
+                self.simulation_server.next_entity,
+                area,
+            ) {
+                self.simulation
+                    .dropped
+                    .iter()
+                    .find(|e| e.pickup_delay == 0 && e.health > 0 && area.intersects(e.bounds()))
+                    .map(|e| [e.position.x, e.position.y, e.position.z])
+            } else {
+                None
+            };
             fox::set_item_at(&mut self.simulation.mobs[i], at);
         }
     }
@@ -73,6 +88,7 @@ impl Game<'_> {
                 .fluid
                 == horizon_client::blocks::Fluid::Water
         };
+        let mut near = super::item_areas::ItemAreas::default();
         for i in 0..self.simulation.mobs.len() {
             let m = &self.simulation.mobs[i];
             if m.species() != Species::Dolphin || !m.alive() || m.removed {
@@ -80,8 +96,15 @@ impl Game<'_> {
             }
             // `Mob.aiStep`: the items in the box grown by (1, 0, 1); `Dolphin.pickUpItem`
             // takes the whole stack when the mouth is empty (`Mob.canHoldItem` is true).
-            if griefing && m.can_pick_up_loot() {
-                let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
+            let reach = m.bounds().inflate(Vec3::new(1.0, 0.0, 1.0));
+            if griefing
+                && m.can_pick_up_loot()
+                && near.may_meet(
+                    &self.simulation.dropped,
+                    self.simulation_server.next_entity,
+                    reach,
+                )
+            {
                 let mut j = 0;
                 while j < self.simulation.dropped.len() {
                     let e = &self.simulation.dropped[j];
@@ -106,17 +129,24 @@ impl Game<'_> {
             let area = self.simulation.mobs[i]
                 .bounds()
                 .inflate(Vec3::new(8.0, 8.0, 8.0));
-            let at = self
-                .simulation
-                .dropped
-                .iter()
-                .find(|e| {
-                    e.pickup_delay == 0
-                        && e.health > 0
-                        && area.intersects(e.bounds())
-                        && in_water(self, e)
-                })
-                .map(|e| [e.position.x, e.position.y, e.position.z]);
+            let at = if near.may_meet(
+                &self.simulation.dropped,
+                self.simulation_server.next_entity,
+                area,
+            ) {
+                self.simulation
+                    .dropped
+                    .iter()
+                    .find(|e| {
+                        e.pickup_delay == 0
+                            && e.health > 0
+                            && area.intersects(e.bounds())
+                            && in_water(self, e)
+                    })
+                    .map(|e| [e.position.x, e.position.y, e.position.z])
+            } else {
+                None
+            };
             dolphin::set_item_at(&mut self.simulation.mobs[i], at);
         }
     }

@@ -49,6 +49,7 @@ pub(super) struct Parked {
     /// Only the per-level parts of these are used (`swap_level`).
     anims: BlockEntityAnims,
     raiding: Raiding,
+    random_tick_sections: horizon_client::random_tick_sections::RandomTickSections,
     sculk: SculkState,
     creaking: CreakingState,
     /// Server ticks since a player was last in the level.
@@ -164,6 +165,7 @@ impl Game<'_> {
             lan_states: Default::default(),
             anims: Default::default(),
             raiding: Default::default(),
+            random_tick_sections: Default::default(),
             sculk: Default::default(),
             creaking: Default::default(),
             idle: 0,
@@ -194,6 +196,7 @@ impl Game<'_> {
         swap(&mut a.gateway_servers, &mut b.gateway_servers);
         swap(&mut a.conduit_servers, &mut b.conduit_servers);
         self.raiding.swap_level(&mut p.raiding);
+        swap(&mut self.random_tick_sections, &mut p.random_tick_sections);
         self.sculk.swap_level(&mut p.sculk);
         self.creaking.swap_level(&mut p.creaking);
         // What only the client draws starts over.

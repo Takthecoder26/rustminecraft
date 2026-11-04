@@ -355,6 +355,7 @@ impl Game<'_> {
                     Some(textures),
                     self.settings.horizon.api,
                     self.settings.horizon.translucent_batching,
+                    self.settings.horizon.wide_frame(),
                     super::shader_packs::picked_pack_draws_flat(&self.settings),
                 )
             })
@@ -375,7 +376,7 @@ impl Game<'_> {
         // Everything loaded: switch over.
         self.waypoint_styles = horizon_client::locator_bar::WaypointStyles::load(&root);
         self.armor_stand_assets.reload_trims(&root);
-        self.simulation.random_tick_sections.clear();
+        self.random_tick_sections.clear();
         self.portals.sections.clear();
         self.options.resources = root.clone();
         self.pack = pack;
