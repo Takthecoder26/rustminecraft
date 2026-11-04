@@ -221,6 +221,7 @@ fn entity_routes(specialized: bool, ordering: &str, deferred: bool) {
         files,
         World {
             atlas: None,
+            material_maps: None,
             lightmap: color.clone(),
             terrain: None,
             block_ids: &[],
@@ -365,6 +366,7 @@ fn after_particles_use_base_program_after_deferred() {
 // Frame literal adapted from MIT Horizon f700231 pack_uniforms.rs test API setup.
 fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
     Frame {
+        hand_items: &[],
         eye: glam::DVec3::ZERO,
         eye_rotation: [0.0; 2],
         first_person: true,
