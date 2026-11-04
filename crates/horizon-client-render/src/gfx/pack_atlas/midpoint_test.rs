@@ -381,7 +381,11 @@ fn sample(
             module: &vs,
             entry_point: Some("main"),
             compilation_options: Default::default(),
-            buffers: &vertex_layouts[..if flat { 1 } else { 2 }],
+            buffers: if geometry {
+                &[]
+            } else {
+                &vertex_layouts[..if flat { 1 } else { 2 }]
+            },
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::PointList,
@@ -493,9 +497,11 @@ fn sample(
         for (k, group) in groups.iter().enumerate() {
             pass.set_bind_group(k as u32, group, &[]);
         }
-        pass.set_vertex_buffer(0, data.slice(..));
-        if !flat {
-            pass.set_vertex_buffer(1, origin.slice(..));
+        if !geometry {
+            pass.set_vertex_buffer(0, data.slice(..));
+            if !flat {
+                pass.set_vertex_buffer(1, origin.slice(..));
+            }
         }
         pass.draw(0..if geometry { 6 } else { vertices.len() as u32 }, 0..1);
     }
