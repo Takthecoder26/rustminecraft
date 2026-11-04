@@ -875,6 +875,7 @@ pub fn load_post(
     );
     let notes: Vec<_> = post
         .every_program()
+        .chain([&post.lines, &post.beacon_beam].into_iter().flatten())
         .flat_map(|p| {
             p.program
                 .iter()
