@@ -207,3 +207,44 @@ fn an_export_comes_back_as_an_instance_and_nothing_escapes_its_folder() {
     assert!(import_into(&java, NONE, &maker(&made)).is_err());
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_zip_bomb_stops_at_the_limit_and_leaves_nothing() {
+    let dir = scratch("bomb");
+    let made = dir.join("instances");
+    // 64 KiB of zeros compresses to almost nothing; the limit here is 16 KiB.
+    let bomb = dir.join("bomb.zip");
+    zip_file(
+        &bomb,
+        &[
+            ("options.txt", b"ok"),
+            ("saves/Big/region/r.0.0.mca", &[0u8; 64 << 10]),
+        ],
+    );
+    assert!(fs::metadata(&bomb).unwrap().len() < 4 << 10);
+    let refused = import_capped(&bomb, NONE, &maker(&made), 16 << 10).unwrap_err();
+    assert!(refused.contains("more than 16 KiB"), "{refused}");
+    assert!(!made.join("bomb").exists(), "the half-made instance goes");
+    // Under the limit, all of it comes in; the limit counts every file together.
+    let two = dir.join("two.zip");
+    zip_file(
+        &two,
+        &[
+            ("options.txt", &[1u8; 8 << 10]),
+            ("servers.dat", &[2u8; 8 << 10]),
+        ],
+    );
+    let i = import_capped(&two, NONE, &maker(&made), 16 << 10).unwrap();
+    assert_eq!(fs::read(i.home.join("servers.dat")).unwrap().len(), 8 << 10);
+    let three = dir.join("three.zip");
+    zip_file(
+        &three,
+        &[
+            ("options.txt", &[1u8; 8 << 10]),
+            ("servers.dat", &[2u8; 8 << 10 | 1]),
+        ],
+    );
+    assert!(import_capped(&three, NONE, &maker(&made), 16 << 10).is_err());
+    assert_eq!(MAX_IMPORT, 8 << 30);
+    fs::remove_dir_all(&dir).unwrap();
+}
