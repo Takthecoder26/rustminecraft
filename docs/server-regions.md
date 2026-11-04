@@ -237,3 +237,28 @@ python3 tools/bench_region_ticks.py --bin .local/parity-target/fast \
   --before-bin /path/to/base-build/target/fast --modes legacy,control,parallel \
   --warmup 10 --settle 20 --seconds 20
 ```
+
+### After the coordinator work (2026-11-04)
+
+Two runs of the same workload at `ce803b1ea`, parallel mode only, with the
+`fast` profile plus frame pointers and line tables, on the same shared machine
+(other applications running, the bots on the same CPU). Their full reports are
+under `coordinator_work` in [the measurement JSON](performance/server-regions-100-players.json).
+
+| Run | Tick average ms | Median | p95 | p99 | Max | Ticks over 50 ms | Mob median ms | CPU % | Mean RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 47.44 | 47.09 | 51.06 | 53.72 | 54.82 | 26 of 401 | 28.4 | 394.65 | 544.63 |
+| 2 | 49.06 | 48.05 | 56.25 | 66.28 | 75.04 | 88 of 401 | 28.9 | 399.49 | 558.37 |
+
+Both runs hold 20 TPS with all 7,000 predictions committed and no replay, and
+the average tick fits the 50 ms budget. Single ticks still go over it, so this
+workload has no margin on this machine, and runs differ by a millisecond or
+two. The remaining time is mostly the workers' 16 ms round, the 7 ms commit walk
+and 8 ms of `tick_lan`.
+
+The time came from the coordinator's walks over every mob, each a cache miss
+per mob: game events and melee hits find their listeners and mob directly,
+states and entity sends are built on the workers, a mob's rarely used fields
+sit behind a box so a clone copies less, and the scans a tick repeats run on the
+workers (`Game::mob_slots`) or not at all. The replaced mobs are freed by one
+worker at the end of the tick, so those scans do not queue behind the frees.
