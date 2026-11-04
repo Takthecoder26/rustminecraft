@@ -2954,22 +2954,45 @@ impl Game<'_> {
         let last = host.mob_state.remove(&self.dim).unwrap_or_default();
         let mut seen = std::mem::take(&mut host.mob_state_spare);
         seen.clear();
-        for m in &self.simulation.mobs {
+        // Read the scattered mob fields and classify against the previous
+        // flush on the existing pool. Only ordered compact records cross the
+        // barrier; hub access and previous-state writes stay on the coordinator.
+        let extract = |_: usize, m: &horizon_client::mobs::Mob| {
             let dead = !m.alive();
             let old = last.get(&m.id).copied();
             let at = [m.position.x, m.position.y, m.position.z];
+            let swing = m.ai.swinging.then_some(m.ai.swing_time);
+            let hurt = (m.hurt_time > old.map_or(0, |o| o.0) && !dead)
+                .then_some(m.last_damage.map(|(source, _)| source))
+                .flatten();
+            let died = dead && !old.is_some_and(|o| o.1);
+            let swung = !dead
+                && swing
+                    .is_some_and(|time| old.and_then(|o| o.2).is_none_or(|before| time < before));
+            (m.id, at, (m.hurt_time, dead, swing), hurt, died, swung)
+        };
+        let mobs = &self.simulation.mobs;
+        let records = match self
+            .simulation_server
+            .executor(self.simulation.regions.regions().len(), mobs.len())
+        {
+            Some(executor) => executor.map(mobs, extract),
+            None => mobs
+                .iter()
+                .enumerate()
+                .map(|(slot, m)| extract(slot, m))
+                .collect(),
+        };
+        for (id, at, state, hurt, died, swung) in records {
             // LivingEntity.hurtServer: a hurt that restarted the hurt time.
-            if m.hurt_time > old.map_or(0, |o| o.0)
-                && !dead
-                && let Some((source, _)) = m.last_damage
-            {
+            if let Some(source) = hurt {
                 use horizon_client::mobs::{DamageKind as K, Who};
                 let kind = super::creatures::source_damage_type(source);
                 // The player a mob sees is the guest acting.
                 let cause = source.attacker.and_then(|who| match who {
                     Who::Player => host
                         .mob_players
-                        .get(&m.id)
+                        .get(&id)
                         .and_then(|conn| host.hub.guest(*conn))
                         .map(|g| g.entity_id),
                     Who::Mob(id) => Some(id as i32),
@@ -2985,22 +3008,16 @@ impl Game<'_> {
                         | K::SonicBoom
                 );
                 let direct = cause.filter(|_| melee);
-                host.hub.damage_event(m.id as i32, kind, cause, direct, at);
+                host.hub.damage_event(id as i32, kind, cause, direct, at);
             }
-            if dead && !old.is_some_and(|o| o.1) {
-                host.hub.entity_event(m.id as i32, 3, at);
+            if died {
+                host.hub.entity_event(id as i32, 3, at);
             }
-            // LivingEntity.swing on a server (a melee hit, a thrown potion):
-            // ClientboundSwingAnimationPacket for the players around. A swing
-            // started since the last flush, or restarted (its time went back).
-            let swing = m.ai.swinging.then_some(m.ai.swing_time);
-            if let Some(time) = swing
-                && !dead
-                && old.and_then(|o| o.2).is_none_or(|before| time < before)
-            {
-                host.hub.swing(m.id as i32, 0, at, None);
+            // Swing started or restarted since the previous flush.
+            if swung {
+                host.hub.swing(id as i32, 0, at, None);
             }
-            seen.insert(m.id, (m.hurt_time, dead, swing));
+            seen.insert(id, state);
         }
         if let Some(d) = self.simulation.dragon.as_ref().filter(|d| d.id != 0) {
             let id = d.id;

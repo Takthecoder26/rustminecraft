@@ -82,6 +82,7 @@ impl<'a> TickResources<'a> {
     }
     pub fn view<'s>(
         &'s self,
+        player: Option<PlayerView>,
         others: snapshot::SeenView<'s>,
         grid: &'s dyn seen_grid::SnapshotGrid,
         index: &'s crate::fast_hash::FxHashMap<u32, u32>,
@@ -99,7 +100,7 @@ impl<'a> TickResources<'a> {
             collision: self.collision,
             suffocation: self.suffocation,
             data: self.data,
-            player: self.player.clone(),
+            player,
             controlling_player_movement: self.controlling_player_movement,
             nearest_player: self.nearest_player,
             dragon: self.dragon,
@@ -239,18 +240,20 @@ impl RegionTick<'_> {
             random.clear_usage();
             let (kept, conn) = {
                 let context = &self.contexts[slot];
+                let conn = self
+                    .players
+                    .player_for(input.owner, &mob, context.bound_player);
+                let player = conn
+                    .and_then(|conn| self.players.guest(conn))
+                    .or(self.resources.player.as_ref())
+                    .cloned();
                 let mut world = self.resources.view(
+                    player,
                     snapshot::SeenView::observed(self.snapshot, &overlay, &reads)
                         .with_species(self.species),
                     &grid,
                     self.index,
                 );
-                let conn = self
-                    .players
-                    .player_for(input.owner, &mob, context.bound_player);
-                world.player = conn
-                    .and_then(|conn| self.players.guest(conn).cloned())
-                    .or_else(|| self.resources.player.clone());
                 world.controlling_player_movement = self.players.controlling_movement(&mob);
                 world.nearest_player = context.nearest_player;
                 world.difficulty = context.difficulty;

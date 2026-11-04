@@ -865,7 +865,7 @@ pub struct Entities {
     /// that moved checks only the chunks within its view distance.
     chunk_members: Vec<Vec<u32>>,
     held: Vec<u8>,
-    flags: Vec<Vec<u8>>,
+    flags: Vec<Visibility>,
     /// Whether a client starts tracking each entity this tick.
     pairs: Vec<bool>,
     /// The entities that appeared or moved to another section this tick
@@ -888,6 +888,35 @@ const PARALLEL_ENTITIES: usize = 256;
 /// The client sees the entity this tick, and already tracked it.
 const SEES: u8 = 1;
 const TRACKS: u8 = 2;
+
+/// Dense viewers scan flags; sparse viewers keep only visible slots in entity order.
+#[derive(Default)]
+struct Visibility {
+    dense: Vec<u8>,
+    slots: Vec<(usize, u8)>,
+}
+impl Visibility {
+    fn get(&self, index: usize) -> u8 {
+        if !self.dense.is_empty() {
+            self.dense[index]
+        } else {
+            self.slots
+                .binary_search_by_key(&index, |&(slot, _)| slot)
+                .map_or(0, |at| self.slots[at].1)
+        }
+    }
+    fn watch(&self, watched: &mut [bool]) {
+        if !self.dense.is_empty() {
+            for (watched, &flag) in watched.iter_mut().zip(&self.dense) {
+                *watched |= flag != 0;
+            }
+        } else {
+            for &(slot, _) in &self.slots {
+                watched[slot] = true;
+            }
+        }
+    }
+}
 
 /// What one tick sends about one entity, made once for all its clients.
 struct EntitySend {
@@ -959,9 +988,8 @@ fn entity_send(
 }
 
 /// One client's share of the entities' sends, in the entities' order.
-fn send_to(v: &mut Viewer<'_>, flags: &[u8], sends: &[EntitySend]) {
-    for send in sends {
-        let f = flags[send.index as usize];
+fn send_to(v: &mut Viewer<'_>, flags: &Visibility, sends: &[EntitySend]) {
+    let mut deliver = |send: &EntitySend, f: u8| {
         if f & TRACKS != 0 {
             v.out.extend(send.changes.iter().cloned());
         } else if f & SEES != 0
@@ -981,6 +1009,19 @@ fn send_to(v: &mut Viewer<'_>, flags: &[u8], sends: &[EntitySend]) {
                     entity: send.id,
                     tracked: Arc::clone(&send.tracked),
                 });
+            }
+        }
+    };
+    if !flags.dense.is_empty() {
+        for send in sends {
+            deliver(send, flags.dense[send.index as usize]);
+        }
+    } else {
+        // Sends are ordered by slot even with duplicate entity ids. Look up
+        // only visible slots instead of walking every entity for every viewer.
+        for &(slot, flag) in &flags.slots {
+            if let Ok(at) = sends.binary_search_by_key(&(slot as u32), |s| s.index) {
+                deliver(&sends[at], flag);
             }
         }
     }
@@ -1143,11 +1184,12 @@ impl Entities {
                 .range_percent
                 .map_or(range * 16, |p| p * (range * 16) / 100);
         }
-        self.flags.resize_with(viewers.len(), Vec::new);
+        self.flags.resize_with(viewers.len(), Visibility::default);
         self.pairs.clear();
         self.pairs.resize(entities.len(), false);
         for (v, flags) in viewers.iter_mut().zip(&mut self.flags) {
-            flags.clear();
+            flags.dense.clear();
+            flags.slots.clear();
             self.held.clear();
             self.held.resize(self.chunks.len(), 0);
             let (chunks, held, pairs) = (&self.chunks, &mut self.held, &mut self.pairs);
@@ -1165,7 +1207,6 @@ impl Entities {
                 // `sees` caps the range at its view distance, so only the
                 // entities in chunks that far from its own can be seen; the
                 // rest stay 0, as checking each of them gave.
-                flags.resize(self.probes.len(), 0);
                 let reach = v.view_distance + 1;
                 let (vx, vz) = (
                     (v.position[0].floor() as i32) >> 4,
@@ -1182,10 +1223,10 @@ impl Entities {
                             continue;
                         }
                         if v.tracker.seen.contains_key(&p.id) {
-                            flags[index] = SEES | TRACKS;
+                            flags.slots.push((index, SEES | TRACKS));
                             kept += 1;
                         } else {
-                            flags[index] = SEES;
+                            flags.slots.push((index, SEES));
                             pairs[index] = true;
                         }
                     }
@@ -1195,43 +1236,67 @@ impl Entities {
                 // that appeared or changed section; a client tracking much
                 // of the level goes through it in order.
                 let is_moved = &self.is_moved;
-                flags.extend(self.probes.iter().zip(pairs.iter_mut()).zip(is_moved).map(
-                    |((p, pairs), &moved)| {
-                        let tracks = v.tracker.seen.contains_key(&p.id);
-                        if p.id == v.entity_id || (moved && !sees(v, p, chunks, held)) {
-                            0
-                        } else if tracks {
-                            kept += 1;
-                            SEES | TRACKS
-                        } else if moved {
-                            *pairs = true;
-                            SEES
-                        } else {
-                            0
-                        }
-                    },
-                ));
+                flags
+                    .dense
+                    .extend(self.probes.iter().zip(pairs.iter_mut()).zip(is_moved).map(
+                        |((p, pairs), &moved)| {
+                            let tracks = v.tracker.seen.contains_key(&p.id);
+                            if p.id == v.entity_id || (moved && !sees(v, p, chunks, held)) {
+                                0
+                            } else if tracks {
+                                kept += 1;
+                                SEES | TRACKS
+                            } else if moved {
+                                *pairs = true;
+                                SEES
+                            } else {
+                                0
+                            }
+                        },
+                    ));
             } else {
                 // One tracking little of it, from what it tracks.
-                flags.resize(self.probes.len(), 0);
-                for id in v.tracker.seen.keys() {
-                    if let Some(s) = self.states.get(id).filter(|s| s.seen == now) {
-                        flags[s.index] = SEES | TRACKS;
+                // Merge tracked slots with moved slots before checking them.
+                // An id's tracked state belongs to its last slot, including
+                // when the input contains the same id more than once.
+                let mut candidates: Vec<usize> = v
+                    .tracker
+                    .seen
+                    .keys()
+                    .filter_map(|id| {
+                        self.states
+                            .get(id)
+                            .filter(|s| s.seen == now)
+                            .map(|s| s.index)
+                    })
+                    .chain(self.moved.iter().copied())
+                    .collect();
+                candidates.sort_unstable();
+                candidates.dedup();
+                for index in candidates {
+                    let p = &self.probes[index];
+                    let tracks = self.states.get(&p.id).is_some_and(|s| s.index == index)
+                        && v.tracker.seen.contains_key(&p.id);
+                    if self.is_moved[index] && (p.id == v.entity_id || !sees(v, p, chunks, held)) {
+                        continue;
+                    }
+                    if tracks {
+                        flags.slots.push((index, SEES | TRACKS));
                         kept += 1;
+                    } else {
+                        flags.slots.push((index, SEES));
+                        pairs[index] = true;
                     }
                 }
-                for &index in &self.moved {
-                    let p = &self.probes[index];
-                    let tracks = flags[index] & TRACKS != 0;
-                    if p.id != v.entity_id && sees(v, p, chunks, held) {
-                        if !tracks {
-                            flags[index] = SEES;
-                            pairs[index] = true;
-                        }
-                    } else if tracks {
-                        flags[index] = 0;
-                        kept -= 1;
+            }
+            if all {
+                flags.slots.sort_unstable_by_key(|&(slot, _)| slot);
+                if flags.slots.len() * 4 > self.probes.len() {
+                    flags.dense.resize(self.probes.len(), 0);
+                    for &(slot, flag) in &flags.slots {
+                        flags.dense[slot] = flag;
                     }
+                    flags.slots.clear();
                 }
             }
             // Usually the client still sees all it tracks.
@@ -1240,7 +1305,7 @@ impl Entities {
                 let states = &self.states;
                 let Tracker { seen, events } = &mut *v.tracker;
                 seen.retain(|id, tracked| match states.get(id) {
-                    Some(s) if s.seen == now && flags[s.index] & TRACKS != 0 => true,
+                    Some(s) if s.seen == now && flags.get(s.index) & TRACKS != 0 => true,
                     other => {
                         if let (Some(gone), Some(s)) = (v.gone.as_deref_mut(), other) {
                             gone.push(s.base);
@@ -1265,9 +1330,7 @@ impl Entities {
         self.watched.clear();
         self.watched.resize(entities.len(), false);
         for flags in &self.flags {
-            for (watched, &f) in self.watched.iter_mut().zip(flags) {
-                *watched |= f != 0;
-            }
+            flags.watch(&mut self.watched);
         }
         let share = SendShared {
             riding,
@@ -1858,6 +1921,51 @@ mod tests {
 
     fn body(p: play::Clientbound) -> Vec<u8> {
         p.encode()
+    }
+
+    #[test]
+    fn sparse_delivery_matches_a_level_with_only_nearby_entities() {
+        let mut dense = (Entities::default(), Clients::new());
+        let mut sparse = (Entities::default(), Clients::new());
+        let distant: Vec<_> = (100..420)
+            .map(|id| {
+                let mut e = state(10000.0 + f64::from(id) * 16.0);
+                e.id = id;
+                e
+            })
+            .collect();
+        for tick in 0..10 {
+            let mut me = state(0.0);
+            me.id = 1;
+            me.kind = "minecraft:player".into();
+            let mut near = state(if tick == 4 { 200.0 } else { f64::from(tick) });
+            near.id = 7;
+            near.meta
+                .push((9, serializer::FLOAT, Value::Float(tick as f32)));
+            let mut other = state(5.0);
+            other.id = 8;
+            let mut list = vec![&me, &near];
+            if tick < 7 {
+                list.push(&other);
+            }
+            dense.1.moved = [tick == 6; 2];
+            sparse.1.moved = dense.1.moved;
+            dense.1.tick(&mut dense.0, &list);
+            // Interleave unseen slots: delivery must still follow entity order.
+            list.splice(1..1, distant.iter());
+            sparse.1.tick(&mut sparse.0, &list);
+            assert_eq!(dense.1.out, sparse.1.out, "tick {tick}");
+            assert_eq!(dense.1.gone, sparse.1.gone, "tick {tick}");
+            for (a, b) in dense.1.trackers.iter_mut().zip(&mut sparse.1.trackers) {
+                let events = |t: &mut Tracker| -> Vec<_> {
+                    t.events.drain(..).map(|e| (e.start, e.entity)).collect()
+                };
+                assert_eq!(events(a), events(b), "tick {tick}");
+                for id in [1, 7, 8] {
+                    assert_eq!(a.is_tracking(id), b.is_tracking(id), "tick {tick}, id {id}");
+                }
+            }
+        }
     }
 
     /// The workers change nothing a client receives: byte for byte and in the
