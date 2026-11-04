@@ -996,12 +996,9 @@ struct GameLevel<'w> {
     debug: bool,
     native_sounds: &'w mut Vec<creatures::NativeSound>,
     native_particles: &'w mut Vec<lan_particles::QueuedParticle>,
-    /// The tool a mod's machine breaks blocks with (`native_machine_destroy_block`):
-    /// `Block.dropResources` rolls the loot with it instead of with none.
-    drop_tool: Option<ItemStack>,
-    /// Where `Block.dropResources` puts the drops instead of popping them,
-    /// while a mod's machine breaks a block (`native_machine_destroy_block`).
-    drop_into: Option<Vec<ItemStack>>,
+    /// The block a mod's machine is breaking (`native_machine_destroy_block`),
+    /// the one `Block.dropResources` treats differently.
+    machine_break: Option<spill::MachineBreak>,
 }
 struct PlayerCollision {
     y: f64,
@@ -4693,8 +4690,7 @@ impl Game<'_> {
             debug: self.world_debug,
             native_sounds: &mut self.creatures.lan_sounds,
             native_particles: &mut self.creatures.lan_particles,
-            drop_tool: None,
-            drop_into: None,
+            machine_break: None,
         };
         let result = f(self.res.behaviours(), &mut level, &mut self.block_ticks);
         self.flush_spill();
@@ -6305,8 +6301,7 @@ impl Game<'_> {
                         self.mob_poof(id);
                     }
                 }
-                // SpawnerBlock.spawnAfterBreak pops its experience whatever the tool.
-                let xp = if silk && &*facts.name != "minecraft:spawner" {
+                let xp = if spill::silk_touch_denies_experience(held.as_ref(), &facts.name) {
                     0
                 } else {
                     self.block_experience(&facts.name)

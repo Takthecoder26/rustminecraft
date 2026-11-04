@@ -2,7 +2,7 @@
 //! player: break a block with a tool and keep what drops (a drill, a saw, a
 //! harvester), show its crack while it works, and use an item as a player
 //! would (a deployer) (docs/native-mods.md, "Machines").
-use super::{Game, GuestUse, Hit, InteractTarget, Screen};
+use super::{Game, GuestUse, Hit, InteractTarget, Screen, spill::MachineBreak};
 use horizon_client::{
     command::args::GameMode,
     first_person::Hand,
@@ -23,13 +23,15 @@ impl Game<'_> {
     /// (`Block.dropResources(state, level, pos, blockEntity, null, tool)`):
     /// the break particles and sound, the block's drops with what its block
     /// entity copies into them (a shulker box's contents), experience for an
-    /// ore as with no tool, then the block's fluid in its place. `tool` picks
-    /// the drops as a player's held item does (silk touch, fortune, shears);
-    /// `None` is an empty hand. The mods' say on drops (`native_loot_drops`)
-    /// applies. With `collect`, the drops are returned and nothing is popped
-    /// (a harvester storing them); without, they pop as item entities and the
-    /// list is empty. Nothing drops where `doTileDrops` is off. None, with
-    /// nothing broken, for air, an unloaded block and off a server.
+    /// ore unless `tool` has silk touch, then the block's fluid in its place.
+    /// `tool` picks the drops as a player's held item does (silk touch,
+    /// fortune, shears); `None` is an empty hand. The mods' say on drops
+    /// (`native_loot_drops`) applies. With `collect`, the drops are returned
+    /// and nothing is popped (a harvester storing them); without, they pop as
+    /// item entities and the list is empty. What pops off because of the break
+    /// (a torch on the block) isn't the machine's: it pops as with no tool and
+    /// is never in the list. Nothing drops where `doTileDrops` is off. None,
+    /// with nothing broken, for air, an unloaded block and off a server.
     /// API @API:machine_breaking@.
     pub(super) fn native_machine_destroy_block(
         &mut self,
@@ -45,13 +47,15 @@ impl Game<'_> {
             return None;
         }
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let tool_kept = tool.cloned();
+        let machine = MachineBreak {
+            pos: at,
+            tool: tool.cloned(),
+            kept: Vec::new(),
+        };
         let mut drops = self.with_level(|b, level, ticks| {
-            level.drop_tool = tool_kept;
-            level.drop_into = Some(Vec::new());
+            level.machine_break = Some(machine);
             b.destroy_block(level, ticks, at, true);
-            level.drop_tool = None;
-            level.drop_into.take().unwrap_or_default()
+            level.machine_break.take().map_or_else(Vec::new, |m| m.kept)
         });
         let _ = self.process_level_events();
         self.native_block_drops(pos, state, None, tool, None, &mut drops);
@@ -223,5 +227,166 @@ impl Game<'_> {
             held,
             other,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_client::chunk::Chunk;
+    use std::sync::Arc;
+
+    const TARGET: [i32; 3] = [8, 64, 8];
+    const ABOVE: [i32; 3] = [8, 65, 8];
+
+    /// A dedicated server's game on the prepared resources, so machines work.
+    fn server_game() -> Game<'static> {
+        use crate::game::{Audio, Options, Progress, Settings, load_resources};
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let res: &'static _ = Box::leak(Box::new(loaded.resources));
+        let mut game = Game::new(
+            res,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.options.dedicated = Some(Vec::new());
+        game
+    }
+
+    /// A clear chunk holding `blocks`, and no items or orbs lying about.
+    fn set_up(game: &mut Game<'_>, blocks: &[([i32; 3], &str)]) {
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.dropped.clear();
+        game.orbs.clear();
+        for &(at, name) in blocks {
+            let state = game.pack.assets.registry.default_state(name).unwrap();
+            game.world.set(at[0], at[1], at[2], state).unwrap();
+        }
+    }
+
+    fn items(stacks: impl IntoIterator<Item = ItemStack>) -> Vec<String> {
+        stacks.into_iter().map(|s| s.item.to_string()).collect()
+    }
+
+    fn popped(game: &Game<'_>) -> Vec<String> {
+        items(game.dropped.iter().map(|e| e.stack.clone()))
+    }
+
+    fn experience(game: &Game<'_>) -> u32 {
+        game.orbs.iter().map(|o| o.value * o.count).sum()
+    }
+
+    fn pick_with(enchantment: &str) -> ItemStack {
+        let mut pick = ItemStack::new("minecraft:diamond_pickaxe", 1);
+        pick.enchant(enchantment, 1);
+        pick
+    }
+
+    /// Dirt under a torch or short grass: the machine keeps the dirt, and the
+    /// neighbour pops off on its own, as if no tool had been near it. With
+    /// shears, short grass drops itself; with none, wheat seeds at most.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn neighbours_that_pop_off_are_not_the_machines() {
+        let mut game = server_game();
+        let shears = ItemStack::new("minecraft:shears", 1);
+
+        set_up(
+            &mut game,
+            &[(TARGET, "minecraft:dirt"), (ABOVE, "minecraft:torch")],
+        );
+        let kept = game
+            .native_machine_destroy_block(TARGET, Some(&shears), true)
+            .unwrap();
+        assert_eq!(items(kept), ["minecraft:dirt"]);
+        assert_eq!(popped(&game), ["minecraft:torch"]);
+        let air = game.res.facts().air;
+        assert_eq!(game.world.block(ABOVE[0], ABOVE[1], ABOVE[2]), air);
+
+        set_up(
+            &mut game,
+            &[(TARGET, "minecraft:dirt"), (ABOVE, "minecraft:short_grass")],
+        );
+        let kept = game
+            .native_machine_destroy_block(TARGET, Some(&shears), true)
+            .unwrap();
+        assert_eq!(items(kept), ["minecraft:dirt"]);
+        assert_eq!(game.world.block(ABOVE[0], ABOVE[1], ABOVE[2]), air);
+        let grass = popped(&game);
+        assert!(grass.len() <= 1, "{grass:?}");
+        assert!(
+            grass.iter().all(|i| i == "minecraft:wheat_seeds"),
+            "{grass:?}"
+        );
+
+        // The tool still counts on the block it was aimed at.
+        set_up(&mut game, &[(TARGET, "minecraft:short_grass")]);
+        let kept = game
+            .native_machine_destroy_block(TARGET, Some(&shears), true)
+            .unwrap();
+        assert_eq!(items(kept), ["minecraft:short_grass"]);
+        assert!(popped(&game).is_empty());
+    }
+
+    /// `DropExperienceBlock` for a diamond ore is `UniformInt.of(3, 7)` and
+    /// `SpawnerBlock` is 15 + nextInt(15) + nextInt(15). Silk touch on the ore
+    /// gives the ore itself and no experience.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn silk_touch_gives_a_machine_no_ore_experience() {
+        let mut game = server_game();
+        let ore = "minecraft:diamond_ore";
+
+        set_up(&mut game, &[(TARGET, ore)]);
+        let silk = pick_with("minecraft:silk_touch");
+        let kept = game
+            .native_machine_destroy_block(TARGET, Some(&silk), true)
+            .unwrap();
+        assert_eq!(items(kept), [ore]);
+        assert_eq!(experience(&game), 0);
+
+        let fortune = pick_with("minecraft:fortune");
+        for tool in [Some(&fortune), None] {
+            set_up(&mut game, &[(TARGET, ore)]);
+            let kept = game
+                .native_machine_destroy_block(TARGET, tool, true)
+                .unwrap();
+            let kept = items(kept);
+            assert!(!kept.is_empty() && kept.iter().all(|i| i == "minecraft:diamond"));
+            let xp = experience(&game);
+            assert!(
+                (3..=7).contains(&xp),
+                "{xp} with fortune: {}",
+                tool.is_some()
+            );
+        }
+
+        set_up(&mut game, &[(TARGET, "minecraft:spawner")]);
+        game.native_machine_destroy_block(TARGET, Some(&silk), true)
+            .unwrap();
+        assert!((15..=43).contains(&experience(&game)));
     }
 }
