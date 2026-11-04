@@ -39,8 +39,8 @@ except ImportError:
 SEED = 1
 
 
-def install_datapack_fixtures(world, predicates, functions, jar, advancements=None):
-    if not predicates and not functions and not advancements:
+def install_datapack_fixtures(world, predicates, functions, jar, advancements=None, recipes=None):
+    if not predicates and not functions and not advancements and not recipes:
         return
     with zipfile.ZipFile(jar) as archive:
         version = json.loads(archive.read('version.json'))['pack_version']
@@ -68,6 +68,13 @@ def install_datapack_fixtures(world, predicates, functions, jar, advancements=No
         target.write_text(json.dumps(advancement), encoding='utf-8')
 
 
+    for identifier, recipe in (recipes or {}).items():
+        namespace, path = identifier.split(':', 1)
+        target = pack / 'data' / namespace / 'recipe' / (path + '.json')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(recipe), encoding='utf-8')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true')
@@ -83,8 +90,9 @@ def main():
     parser.add_argument('--binary', type=Path, help='use an already built Horizon game instead of building it')
     parser.add_argument('--slot-codec-diagnostic', action='store_true',
                         help='retain the separate invalid inline slot-range codec diagnostic')
+    parser.add_argument('--work-dir', type=Path, help='isolated scratch output directory')
     args = parser.parse_args()
-    build = lab.LOCAL / 'command-exec-parity'
+    build = args.work_dir.resolve() if args.work_dir else lab.LOCAL / 'command-exec-parity'
     build.mkdir(parents=True, exist_ok=True)
     report_path = build / 'report.json'
     report_path.unlink(missing_ok=True)
@@ -105,6 +113,11 @@ def main():
             sys.exit(f'{name} failed ({result.returncode}):\n{tail}')
 
     groups = corpus_module.groups()
+    # These overlays replace built-in recipes: run each in its own world, never
+    # beside the generic corpus's fixed vanilla recipe-count controls.
+    isolated_recipes = {'crafting recipe priority', 'crafting base recipe control'}
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in isolated_recipes]
     if args.pot_string_sherd_diagnostic:
         groups = [(name, corpus_module.decorated_pot_data(string_sherd=True)
                    if name == 'decorated pot data' else ops) for name, ops in groups]
@@ -120,6 +133,8 @@ def main():
     if args.slot_codec_diagnostic:
         groups.append(('slot source codec diagnostic', [corpus_module.cmd(
             '/item fill block 4 200 4 {type:"minecraft:slot_range",slots:"container.99"} with diamond')]))
+    if any(name in isolated_recipes for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
+        parser.error('crafting recipe fixtures require --only with one exact group')
     script = []
     for _, lines in groups:
         script.extend(lines)
@@ -128,13 +143,14 @@ def main():
                                             ensure_ascii=False) + '\n' for op in script), encoding='utf-8')
     predicates = corpus_module.predicate_selector_fixtures([name for name, _ in groups])
     functions = corpus_module.function_return_fixtures([name for name, _ in groups])
+    recipes = corpus_module.crafting_priority_recipes([name for name, _ in groups])
     advancements = corpus_module.advancement_reward_fixtures([name for name, _ in groups])
 
     run(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-cp', str(jars['server']) + os.pathsep + dependency_path, '-d', classes, oracle], 'compile-java')
     vanilla_dir = build / 'vanilla'
     shutil.rmtree(vanilla_dir, ignore_errors=True)
     vanilla_dir.mkdir()
-    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements)
+    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements=advancements, recipes=recipes)
     run(['java', '-Xmx3G', '-Duser.timezone=UTC', '-cp', os.pathsep.join([str(classes), str(jars['server']), dependency_path]),
          'dev.horizonlab.parity.VanillaCommandExecOracle', vanilla_dir / 'universe', script_path, build / 'vanilla.jsonl', SEED], 'java', cwd=vanilla_dir)
 
@@ -147,7 +163,7 @@ def main():
     rust_dir = build / 'rust'
     shutil.rmtree(rust_dir, ignore_errors=True)
     rust_dir.mkdir()
-    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements)
+    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements=advancements, recipes=recipes)
     # The oracle's Services resolve no profile (/fetchprofile fails on the next tick): the game gets no services
     # either, a discovery address that refuses at once, rather than Mojang's over the network.
     env = lab.game_env(HORIZON_PLAYER_NAME="Player", HORIZON_COMMAND_SCRIPT=script_path,
