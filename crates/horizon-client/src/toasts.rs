@@ -157,6 +157,137 @@ impl SystemToast {
         }
     }
 }
+/// `FriendToast`: a wrapped message, optionally beside a profile's face.
+/// Call `layout` before reserving its contiguous 32-pixel toast slots.
+pub struct FriendToast {
+    pub slide: Slide,
+    pub slot: Option<usize>,
+    pub uuid: Option<u128>,
+    pub profile_name: Option<String>,
+    /// An actual skin sprite supplied by the parent's skin cache, when ready.
+    pub skin: Option<String>,
+    message: String,
+    lines: Vec<crate::text::Text>,
+    display_time: f64,
+    hidden: bool,
+}
+impl FriendToast {
+    pub fn new(uuid: Option<u128>, message: String) -> Self {
+        Self {
+            slide: Slide::default(),
+            slot: None,
+            uuid,
+            profile_name: None,
+            skin: None,
+            message,
+            lines: Vec::new(),
+            display_time: 5000.0,
+            hidden: false,
+        }
+    }
+    pub fn with_display_time(mut self, ms: f64) -> Self {
+        self.display_time = ms;
+        self
+    }
+    fn text_left(&self) -> usize {
+        if self.uuid.is_some() || self.profile_name.is_some() {
+            30
+        } else {
+            7
+        }
+    }
+    /// `Font.split`, including explicit newlines, word breaks and formatting.
+    pub fn layout(&mut self, atlas: &HudAtlas) {
+        self.lines = atlas.font.split_formatted(
+            &crate::text::Text::literal(&self.message),
+            (160 - self.text_left() - 4) as f32,
+        );
+    }
+    pub fn height(&self) -> usize {
+        10 + self.lines.len().max(2) * 11
+    }
+    /// `Toast.occcupiedSlotCount`: reserve all of these before showing it.
+    pub fn slot_count(&self) -> usize {
+        self.height().div_ceil(32)
+    }
+    pub fn force_hide(&mut self) {
+        self.hidden = true;
+    }
+    pub fn update(&mut self, multiplier: f64) -> (Option<bool>, bool) {
+        self.slide.update_now(|fully| {
+            self.hidden |= fully as f64 >= self.display_time * multiplier;
+            !self.hidden
+        })
+    }
+    /// Prefer a ready sprite, then the resolved object cache, then the UUID's
+    /// default. The fallback does not imply that a profile skin was resolved.
+    fn face_skin<'a>(&'a self, atlas: &'a HudAtlas) -> &'a str {
+        let id = self.uuid.unwrap_or_else(|| {
+            self.profile_name
+                .as_deref()
+                .map_or(0, horizon_protocol::crypto::offline_uuid)
+        });
+        let by_id = self
+            .uuid
+            .and_then(|id| atlas.object_skins.get(&format!("id:{id:032x}")));
+        let by_name = self.profile_name.as_ref().and_then(|name| {
+            atlas
+                .object_skins
+                .get(&format!("name:{}", name.to_ascii_lowercase()))
+        });
+        self.skin
+            .as_ref()
+            .into_iter()
+            .chain(by_id)
+            .chain(by_name)
+            .find(|skin| atlas.sprites.contains_key(*skin))
+            .map_or(crate::tab_list::default_skin(id), String::as_str)
+    }
+    pub fn draw(&self, atlas: &HudAtlas, batch: &mut HudBatch, y: f32) {
+        let x = batch.width - 160.0 * self.slide.portion;
+        crate::ui::blit_sprite(
+            batch,
+            atlas,
+            "gui/sprites/friends/toast_background",
+            x,
+            y,
+            160.0,
+            self.height() as f32,
+            u32::MAX,
+        );
+        if self.text_left() == 30 {
+            let mut face = Vec::new();
+            crate::tab_list::face(
+                &mut face,
+                self.face_skin(atlas),
+                6,
+                6,
+                20,
+                true,
+                false,
+                u32::MAX,
+            );
+            let start = batch.vertices.len();
+            crate::hud_layout::paint(batch, atlas, &face);
+            for vertex in &mut batch.vertices[start..] {
+                vertex.pos[0] += x;
+                vertex.pos[1] += y;
+            }
+        }
+        let top = 7 + (self.lines.len().max(2) * 11 - self.lines.len() * 11) / 2;
+        for (i, line) in self.lines.iter().enumerate() {
+            batch.text_styled(
+                atlas,
+                line,
+                x + self.text_left() as f32,
+                y + (top + i * 11) as f32,
+                u32::MAX,
+                false,
+            );
+        }
+    }
+}
+
 /// SystemToast's 32-pixel background keeps the notice icon and borders intact.
 pub fn background(atlas: &HudAtlas, batch: &mut HudBatch, x: f32, y: f32, width: f32) {
     let Some(rect) = atlas.sprites.get("gui/sprites/toast/system").copied() else {

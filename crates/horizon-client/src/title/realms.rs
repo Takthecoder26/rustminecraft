@@ -1,0 +1,2344 @@
+//! Realms screens and credential-free UI state. Network work belongs to the caller.
+//! Layout reference: 26.3 RealmsMainScreen.createFooter (100px, three columns,
+//! 4px spacing, 44px header) and the configure/backup/terms screens.
+use super::{Action, Button, Mode, Title};
+use crate::{
+    hud::{HudAtlas, HudBatch, rgba},
+    lang,
+    text::Text,
+};
+use serde_json::{Value, json};
+use std::{cell::Cell, path::PathBuf};
+
+#[path = "realms_configuration.rs"]
+mod configuration;
+#[path = "realms_layout.rs"]
+mod layout;
+#[path = "realms_news.rs"]
+mod news;
+#[path = "realms_player_screens.rs"]
+mod player_screens;
+#[path = "realms_region_screen.rs"]
+mod region_screen;
+#[path = "realms_reset_screens.rs"]
+mod reset_screens;
+#[path = "realms_subscreens.rs"]
+mod subscreens;
+#[path = "realms_world_screens.rs"]
+mod world_screens;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RealmsAction {
+    Refresh,
+    SnapshotRealms,
+    CreateSnapshotRealm {
+        parent: i64,
+        name: String,
+        description: String,
+    },
+    DeleteRealm(i64),
+    RenewSubscription(i64),
+    CancelRequest,
+    ConfirmJoinPack(bool),
+    Initialize {
+        id: i64,
+        name: String,
+        description: String,
+    },
+    TierConfiguration(i64),
+    SetRenderDistance {
+        id: i64,
+        distance: u32,
+    },
+    SetSimulationDistance {
+        id: i64,
+        distance: u32,
+    },
+    SetRegion {
+        id: i64,
+        preference: Value,
+    },
+    Join(i64),
+    Invites,
+    AcceptInvite(String),
+    RejectInvite(String),
+    Configure(i64),
+    SaveConfig {
+        id: i64,
+        name: String,
+        description: String,
+    },
+    SaveSettings {
+        id: i64,
+        name: String,
+        description: String,
+        preference: Value,
+        render_distance: Option<u32>,
+        simulation_distance: Option<u32>,
+        continuation: Option<Box<RealmsAction>>,
+    },
+    Slots(i64),
+    SwitchSlot {
+        id: i64,
+        slot: i32,
+    },
+    SaveSlot {
+        id: i64,
+        slot: i32,
+        options: Value,
+    },
+    Backups {
+        id: i64,
+        slot: i32,
+    },
+    RestoreBackup {
+        id: i64,
+        backup_id: String,
+    },
+    Upload {
+        id: i64,
+        slot: i32,
+        folder: PathBuf,
+        initialize: Option<(String, String)>,
+    },
+    Download {
+        id: i64,
+        slot: i32,
+    },
+    Subscription(i64),
+    OpenSubscription(i64),
+    Purchase,
+    OpenTerms,
+    AcceptTerms,
+    OpenWorld(i64),
+    CloseWorld(i64),
+    Leave(i64),
+    Players(i64),
+    InvitePlayer {
+        id: i64,
+        name: String,
+    },
+    RemovePlayer {
+        id: i64,
+        uuid: String,
+    },
+    SetOperator {
+        id: i64,
+        uuid: String,
+        operator: bool,
+    },
+    Reset {
+        id: i64,
+        options: Value,
+    },
+    Templates {
+        world_type: String,
+        page: i32,
+    },
+    SwitchMinigame {
+        id: i64,
+        template_id: String,
+    },
+    InviteLink(i64),
+    RedeemInvite(String),
+    MarkNotificationsSeen(Vec<String>),
+    DismissNotification(String),
+    CreateInviteCode {
+        id: i64,
+    },
+    DeleteInviteCode {
+        id: i64,
+        code: String,
+    },
+    UpdateInviteCode {
+        id: i64,
+        code: String,
+        enabled: bool,
+        expiration_ms: Option<i64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Page {
+    List,
+    Pdp,
+    AvailabilityError,
+    ConfigurationError,
+    Snapshots,
+    CreateSnapshot,
+    Invites,
+    Configure,
+    Settings,
+    Slots,
+    SlotOptions,
+    Backups,
+    BackupInfo,
+    Upload,
+    Subscription,
+    Players,
+    InvitePlayer,
+    PlayerError,
+    Reset,
+    Templates,
+    InviteLink,
+    EditInviteCode,
+    Redeem,
+    Terms,
+    Confirm,
+    Notifications,
+    Initialize,
+    Distances,
+    Region,
+    ResourcePack,
+}
+
+#[derive(Clone, Debug)]
+struct Field {
+    key: &'static str,
+    value: String,
+    max: usize,
+}
+#[derive(Clone, Debug)]
+struct Confirmation {
+    action: Action,
+    key: &'static str,
+    detail: String,
+    previous: Page,
+    fields: Vec<Field>,
+    reset_slot: Option<i32>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvailabilityErrorKind {
+    Unauthorized,
+    Incompatible,
+    ParentalConsent,
+    Service,
+}
+
+#[derive(Clone, Debug)]
+pub struct State {
+    pub request_generation: u64,
+    pub availability_error_kind: Option<AvailabilityErrorKind>,
+    pub eligible: bool,
+    pub profile_uuid: Option<String>,
+    pub page: Page,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub status: Option<String>,
+    pub servers: Vec<Value>,
+    /// Only a successful server-list response completes the initial loading layout.
+    pub servers_loaded: bool,
+    pub pending_invite_count: usize,
+    pub news_link: Option<String>,
+    pub unread_news: bool,
+    news_directory: Option<PathBuf>,
+    availability_title: String,
+    redirect_to_pdp: bool,
+    pdp_returns_to_title: bool,
+    header_return: Page,
+    pixel_scroll: Cell<f32>,
+    content_height: Cell<f32>,
+    notification_height: Cell<f32>,
+    pdp_heights: Cell<[f32; 4]>,
+    join_button_width: Cell<f32>,
+    privacy_button_y: Cell<f32>,
+    join_field_y: Cell<f32>,
+    link_button_y: Cell<f32>,
+    empty_text_rect: Cell<[f32; 4]>,
+    invite_visible: Cell<(usize, usize)>,
+    viewport_height: Cell<f32>,
+    list_focused: Cell<bool>,
+    focus_reset: Cell<bool>,
+    dragging_scrollbar: bool,
+    last_row_click: Option<(usize, std::time::Instant)>,
+    pub snapshot_realms: Vec<Value>,
+    pub trial_available: bool,
+    pub invites: Vec<Value>,
+    pub notifications: Vec<Value>,
+    pub online_players: Value,
+    pub online_player_names: std::collections::HashMap<String, String>,
+    notification_selected: bool,
+    snapshot_selected: Option<usize>,
+    pub server: Value,
+    pub backups: Vec<Value>,
+    pub subscription: Value,
+    pub templates: Vec<Value>,
+    pub invite_links: Value,
+    pub selected: Option<usize>,
+    pub slot: i32,
+    pub template_type: String,
+    pub template_page: i32,
+    pub local_worlds: Vec<(String, PathBuf)>,
+    pub tier_configuration: Value,
+    pub regions: Value,
+    offset: usize,
+    fields: Vec<Field>,
+    focused: Option<usize>,
+    confirmation: Option<Confirmation>,
+    slot_options: Value,
+    terms_return: Page,
+    snapshot_parent: Option<i64>,
+    configuration: configuration::Configuration,
+    region_screen: region_screen::RegionScreen,
+    world_screens: world_screens::WorldScreens,
+    player_screens: player_screens::PlayerScreens,
+    reset_screens: reset_screens::ResetScreens,
+}
+
+#[derive(Clone)]
+enum Event {
+    Back,
+    Page(Page),
+    Request(RealmsAction),
+    Confirm(RealmsAction, &'static str, String),
+    SaveConfig,
+    SaveSlot,
+    InvitePlayer,
+    Redeem,
+    Reset,
+    Toggle(&'static str),
+    Cycle(&'static str, i64),
+    AcceptConfirmation,
+    Copy(String),
+    CopyLink,
+    Link(String),
+    TemplateType,
+    Initialize,
+    Distance(bool, i64),
+    ConfigurationTab(Page),
+    ConfigurationSlot(i32),
+    ConfigurationDistance(bool),
+    Region(region_screen::RegionEvent),
+    World(world_screens::WorldEvent),
+    Player(player_screens::PlayerEvent),
+    ResetScreen(reset_screens::ResetEvent),
+}
+struct Control {
+    label: String,
+    enabled: bool,
+    event: Event,
+}
+// RealmsRegion nameId / translation-key suffix, verified against 26.3 bytecode.
+const REGIONS: &[(&str, &str)] = &[
+    ("AustraliaEast", "australia_east"),
+    ("AustraliaSoutheast", "australia_southeast"),
+    ("BrazilSouth", "brazil_south"),
+    ("CanadaCentral", "canada_central"),
+    ("CentralIndia", "central_india"),
+    ("CentralUs", "central_us"),
+    ("EastAsia", "east_asia"),
+    ("EastUs", "east_us"),
+    ("EastUs2", "east_us_2"),
+    ("FranceCentral", "france_central"),
+    ("JapanEast", "japan_east"),
+    ("JapanWest", "japan_west"),
+    ("KoreaCentral", "korea_central"),
+    ("MexicoCentral", "mexico_central"),
+    ("NorthCentralUs", "north_central_us"),
+    ("NorthEurope", "north_europe"),
+    ("SouthCentralUs", "south_central_us"),
+    ("SoutheastAsia", "southeast_asia"),
+    ("SouthAfricaNorth", "south_africa_north"),
+    ("SwedenCentral", "sweden_central"),
+    ("UAENorth", "uae_north"),
+    ("UKSouth", "uk_south"),
+    ("WestCentralUs", "west_central_us"),
+    ("WestEurope", "west_europe"),
+    ("WestUs", "west_us"),
+    ("WestUs2", "west_us_2"),
+    ("WestUs3", "west_us_3"),
+];
+fn valid_link(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.chars().any(char::is_control)
+}
+fn tr(key: &str) -> String {
+    lang::get(key)
+}
+fn text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+fn number(value: &Value, key: &str) -> i64 {
+    value.get(key).and_then(Value::as_i64).unwrap_or_default()
+}
+fn array(value: Value, key: &str) -> Vec<Value> {
+    value
+        .as_array()
+        .or_else(|| value.get(key).and_then(Value::as_array))
+        .cloned()
+        .unwrap_or_default()
+}
+fn translated(key: &str, args: &[String]) -> String {
+    crate::text::format_translation(
+        &tr(key),
+        &args.iter().map(Text::literal).collect::<Vec<_>>(),
+    )
+    .plain()
+}
+fn normalized(uuid: &str) -> String {
+    uuid.replace('-', "").to_ascii_lowercase()
+}
+fn notification_text(value: &Value) -> String {
+    let message = value.get("message").unwrap_or(&Value::Null);
+    let key = message
+        .get("translationKey")
+        .and_then(Value::as_str)
+        .unwrap_or("mco.notification.visitUrl.message.default");
+    let args = message
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    translated(key, &args)
+}
+
+impl State {
+    pub fn new(
+        eligible: bool,
+        profile_uuid: Option<String>,
+        local_worlds: Vec<(String, PathBuf)>,
+    ) -> Self {
+        static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            request_generation: NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            availability_error_kind: None,
+            eligible,
+            profile_uuid,
+            page: Page::List,
+            loading: eligible,
+            error: None,
+            status: None,
+            servers: vec![],
+            servers_loaded: false,
+            pending_invite_count: 0,
+            news_link: None,
+            unread_news: false,
+            news_directory: None,
+            availability_title: tr("mco.errorMessage.generic"),
+            redirect_to_pdp: false,
+            pdp_returns_to_title: false,
+            header_return: Page::List,
+            pixel_scroll: Cell::new(0.0),
+            content_height: Cell::new(0.0),
+            notification_height: Cell::new(0.0),
+            pdp_heights: Cell::new([29.0, 61.0, 61.0, 73.0]),
+            join_button_width: Cell::new(90.0),
+            privacy_button_y: Cell::new(0.0),
+            join_field_y: Cell::new(76.0),
+            link_button_y: Cell::new(0.0),
+            empty_text_rect: Cell::new([0.0; 4]),
+            invite_visible: Cell::new((0, 0)),
+            viewport_height: Cell::new(480.0),
+            list_focused: Cell::new(false),
+            focus_reset: Cell::new(false),
+            dragging_scrollbar: false,
+            last_row_click: None,
+            snapshot_realms: vec![],
+            trial_available: false,
+            invites: vec![],
+            notifications: vec![],
+            online_players: Value::Null,
+            online_player_names: std::collections::HashMap::new(),
+            notification_selected: false,
+            snapshot_selected: None,
+            server: Value::Null,
+            backups: vec![],
+            subscription: Value::Null,
+            templates: vec![],
+            invite_links: Value::Null,
+            selected: None,
+            slot: 1,
+            template_type: "WORLD_TEMPLATE".into(),
+            template_page: 1,
+            local_worlds,
+            tier_configuration: Value::Null,
+            regions: Value::Null,
+            offset: 0,
+            fields: vec![],
+            focused: None,
+            confirmation: None,
+            slot_options: json!({}),
+            terms_return: Page::List,
+            snapshot_parent: None,
+            configuration: configuration::Configuration::default(),
+            region_screen: region_screen::RegionScreen::default(),
+            world_screens: world_screens::WorldScreens::default(),
+            player_screens: player_screens::PlayerScreens::default(),
+            reset_screens: reset_screens::ResetScreens::default(),
+        }
+    }
+    pub fn polls_server_list(&self) -> bool {
+        self.page == Page::List || (self.page == Page::Pdp && self.pdp_returns_to_title)
+    }
+    pub fn set_trial_available(&mut self, available: bool) {
+        if self.trial_available != available {
+            self.trial_available = available;
+            if self.page == Page::Pdp {
+                self.pixel_scroll.set(0.0);
+                self.selected = None;
+            }
+        }
+    }
+    pub fn set_pending_invite_count(&mut self, count: usize) {
+        self.pending_invite_count = count;
+    }
+    pub fn set_header_news(&mut self, link: Option<String>, unread: bool) {
+        self.news_link = link.filter(|url| valid_link(url));
+        self.unread_news = unread;
+    }
+    fn set_news_directory(&mut self, directory: PathBuf) {
+        let stored = news::read(&directory);
+        self.news_directory = Some(directory);
+        self.set_header_news(stored.link, stored.unread);
+    }
+    pub fn update_news(&mut self, link: Option<&str>) {
+        if let Some(directory) = &self.news_directory {
+            let stored = news::update(directory, link.filter(|url| valid_link(url)));
+            self.set_header_news(stored.link, stored.unread);
+        } else if let Some(link) = link.filter(|url| valid_link(url))
+            && self.news_link.as_deref() != Some(link)
+        {
+            self.set_header_news(Some(link.to_owned()), true);
+        }
+    }
+    pub fn set_availability_error(&mut self, message: impl Into<String>) {
+        self.set_availability_error_kind(AvailabilityErrorKind::Service, message);
+    }
+    pub fn set_availability_error_kind(
+        &mut self,
+        kind: AvailabilityErrorKind,
+        message: impl Into<String>,
+    ) {
+        self.enter(Page::AvailabilityError);
+        self.availability_error_kind = Some(kind);
+        self.loading = false;
+        self.availability_title = match kind {
+            AvailabilityErrorKind::Unauthorized => tr("mco.error.invalid.session.title"),
+            AvailabilityErrorKind::Incompatible => tr("mco.client.incompatible.title"),
+            AvailabilityErrorKind::ParentalConsent => String::new(),
+            AvailabilityErrorKind::Service => tr("mco.errorMessage.generic"),
+        };
+        self.error = Some(if kind == AvailabilityErrorKind::Unauthorized {
+            tr("mco.error.invalid.session.message")
+        } else {
+            message.into()
+        });
+    }
+    pub fn set_tier_configuration(&mut self, value: Value) {
+        self.tier_configuration = value;
+        self.loading = false;
+    }
+    pub fn set_regions(&mut self, value: Value) {
+        self.regions = value;
+    }
+    /// RealmsSettingsTab.currentOrDefault and IntRange use server-provided bounds.
+    fn distance(&self, simulation: bool) -> Option<(u32, u32, u32)> {
+        let range = self.tier_configuration.get(if simulation {
+            "simDistance"
+        } else {
+            "renderDistance"
+        })?;
+        let min = u32::try_from(range.get("min")?.as_u64()?).ok()?;
+        let max = u32::try_from(range.get("max")?.as_u64()?).ok()?;
+        let current = range
+            .get("current")
+            .and_then(Value::as_u64)
+            .or_else(|| range.get("defaultValue").and_then(Value::as_u64))?;
+        (min <= max).then(|| (min, max, current.clamp(min as u64, max as u64) as u32))
+    }
+    pub fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+        if loading {
+            self.error = None;
+            self.status = None;
+        }
+    }
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        if self.configuration.saving {
+            self.configuration.saving = false;
+            self.enter(Page::Settings);
+        }
+        self.loading = false;
+        self.error = Some(message.into());
+    }
+    pub fn set_status(&mut self, message: impl Into<String>) {
+        self.loading = false;
+        self.status = Some(message.into());
+    }
+    pub fn set_servers(&mut self, value: Value) {
+        let id = self
+            .selected
+            .and_then(|i| self.servers.get(i))
+            .map(|s| number(s, "id"));
+        self.servers = array(value, "servers");
+        self.servers_loaded = true;
+        self.loading = false;
+        self.selected = id.and_then(|id| self.servers.iter().position(|s| number(s, "id") == id));
+        self.offset = 0;
+        let has_realms = !self.servers.is_empty() || !self.snapshot_realms.is_empty();
+        if self.redirect_to_pdp {
+            self.redirect_to_pdp = false;
+            if !has_realms && self.page == Page::List {
+                self.pdp_returns_to_title = true;
+                self.enter(Page::Pdp);
+            }
+        } else if has_realms && self.page == Page::Pdp && self.pdp_returns_to_title {
+            self.enter(Page::List);
+        }
+    }
+    pub fn set_invites(&mut self, value: Value) {
+        self.invites = array(value, "invites");
+        self.pending_invite_count = self.invites.len();
+        if self.page == Page::Invites {
+            self.loading = false;
+            self.selected = None;
+        }
+    }
+    pub fn set_server(&mut self, value: Value) {
+        self.server = value;
+        self.loading = false;
+        if self.page == Page::Configure {
+            self.slot = number(&self.server, "activeSlot").clamp(1, 3) as i32;
+        }
+        if self.page == Page::Configure
+            && text(&self.server, "state") == "UNINITIALIZED"
+            && self.server.get("expired").and_then(Value::as_bool) != Some(true)
+        {
+            self.enter(Page::Initialize);
+        }
+    }
+    pub fn set_backups(&mut self, value: Value) {
+        self.backups = array(value, "backups");
+        self.loading = false;
+        self.selected = None;
+        self.world_backups_loaded();
+    }
+    pub fn set_subscription(&mut self, value: Value) {
+        self.subscription = value;
+        self.loading = false;
+    }
+    pub fn set_templates(&mut self, value: Value) {
+        self.templates = array(value, "templates");
+        self.loading = false;
+        self.selected = None;
+        self.offset = 0;
+    }
+    pub fn set_invite_links(&mut self, value: Value) {
+        self.invite_links = value;
+        self.loading = false;
+    }
+    pub fn set_notifications(&mut self, value: Value) {
+        let previous = self
+            .notifications
+            .iter()
+            .find(|n| text(n, "type") == "visitUrl")
+            .map(notification_text);
+        self.notifications = array(value, "notifications");
+        let current = self
+            .notifications
+            .iter()
+            .find(|n| text(n, "type") == "visitUrl")
+            .map(notification_text);
+        if previous != current {
+            self.notification_selected = false;
+        }
+    }
+    pub fn set_online_players(&mut self, value: Value) {
+        self.online_players = value;
+    }
+    pub fn return_page(&mut self, page: Page) {
+        self.enter(page);
+        self.loading = false;
+    }
+    pub fn require_resource_pack(&mut self) {
+        self.loading = false;
+        self.enter(Page::ResourcePack);
+    }
+    pub fn require_terms(&mut self) {
+        self.loading = false;
+        self.error = None;
+        self.terms_return = self.page.clone();
+        self.enter(Page::Terms);
+    }
+    pub fn terms_accepted(&mut self) {
+        let page = self.terms_return.clone();
+        self.enter(page);
+        self.loading = false;
+    }
+    pub fn id(&self) -> i64 {
+        number(&self.server, "id")
+    }
+    fn owned(&self, server: &Value) -> bool {
+        self.profile_uuid.as_ref().is_some_and(|uuid| {
+            !uuid.is_empty() && normalized(uuid) == normalized(&text(server, "ownerUUID"))
+        })
+    }
+    fn editable(&self) -> bool {
+        self.owned(&self.server)
+            && self.server.get("expired").and_then(Value::as_bool) != Some(true)
+    }
+    fn field(&self, index: usize) -> String {
+        self.fields
+            .get(index)
+            .map(|f| f.value.trim().to_owned())
+            .unwrap_or_default()
+    }
+    fn add_field(&mut self, key: &'static str, value: String, max: usize) {
+        self.fields.push(Field { key, value, max });
+    }
+    fn enter(&mut self, page: Page) {
+        self.remember_settings();
+        if page == Page::Region {
+            self.region_enter(self.configuration_region_preference());
+        }
+        self.notification_selected = false;
+        self.snapshot_selected = None;
+        self.clear_configuration_drag();
+        self.page = page;
+        self.focus_reset.set(true);
+        self.pixel_scroll.set(0.0);
+        self.list_focused.set(false);
+        self.dragging_scrollbar = false;
+        self.last_row_click = None;
+        self.selected = None;
+        self.offset = 0;
+        self.focused = None;
+        self.fields.clear();
+        self.error = None;
+        self.status = None;
+        match self.page {
+            Page::CreateSnapshot => {
+                self.add_field("mco.configure.world.name", String::new(), 32);
+                self.add_field("mco.configure.world.description", String::new(), 256);
+            }
+            Page::Settings => self.enter_settings(),
+            Page::Initialize => {
+                self.add_field("mco.configure.world.name", text(&self.server, "name"), 32);
+                self.add_field(
+                    "mco.configure.world.description",
+                    text(&self.server, "motd"),
+                    256,
+                );
+            }
+            Page::Redeem => self.add_field("mco.selectServer.joinCode.hint", String::new(), 128),
+            _ => {}
+        }
+        if self.world_is_page() {
+            self.world_enter();
+        }
+        self.player_enter();
+        if !self.fields.is_empty() {
+            self.focused = Some(0);
+        }
+    }
+    fn ask(&mut self, action: RealmsAction, key: &'static str, detail: String) {
+        self.ask_action(Action::Realms(action), key, detail);
+    }
+    fn ask_action(&mut self, action: Action, key: &'static str, detail: String) {
+        self.confirmation = Some(Confirmation {
+            action,
+            key,
+            detail,
+            previous: self.page.clone(),
+            fields: self.fields.clone(),
+            reset_slot: None,
+        });
+        self.enter(Page::Confirm);
+    }
+    /// Main and automatic PDP return to their caller even while data is loading.
+    pub fn back(&mut self) -> bool {
+        let page = match self.page {
+            Page::List | Page::AvailabilityError => return true,
+            Page::Pdp if self.pdp_returns_to_title => return true,
+            Page::Pdp | Page::ConfigurationError => Page::List,
+            Page::Invites | Page::Redeem => self.header_return.clone(),
+            Page::Confirm => {
+                if let Some(c) = self.confirmation.take() {
+                    self.enter(c.previous);
+                    self.fields = c.fields;
+                    self.focused = (!self.fields.is_empty()).then_some(0);
+                    return false;
+                }
+                Page::List
+            }
+            Page::CreateSnapshot => {
+                self.snapshot_parent = None;
+                Page::Snapshots
+            }
+            Page::Terms => self.terms_return.clone(),
+            Page::Configure
+            | Page::Slots
+            | Page::Players
+            | Page::Subscription
+            | Page::Settings
+            | Page::Snapshots
+            | Page::Notifications
+            | Page::Initialize => Page::List,
+            Page::Region => {
+                self.region_event(region_screen::RegionEvent::Cancel);
+                return false;
+            }
+            Page::InviteLink => Page::Players,
+            Page::SlotOptions | Page::Backups | Page::Upload | Page::Reset => Page::Slots,
+            Page::Templates if self.template_type == "MINIGAME" => Page::Configure,
+            Page::Templates => Page::Reset,
+            Page::InvitePlayer => Page::Players,
+            _ => Page::Configure,
+        };
+        self.enter(page);
+        self.loading = self.page == Page::List && !self.servers_loaded;
+        false
+    }
+    pub fn title(&self) -> String {
+        if let Some(title) = self.world_title() {
+            return title;
+        }
+        if self.link_confirmation().is_some() {
+            return tr("chat.link.confirmTrusted");
+        }
+        if self.page == Page::AvailabilityError {
+            return self.availability_title.clone();
+        }
+        tr(match self.page {
+            Page::Pdp => "mco.selectServer.purchase",
+            Page::AvailabilityError | Page::ConfigurationError => "mco.errorMessage.generic",
+            Page::Notifications => "mco.news",
+            Page::Initialize | Page::CreateSnapshot => "mco.create.world",
+            Page::Distances => "mco.configure.world.settings.title",
+            Page::Region => "mco.configure.world.region_preference.title",
+            Page::ResourcePack => "mco.warning",
+            Page::List => "menu.online",
+            Page::Snapshots => "mco.snapshot.start",
+            Page::Invites => "mco.invites.title",
+            Page::Configure => "mco.configure.world.title",
+            Page::Settings => "mco.configure.world.settings.title",
+            Page::Slots => "mco.configure.worlds.title",
+            Page::SlotOptions => "mco.configure.world.buttons.options",
+            Page::Backups => "mco.configure.world.backup",
+            Page::BackupInfo => "mco.backup.info.title",
+            Page::PlayerError => "mco.errorMessage.generic",
+            Page::EditInviteCode => "mco.configure.world.invite_codes.edit.title",
+            Page::Upload => "mco.upload.select.world.title",
+            Page::Subscription => "mco.configure.world.subscription.title",
+            Page::Players => "mco.configure.world.players.title",
+            Page::InvitePlayer => "mco.configure.world.buttons.invite",
+            Page::Reset => "mco.reset.world.title",
+            Page::Templates => "mco.template.title",
+            Page::InviteLink => "mco.configure.world.buttons.invite_codes",
+            Page::Redeem => "mco.selectServer.joinCode.title",
+            Page::Terms => "mco.terms.title",
+            Page::Confirm => "mco.warning",
+        })
+    }
+    fn rows(&self) -> Vec<(String, String)> {
+        match self.page {
+            Page::Snapshots => self
+                .snapshot_realms
+                .iter()
+                .map(|server| {
+                    (
+                        tr("mco.snapshot.start"),
+                        translated("mco.snapshot.description", &[text(server, "name")]),
+                    )
+                })
+                .collect(),
+            Page::Region => REGIONS
+                .iter()
+                .map(|(_, key)| {
+                    (
+                        tr(&format!("realms.configuration.region.{key}")),
+                        String::new(),
+                    )
+                })
+                .collect(),
+            Page::List => self
+                .servers
+                .iter()
+                .map(|s| {
+                    let status = if s.get("expired").and_then(Value::as_bool) == Some(true) {
+                        "mco.selectServer.expired"
+                    } else if text(s, "state") == "OPEN" {
+                        "mco.selectServer.open"
+                    } else {
+                        "mco.selectServer.closed"
+                    };
+                    (
+                        text(s, "name"),
+                        format!(
+                            "{} · {} · {}",
+                            text(s, "owner"),
+                            text(s, "motd"),
+                            tr(status)
+                        ),
+                    )
+                })
+                .collect(),
+            Page::InviteLink => self
+                .invite_links
+                .get("inviteCodes")
+                .and_then(Value::as_array)
+                .map(|codes| {
+                    codes
+                        .iter()
+                        .map(|c| {
+                            (
+                                text(c, "code"),
+                                format!(
+                                    "{} · {}",
+                                    tr(
+                                        if c.get("enabled").and_then(Value::as_bool) == Some(true) {
+                                            "options.on"
+                                        } else {
+                                            "options.off"
+                                        }
+                                    ),
+                                    c.get("expirationDate")
+                                        .filter(|v| !v.is_null())
+                                        .map(Value::to_string)
+                                        .unwrap_or_else(|| tr(
+                                            "mco.configure.world.invite_codes.expiration.never"
+                                        ))
+                                ),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Page::Notifications => self
+                .notifications
+                .iter()
+                .map(|n| (notification_text(n), text(n, "url")))
+                .collect(),
+            Page::Invites => self
+                .invites
+                .iter()
+                .map(|s| (text(s, "worldName"), text(s, "worldOwnerName")))
+                .collect(),
+            Page::Backups => self
+                .backups
+                .iter()
+                .map(|b| {
+                    (
+                        translated(
+                            "mco.backup.entry",
+                            &[b.get("lastModifiedDate")
+                                .map(Value::to_string)
+                                .unwrap_or_default()],
+                        ),
+                        text(b, "backupId"),
+                    )
+                })
+                .collect(),
+            Page::Upload => self
+                .local_worlds
+                .iter()
+                .map(|(name, folder)| {
+                    (
+                        name.clone(),
+                        folder
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                })
+                .collect(),
+            Page::Players => self
+                .server
+                .get("players")
+                .and_then(Value::as_array)
+                .map(|players| {
+                    players
+                        .iter()
+                        .map(|p| {
+                            (
+                                text(p, "name"),
+                                tr(
+                                    if p.get("operator").and_then(Value::as_bool) == Some(true) {
+                                        "mco.configure.world.invites.ops.tooltip"
+                                    } else {
+                                        "mco.configure.world.invites.normal.tooltip"
+                                    },
+                                ),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Page::Templates => self
+                .templates
+                .iter()
+                .map(|t| (text(t, "name"), text(t, "author")))
+                .collect(),
+            Page::Slots => (1..=3)
+                .map(|slot| {
+                    (
+                        translated("mco.configure.world.slot", &[slot.to_string()]),
+                        if slot == number(&self.server, "activeSlot") {
+                            tr("mco.configure.current.minigame")
+                        } else {
+                            String::new()
+                        },
+                    )
+                })
+                .collect(),
+            _ => vec![],
+        }
+    }
+    fn controls(&self) -> Vec<Control> {
+        if let Some(controls) = self
+            .region_controls()
+            .or_else(|| self.world_controls())
+            .or_else(|| self.player_controls())
+            .or_else(|| self.reset_controls())
+        {
+            return controls;
+        }
+        if let Some(controls) = self.configuration_controls() {
+            return controls;
+        }
+        if let Some(controls) = self.entry_controls() {
+            return controls;
+        }
+        if self.loading {
+            return vec![Control {
+                label: tr("gui.cancel"),
+                enabled: true,
+                event: Event::Request(RealmsAction::CancelRequest),
+            }];
+        }
+        let mut controls = vec![];
+        macro_rules! add {
+            ($key:expr, $enabled:expr, $event:expr) => {
+                controls.push(Control {
+                    label: tr($key),
+                    enabled: $enabled && !self.loading,
+                    event: $event,
+                })
+            };
+        }
+        if !self.eligible {
+            add!("gui.back", true, Event::Back);
+            return controls;
+        }
+        let id = self.id();
+        let slot = self.slot;
+        let editable = self.editable();
+        match self.page {
+            Page::ConfigurationError => {}
+            Page::Snapshots => {
+                let parent = self.selected.and_then(|i| self.snapshot_realms.get(i));
+                add!(
+                    "mco.selectServer.create",
+                    crate::realms_service::is_snapshot() && parent.is_some(),
+                    Event::Page(Page::CreateSnapshot)
+                );
+            }
+            Page::CreateSnapshot => add!(
+                "gui.continue",
+                crate::realms_service::is_snapshot()
+                    && self.snapshot_parent.is_some_and(|id| id > 0)
+                    && !self.field(0).is_empty(),
+                Event::Confirm(
+                    RealmsAction::CreateSnapshotRealm {
+                        parent: self.snapshot_parent.unwrap_or_default(),
+                        name: self.field(0),
+                        description: self.field(1),
+                    },
+                    "mco.snapshot.createSnapshotPopup.title",
+                    tr("mco.snapshot.createSnapshotPopup.text")
+                )
+            ),
+            Page::ResourcePack => {
+                add!(
+                    "gui.yes",
+                    true,
+                    Event::Request(RealmsAction::ConfirmJoinPack(true))
+                );
+                add!(
+                    "gui.no",
+                    true,
+                    Event::Request(RealmsAction::ConfirmJoinPack(false))
+                );
+                return controls;
+            }
+            Page::Initialize => add!(
+                "mco.create.world",
+                editable && !self.field(0).is_empty(),
+                Event::Initialize
+            ),
+            Page::Distances => {
+                for (simulation, key) in [
+                    (false, "mco.configure.world.renderDistance"),
+                    (true, "mco.configure.world.simulationDistance"),
+                ] {
+                    let bounds = self.distance(simulation);
+                    for delta in [-1, 1] {
+                        let available = bounds.is_some_and(|(min, max, current)| {
+                            if delta < 0 {
+                                current > min
+                            } else {
+                                current < max
+                            }
+                        });
+                        controls.push(Control {
+                            label: format!(
+                                "{} {} {}",
+                                tr(key),
+                                bounds.map(|(_, _, v)| v.to_string()).unwrap_or_default(),
+                                if delta < 0 { "−" } else { "+" }
+                            ),
+                            enabled: editable && available,
+                            event: Event::Distance(simulation, delta),
+                        });
+                    }
+                }
+                add!(
+                    "mco.configure.world.buttons.region_preference",
+                    editable,
+                    Event::Page(Page::Region)
+                );
+                add!(
+                    "selectServer.refresh",
+                    editable,
+                    Event::Request(RealmsAction::TierConfiguration(id))
+                );
+            }
+            Page::Region => {
+                for (preference, key) in [
+                    (0, "realms.configuration.region_preference.automatic_player"),
+                    (1, "realms.configuration.region_preference.automatic_owner"),
+                ] {
+                    add!(
+                        key,
+                        editable,
+                        Event::Request(RealmsAction::SetRegion {
+                            id,
+                            preference: json!({"regionSelectionPreference":preference,"preferredRegion":null})
+                        })
+                    );
+                }
+                let region = self.selected.and_then(|i| REGIONS.get(i));
+                add!(
+                    "mco.configure.world.buttons.save",
+                    editable && region.is_some(),
+                    Event::Request(RealmsAction::SetRegion {
+                        id,
+                        preference: json!({"regionSelectionPreference":2,"preferredRegion":region.map(|r|r.0)})
+                    })
+                );
+            }
+            Page::List | Page::Pdp | Page::AvailabilityError => {
+                unreachable!("entry controls handled above")
+            }
+            Page::Notifications => {
+                let notification = self.selected.and_then(|i| self.notifications.get(i));
+                let uuid = notification
+                    .map(|n| text(n, "notificationUuid"))
+                    .unwrap_or_default();
+                add!(
+                    "mco.notification.dismiss",
+                    notification.is_some_and(
+                        |n| n.get("dismissable").and_then(Value::as_bool) == Some(true)
+                    ),
+                    Event::Request(RealmsAction::DismissNotification(uuid))
+                );
+                let url = notification.map(|n| text(n, "url")).unwrap_or_default();
+                add!(
+                    "mco.notification.visitUrl.buttonText.default",
+                    valid_link(&url),
+                    Event::Link(url)
+                );
+                let unseen = self
+                    .notifications
+                    .iter()
+                    .filter(|n| n.get("seen").and_then(Value::as_bool) != Some(true))
+                    .map(|n| text(n, "notificationUuid"))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>();
+                add!(
+                    "gui.done",
+                    !unseen.is_empty(),
+                    Event::Request(RealmsAction::MarkNotificationsSeen(unseen))
+                );
+            }
+            Page::Invites => {
+                let invite = self.selected.and_then(|i| self.invites.get(i));
+                let iid = invite.map(|i| text(i, "invitationId")).unwrap_or_default();
+                add!(
+                    "mco.invites.button.accept",
+                    invite.is_some(),
+                    Event::Request(RealmsAction::AcceptInvite(iid.clone()))
+                );
+                add!(
+                    "mco.invites.button.reject",
+                    invite.is_some(),
+                    Event::Confirm(
+                        RealmsAction::RejectInvite(iid),
+                        "mco.invites.button.reject",
+                        invite.map(|i| text(i, "worldName")).unwrap_or_default()
+                    )
+                );
+                add!(
+                    "selectServer.refresh",
+                    true,
+                    Event::Request(RealmsAction::Invites)
+                );
+            }
+            Page::Configure => {
+                add!(
+                    "mco.configure.world.buttons.settings",
+                    editable,
+                    Event::Page(Page::Settings)
+                );
+                add!(
+                    "mco.configure.worlds.title",
+                    self.owned(&self.server),
+                    Event::Page(Page::Slots)
+                );
+                add!(
+                    "mco.configure.world.buttons.players",
+                    editable,
+                    Event::Request(RealmsAction::Players(id))
+                );
+                add!(
+                    "mco.configure.world.buttons.subscription",
+                    self.owned(&self.server),
+                    Event::Request(RealmsAction::Subscription(id))
+                );
+                if text(&self.server, "state") == "OPEN" {
+                    add!(
+                        "mco.configure.world.buttons.close",
+                        editable,
+                        Event::Confirm(
+                            RealmsAction::CloseWorld(id),
+                            "mco.configure.world.close.question.line1",
+                            String::new()
+                        )
+                    );
+                } else {
+                    add!(
+                        "mco.configure.world.buttons.open",
+                        editable,
+                        Event::Request(RealmsAction::OpenWorld(id))
+                    );
+                }
+                add!(
+                    "mco.configure.world.buttons.invite_codes",
+                    editable,
+                    Event::Request(RealmsAction::InviteLink(id))
+                );
+                add!(
+                    "mco.configure.world.buttons.switchminigame",
+                    editable,
+                    Event::Request(RealmsAction::Templates {
+                        world_type: "MINIGAME".into(),
+                        page: 1
+                    })
+                );
+            }
+            Page::Settings => {
+                add!(
+                    "mco.configure.world.buttons.save",
+                    editable && !self.field(0).is_empty(),
+                    Event::SaveConfig
+                );
+                add!(
+                    "mco.configure.world.renderDistance",
+                    editable,
+                    Event::Request(RealmsAction::TierConfiguration(id))
+                );
+            }
+            Page::Slots => {
+                let chosen = self.selected.map(|i| i as i32 + 1).unwrap_or(slot);
+                add!(
+                    "mco.configure.world.slot.tooltip",
+                    editable && chosen != number(&self.server, "activeSlot") as i32,
+                    Event::Confirm(
+                        RealmsAction::SwitchSlot { id, slot: chosen },
+                        "mco.configure.world.slot.switch.question.line1",
+                        chosen.to_string()
+                    )
+                );
+                add!(
+                    "mco.configure.world.buttons.options",
+                    editable,
+                    Event::Page(Page::SlotOptions)
+                );
+                add!(
+                    "mco.configure.world.backup",
+                    self.owned(&self.server),
+                    Event::Request(RealmsAction::Backups { id, slot: chosen })
+                );
+                add!(
+                    "mco.backup.button.upload",
+                    editable,
+                    Event::Page(Page::Upload)
+                );
+                add!(
+                    "mco.backup.button.download",
+                    self.owned(&self.server),
+                    Event::Confirm(
+                        RealmsAction::Download { id, slot: chosen },
+                        "mco.configure.world.restore.download.question.line1",
+                        chosen.to_string()
+                    )
+                );
+                // The reset service acts on the active slot, so never silently reset a different world.
+                add!(
+                    "mco.backup.button.reset",
+                    editable && chosen == number(&self.server, "activeSlot") as i32,
+                    Event::Page(Page::Reset)
+                );
+            }
+            Page::SlotOptions => {
+                {
+                    let (key, label, default) =
+                        ("forceGameMode", "mco.configure.world.forceGameMode", false);
+                    let value = self
+                        .slot_options
+                        .get(key)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(default);
+                    add!(label, editable, Event::Toggle(key));
+                    let c = controls.last_mut().unwrap();
+                    c.label = format!(
+                        "{}: {}",
+                        c.label,
+                        tr(if value { "options.on" } else { "options.off" })
+                    );
+                }
+                // Numeric options use the same bounded values as RealmsWorldOptions.
+                for (key, label, limit) in [
+                    ("difficulty", "options.difficulty", 4),
+                    ("gameMode", "selectWorld.gameMode", 3),
+                    ("spawnProtection", "mco.configure.world.spawnProtection", 17),
+                ] {
+                    controls.push(Control {
+                        label: format!("{}: {}", tr(label), number(&self.slot_options, key)),
+                        enabled: editable && !self.loading,
+                        event: Event::Cycle(key, limit),
+                    });
+                }
+                controls.push(Control {
+                    label: tr("mco.configure.world.buttons.save"),
+                    enabled: editable && !self.loading,
+                    event: Event::SaveSlot,
+                });
+            }
+            Page::Backups => {
+                let backup = self.selected.and_then(|i| self.backups.get(i));
+                add!(
+                    "mco.backup.button.restore",
+                    editable && backup.is_some(),
+                    Event::Confirm(
+                        RealmsAction::RestoreBackup {
+                            id,
+                            backup_id: backup.map(|b| text(b, "backupId")).unwrap_or_default()
+                        },
+                        "mco.configure.world.restore.question.line2",
+                        backup.map(|b| text(b, "backupId")).unwrap_or_default()
+                    )
+                );
+                add!(
+                    "mco.backup.button.download",
+                    self.owned(&self.server),
+                    Event::Confirm(
+                        RealmsAction::Download { id, slot },
+                        "mco.configure.world.restore.download.question.line1",
+                        String::new()
+                    )
+                );
+                add!(
+                    "selectServer.refresh",
+                    true,
+                    Event::Request(RealmsAction::Backups { id, slot })
+                );
+            }
+            Page::Upload => {
+                let world = self.selected.and_then(|i| self.local_worlds.get(i));
+                add!(
+                    "mco.upload.button.name",
+                    editable && world.is_some(),
+                    Event::Confirm(
+                        RealmsAction::Upload {
+                            id,
+                            slot,
+                            folder: world.map(|(_, p)| p.clone()).unwrap_or_default(),
+                            initialize: None
+                        },
+                        "mco.reset.world.warning",
+                        world.map(|(n, _)| n.clone()).unwrap_or_default()
+                    )
+                );
+            }
+            Page::Subscription => {
+                add!(
+                    "mco.configure.world.subscription.extend",
+                    self.owned(&self.server),
+                    Event::Confirm(
+                        RealmsAction::OpenSubscription(id),
+                        "chat.link.confirm",
+                        String::new()
+                    )
+                );
+                add!(
+                    "mco.configure.world.delete.button",
+                    self.owned(&self.server)
+                        && self.server.get("expired").and_then(Value::as_bool) == Some(true),
+                    Event::Confirm(
+                        RealmsAction::DeleteRealm(id),
+                        "mco.configure.world.delete.question.line1",
+                        text(&self.server, "name")
+                    )
+                );
+            }
+            Page::Players => {
+                let player = self
+                    .server
+                    .get("players")
+                    .and_then(Value::as_array)
+                    .and_then(|p| self.selected.and_then(|i| p.get(i)));
+                let uuid = player.map(|p| text(p, "uuid")).unwrap_or_default();
+                let op = player
+                    .and_then(|p| p.get("operator"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                add!(
+                    "mco.configure.world.buttons.invite",
+                    editable,
+                    Event::Page(Page::InvitePlayer)
+                );
+                add!(
+                    "mco.configure.world.invites.remove.tooltip",
+                    editable && player.is_some(),
+                    Event::Confirm(
+                        RealmsAction::RemovePlayer {
+                            id,
+                            uuid: uuid.clone()
+                        },
+                        "mco.configure.world.uninvite.question",
+                        player.map(|p| text(p, "name")).unwrap_or_default()
+                    )
+                );
+                add!(
+                    if op {
+                        "mco.configure.world.invites.normal.tooltip"
+                    } else {
+                        "mco.configure.world.invites.ops.tooltip"
+                    },
+                    editable && player.is_some(),
+                    Event::Request(RealmsAction::SetOperator {
+                        id,
+                        uuid,
+                        operator: !op
+                    })
+                );
+            }
+            Page::InvitePlayer => add!(
+                "mco.configure.world.buttons.invite",
+                editable && !self.field(0).is_empty(),
+                Event::InvitePlayer
+            ),
+            Page::Redeem => add!(
+                "mco.selectServer.joinCode.select",
+                !self.field(0).is_empty(),
+                Event::Redeem
+            ),
+            Page::Reset => {
+                add!("mco.reset.world.generate", editable, Event::Reset);
+                add!(
+                    "mco.reset.world.template",
+                    editable,
+                    Event::Request(RealmsAction::Templates {
+                        world_type: "WORLD_TEMPLATE".into(),
+                        page: 1
+                    })
+                );
+            }
+            Page::Templates => {
+                let template = self.selected.and_then(|i| self.templates.get(i));
+                let template_id = template
+                    .map(|t| {
+                        t.get("id")
+                            .map(|id| {
+                                id.as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| id.to_string())
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                let action = if self.template_type == "MINIGAME" {
+                    RealmsAction::SwitchMinigame { id, template_id }
+                } else {
+                    RealmsAction::Reset {
+                        id,
+                        options: json!({"seed":null,"worldTemplateId":template_id.parse::<i64>().unwrap_or(-1),"levelType":0,"generateStructures":true}),
+                    }
+                };
+                add!(
+                    "mco.template.button.select",
+                    editable && template.is_some(),
+                    Event::Confirm(
+                        action,
+                        "mco.reset.world.warning",
+                        template.map(|t| text(t, "name")).unwrap_or_default()
+                    )
+                );
+                add!(
+                    "gui.back",
+                    self.template_page > 1,
+                    Event::Request(RealmsAction::Templates {
+                        world_type: self.template_type.clone(),
+                        page: (self.template_page - 1).max(1)
+                    })
+                );
+                add!(
+                    "spectatorMenu.next_page",
+                    !self.templates.is_empty(),
+                    Event::Request(RealmsAction::Templates {
+                        world_type: self.template_type.clone(),
+                        page: self.template_page + 1
+                    })
+                );
+                add!("mco.template.title", true, Event::TemplateType);
+                let trailer = template.map(|t| text(t, "trailer")).unwrap_or_default();
+                let publisher = template.map(|t| text(t, "link")).unwrap_or_default();
+                add!(
+                    "mco.template.button.trailer",
+                    valid_link(&trailer),
+                    Event::Link(trailer)
+                );
+                add!(
+                    "mco.template.button.publisher",
+                    valid_link(&publisher),
+                    Event::Link(publisher)
+                );
+            }
+            Page::InviteLink => {
+                let code = self
+                    .invite_links
+                    .get("inviteCodes")
+                    .and_then(Value::as_array)
+                    .and_then(|codes| self.selected.and_then(|i| codes.get(i)));
+                let token = code.map(|c| text(c, "code")).unwrap_or_default();
+                let enabled = code
+                    .and_then(|c| c.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let expiration_ms = code
+                    .and_then(|c| c.get("expirationDate"))
+                    .and_then(Value::as_i64);
+                add!(
+                    "mco.configure.world.invite_codes.copy",
+                    !token.is_empty(),
+                    Event::Copy(token.clone())
+                );
+                add!(
+                    "mco.configure.world.invite_codes.create",
+                    editable,
+                    Event::Request(RealmsAction::CreateInviteCode { id })
+                );
+                add!(
+                    "mco.configure.world.invite_codes.delete",
+                    editable && code.is_some(),
+                    Event::Confirm(
+                        RealmsAction::DeleteInviteCode {
+                            id,
+                            code: token.clone()
+                        },
+                        "mco.configure.world.invite_codes.delete",
+                        token.clone()
+                    )
+                );
+                add!(
+                    if enabled { "options.off" } else { "options.on" },
+                    editable && code.is_some(),
+                    Event::Request(RealmsAction::UpdateInviteCode {
+                        id,
+                        code: token.clone(),
+                        enabled: !enabled,
+                        expiration_ms
+                    })
+                );
+                add!(
+                    "mco.configure.world.invite_codes.expiration.1_day",
+                    editable && code.is_some(),
+                    Event::Request(RealmsAction::UpdateInviteCode {
+                        id,
+                        code: token.clone(),
+                        enabled,
+                        expiration_ms: Some(chrono::Utc::now().timestamp_millis() + 86_400_000)
+                    })
+                );
+                add!(
+                    "mco.configure.world.invite_codes.expiration.never",
+                    editable && code.is_some(),
+                    Event::Request(RealmsAction::UpdateInviteCode {
+                        id,
+                        code: token,
+                        enabled,
+                        expiration_ms: None
+                    })
+                );
+                add!(
+                    "selectServer.refresh",
+                    editable,
+                    Event::Request(RealmsAction::InviteLink(id))
+                );
+            }
+            Page::Terms => {
+                add!(
+                    "mco.terms.sentence.2",
+                    true,
+                    Event::Request(RealmsAction::OpenTerms)
+                );
+                add!(
+                    "mco.terms.buttons.agree",
+                    true,
+                    Event::Request(RealmsAction::AcceptTerms)
+                );
+                add!("mco.terms.buttons.disagree", true, Event::Back);
+                return controls;
+            }
+            Page::BackupInfo | Page::PlayerError | Page::EditInviteCode => {}
+            Page::Confirm => {
+                add!(
+                    "gui.yes",
+                    self.confirmation.is_some(),
+                    Event::AcceptConfirmation
+                );
+                add!("gui.no", true, Event::Back);
+                return controls;
+            }
+        }
+        controls.push(Control {
+            label: tr("gui.back"),
+            enabled: !self.loading,
+            event: Event::Back,
+        });
+        controls
+    }
+
+    fn dispatch(&mut self, action: RealmsAction) -> Action {
+        self.player_before_dispatch(&action);
+        if matches!(action, RealmsAction::SaveSettings { .. }) {
+            self.configuration.saving = true;
+        }
+        if action == RealmsAction::CancelRequest {
+            self.loading = false;
+            self.error = None;
+            self.status = None;
+            return Action::Realms(action);
+        }
+        match &action {
+            RealmsAction::SnapshotRealms => self.enter(Page::Snapshots),
+            RealmsAction::TierConfiguration(_) if self.page != Page::Settings => {
+                self.enter(Page::Distances)
+            }
+            RealmsAction::ConfirmJoinPack(false) => {
+                self.enter(Page::List);
+                return Action::Realms(action);
+            }
+            RealmsAction::Configure(id) => {
+                self.configuration = configuration::Configuration::default();
+                self.subscription = Value::Null;
+                self.tier_configuration = Value::Null;
+                self.regions = Value::Null;
+                self.server = self
+                    .servers
+                    .iter()
+                    .find(|s| number(s, "id") == *id)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                self.enter(Page::Configure);
+            }
+            RealmsAction::Invites => {
+                if self.page != Page::Invites {
+                    self.header_return = self.page.clone();
+                }
+                self.enter(Page::Invites);
+            }
+            RealmsAction::Players(_) => self.enter(Page::Players),
+            RealmsAction::Backups { slot, .. } => {
+                self.slot = *slot;
+                self.enter(Page::Backups);
+            }
+            RealmsAction::Subscription(_) => self.enter(Page::Subscription),
+            RealmsAction::InviteLink(_) => self.enter(Page::InviteLink),
+            RealmsAction::Templates { world_type, page } => {
+                self.template_type = world_type.clone();
+                self.template_page = *page;
+                self.enter(Page::Templates);
+            }
+            _ => {}
+        }
+        if !matches!(
+            action,
+            RealmsAction::OpenTerms
+                | RealmsAction::OpenSubscription(_)
+                | RealmsAction::RenewSubscription(_)
+                | RealmsAction::Purchase
+        ) {
+            self.set_loading(true);
+        }
+        Action::Realms(action)
+    }
+    pub(in crate::title) fn take_focus_reset(&self) -> bool {
+        self.focus_reset.replace(false)
+    }
+    pub(in crate::title) fn focus_needs_reset(&self) -> bool {
+        self.focus_reset.get()
+    }
+    pub(in crate::title) fn pointer_hit(&self, x: f32, y: f32, size: (f32, f32)) -> Option<u8> {
+        if self.configuration.saving {
+            return None;
+        }
+        let hit = if self.is_configuration() {
+            self.configuration_hit(x, y, size)
+        } else if self.world_is_page() {
+            self.world_hit(x, y, size)
+        } else if matches!(self.page, Page::Reset | Page::Templates | Page::Upload) {
+            self.reset_hit(x, y, size)
+        } else {
+            self.buttons(size.0, size.1)
+                .iter()
+                .find(|b| {
+                    b.enabled
+                        && (b.x..b.x + b.w).contains(&x)
+                        && (b.y..b.y + self.button_height(b)).contains(&y)
+                        && (self.page != Page::Invites
+                            || b.id == 10
+                            || (33.0..size.1 - 33.0).contains(&y))
+                })
+                .map(|b| b.id)
+        };
+        let hit = if self.page == Page::List {
+            self.entry_hit(x, y, size, hit)
+        } else {
+            hit
+        };
+        hit.filter(|id| {
+            self.buttons(size.0, size.1)
+                .iter()
+                .any(|b| b.id == *id && b.enabled)
+        })
+    }
+    pub(super) fn press(
+        &mut self,
+        hit: Option<u8>,
+        x: f32,
+        y: f32,
+        size: (f32, f32),
+    ) -> (Action, bool) {
+        // A settings save may have already selected Main locally. Keep every input
+        // route fenced until its response arrives, including header and row actions.
+        if self.configuration.saving {
+            return (Action::None, false);
+        }
+        if let Some(index) = hit.and_then(|id| id.checked_sub(10)).map(usize::from) {
+            self.list_focused.set(false);
+            let Some(control) = self.controls().into_iter().nth(index).filter(|c| c.enabled) else {
+                return (Action::None, false);
+            };
+            let action = match control.event {
+                Event::Back => return self.back_action(),
+                Event::Region(event) => self.region_event(event),
+                Event::World(event) => self.world_press_event(event, x, size),
+                Event::Player(event) => self.player_press_event(event, x, size.0),
+                Event::ResetScreen(event) => self.reset_event(event),
+                Event::ConfigurationTab(page) => self.select_configuration_tab(page),
+                Event::ConfigurationSlot(slot) => self.press_configuration_slot(slot),
+                Event::ConfigurationDistance(simulation) => {
+                    self.configuration_distance(simulation, x, size.0);
+                    Action::None
+                }
+                Event::Page(page) => {
+                    if page == Page::Pdp {
+                        self.pdp_returns_to_title = false;
+                    }
+                    if page == Page::Redeem {
+                        self.header_return = self.page.clone();
+                    }
+                    if page == Page::CreateSnapshot {
+                        self.snapshot_parent = self
+                            .selected
+                            .and_then(|i| self.snapshot_realms.get(i))
+                            .map(|s| number(s, "id"));
+                    }
+                    if matches!(self.page, Page::Configure | Page::Slots) {
+                        self.slot = number(&self.server, "activeSlot").clamp(1, 3) as i32;
+                    }
+                    self.enter(page);
+                    Action::None
+                }
+                Event::Request(action) => {
+                    if let RealmsAction::SetRegion { preference, .. } = &action
+                        && self.set_configuration_region(preference.clone())
+                    {
+                        return (Action::None, false);
+                    }
+                    let save = if self.page == Page::Settings {
+                        self.configuration_save(Some(action.clone()))
+                    } else {
+                        None
+                    };
+                    self.dispatch(save.unwrap_or(action))
+                }
+                Event::Confirm(action, key, detail) => {
+                    self.ask(action, key, detail);
+                    Action::None
+                }
+                Event::Initialize => {
+                    self.reset_open_new_realm(self.field(0), self.field(1));
+                    Action::None
+                }
+                Event::Distance(simulation, delta) => {
+                    let Some((min, max, current)) = self.distance(simulation) else {
+                        return (Action::None, false);
+                    };
+                    let distance = (current as i64 + delta).clamp(min as i64, max as i64) as u32;
+                    self.dispatch(if simulation {
+                        RealmsAction::SetSimulationDistance {
+                            id: self.id(),
+                            distance,
+                        }
+                    } else {
+                        RealmsAction::SetRenderDistance {
+                            id: self.id(),
+                            distance,
+                        }
+                    })
+                }
+                Event::SaveConfig => self.dispatch(RealmsAction::SaveConfig {
+                    id: self.id(),
+                    name: self.field(0),
+                    description: self.field(1),
+                }),
+                Event::SaveSlot => {
+                    self.slot_options["slotName"] = json!(self.field(0));
+                    self.dispatch(RealmsAction::SaveSlot {
+                        id: self.id(),
+                        slot: self.slot,
+                        options: self.slot_options.clone(),
+                    })
+                }
+                Event::InvitePlayer => self.dispatch(RealmsAction::InvitePlayer {
+                    id: self.id(),
+                    name: self.field(0),
+                }),
+                Event::Redeem => self.dispatch(RealmsAction::RedeemInvite(self.field(0))),
+                Event::Reset => {
+                    self.ask(RealmsAction::Reset{id:self.id(),options:json!({"seed":self.field(0),"worldTemplateId":-1,"levelType":0,"generateStructures":true})},"mco.configure.world.reset.question.line1",String::new());
+                    Action::None
+                }
+                Event::Toggle(key) => {
+                    let default = matches!(key, "pvp" | "spawnMonsters");
+                    let old = self
+                        .slot_options
+                        .get(key)
+                        .and_then(Value::as_bool)
+                        .unwrap_or(default);
+                    self.slot_options[key] = json!(!old);
+                    Action::None
+                }
+                Event::Cycle(key, max) => {
+                    self.slot_options[key] = json!((number(&self.slot_options, key) + 1) % max);
+                    Action::None
+                }
+                Event::AcceptConfirmation => {
+                    if let Some(c) = self.confirmation.take() {
+                        if let Some(slot) = c.reset_slot {
+                            self.reset_open(slot, true);
+                            return (Action::None, false);
+                        }
+                        self.enter(c.previous);
+                        match c.action {
+                            Action::Realms(action) => {
+                                let save = if self.page == Page::Settings {
+                                    self.configuration_save(Some(action.clone()))
+                                } else {
+                                    None
+                                };
+                                self.dispatch(save.unwrap_or(action))
+                            }
+                            action => action,
+                        }
+                    } else {
+                        Action::None
+                    }
+                }
+                Event::Copy(value) => Action::CopyText(value),
+                Event::CopyLink => {
+                    let url = self.link_confirmation().unwrap_or_default().to_owned();
+                    self.back();
+                    Action::CopyText(url)
+                }
+                Event::Link(url) => {
+                    if valid_link(&url) && self.news_link.as_ref() == Some(&url) && self.unread_news
+                    {
+                        if let Some(directory) = &self.news_directory {
+                            news::mark_read(directory);
+                        }
+                        self.unread_news = false;
+                    }
+                    if valid_link(&url) {
+                        self.ask_action(Action::OpenUri(url.clone()), "chat.link.confirm", url);
+                    }
+                    Action::None
+                }
+                Event::TemplateType => {
+                    let types = [
+                        "WORLD_TEMPLATE",
+                        "ADVENTUREMAP",
+                        "EXPERIENCE",
+                        "INSPIRATION",
+                        "MINIGAME",
+                    ];
+                    let next = (types
+                        .iter()
+                        .position(|t| *t == self.template_type)
+                        .unwrap_or(0)
+                        + 1)
+                        % types.len();
+                    self.dispatch(RealmsAction::Templates {
+                        world_type: types[next].into(),
+                        page: 1,
+                    })
+                }
+            };
+            return (action, false);
+        }
+        if self.world_press_content(x, y, size) || self.player_press_content(x, y, size) {
+            return (Action::None, false);
+        }
+        if let Some(action) = self.reset_press_list(x, y, size) {
+            return (action, false);
+        }
+        if self.page == Page::Invites {
+            self.press_invite_list(x, y, size);
+            return (Action::None, false);
+        }
+        if self.page == Page::List && self.servers_loaded && !self.main_has_list() {
+            let [bx, by, bw, bh] = self.empty_text_rect.get();
+            self.list_focused
+                .set((bx..bx + bw).contains(&x) && (by..by + bh).contains(&y));
+            return (Action::None, false);
+        }
+        if matches!(self.page, Page::List | Page::Pdp) {
+            return self.press_entry_row(x, y, size);
+        }
+        if self.loading {
+            return (Action::None, false);
+        }
+        self.focused = None;
+        if self.is_configuration() && !(24.0..size.1 - 35.0).contains(&y) {
+            return (Action::None, false);
+        }
+        if self.is_configuration() && self.press_configuration_scrollbar(x, y, size) {
+            return (Action::None, false);
+        }
+        for i in 0..self.fields.len() {
+            let [bx, by, bw, bh] = self.field_rect(i, size.0);
+            if (bx..bx + bw).contains(&x) && (by..by + bh).contains(&y) {
+                self.focused = Some(i);
+                return (Action::None, false);
+            }
+        }
+        if self.is_configuration() {
+            return (Action::None, false);
+        }
+        let count = self.rows().len();
+        let bottom = self.list_bottom(size.1);
+        if (size.0 / 2.0 - 154.0..size.0 / 2.0 + 154.0).contains(&x) && (44.0..bottom).contains(&y)
+        {
+            let index = ((y - 44.0) / 36.0) as usize + self.offset;
+            if index < count {
+                self.selected = Some(index);
+            }
+        }
+        (Action::None, false)
+    }
+    pub(super) fn buttons(&self, w: f32, h: f32) -> Vec<Button> {
+        let mut buttons = self.page_buttons(w, h);
+        if self.configuration.saving {
+            for button in &mut buttons {
+                button.enabled = false;
+            }
+        }
+        buttons
+    }
+    fn page_buttons(&self, w: f32, h: f32) -> Vec<Button> {
+        if let Some(buttons) = self
+            .region_buttons(w, h)
+            .or_else(|| self.world_buttons(w, h))
+            .or_else(|| self.player_buttons(w, h))
+            .or_else(|| self.reset_buttons(w, h))
+        {
+            return buttons;
+        }
+        if let Some(buttons) = self.configuration_buttons(w, h) {
+            return buttons;
+        }
+        if let Some(buttons) = self.entry_buttons(w, h) {
+            return buttons;
+        }
+        let controls = self.controls();
+        let rows = controls.len().div_ceil(3);
+        let top = h - 11.0 - rows as f32 * 24.0;
+        controls
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| Button {
+                x: if self.loading {
+                    (w / 2.0).floor() - 50.0
+                } else {
+                    (w / 2.0).floor() - 154.0 + (i % 3) as f32 * 104.0
+                },
+                y: top + (i / 3) as f32 * 24.0,
+                w: 100.0,
+                label: c.label,
+                enabled: c.enabled,
+                id: 10 + i as u8,
+                icon: None,
+                trailing: None,
+            })
+            .collect()
+    }
+    fn list_bottom(&self, h: f32) -> f32 {
+        match self.page {
+            Page::Pdp | Page::Invites => h - 33.0,
+            Page::List => h - if self.main_has_list() { 66.0 } else { 42.0 },
+            _ => h - 19.0 - self.controls().len().div_ceil(3) as f32 * 24.0,
+        }
+    }
+    fn field_rect(&self, index: usize, w: f32) -> [f32; 4] {
+        if let Some(rect) = self
+            .world_field_rect(index, w)
+            .or_else(|| self.player_field_rect(index, w))
+            .or_else(|| self.reset_field_rect(index, w))
+        {
+            return rect;
+        }
+        if self.page == Page::Settings {
+            return self.configuration_field_rect(index, w);
+        }
+        if self.page == Page::Redeem {
+            return [
+                (w / 2.0).floor() - 100.0,
+                self.join_field_y.get(),
+                200.0,
+                20.0,
+            ];
+        }
+        [
+            (w / 2.0).floor() - 150.0,
+            62.0 + index as f32 * 42.0,
+            300.0,
+            20.0,
+        ]
+    }
+    pub(super) fn focused_rect(&self, size: (f32, f32)) -> Option<[f32; 4]> {
+        self.focused.map(|i| self.field_rect(i, size.0))
+    }
+    pub(super) fn focused_text(
+        &mut self,
+    ) -> Option<(crate::clipboard::FieldId, &mut String, usize)> {
+        if matches!(
+            self.page,
+            Page::Redeem | Page::Settings | Page::InvitePlayer | Page::SlotOptions
+        ) && self.loading
+        {
+            return None;
+        }
+        let i = self.focused?;
+        let f = self.fields.get_mut(i)?;
+        Some((("realms", i), &mut f.value, f.max))
+    }
+    pub(super) fn blur(&mut self) {
+        self.focused = None;
+    }
+    pub(super) fn scroll(&mut self, delta: f32, size: (f32, f32)) {
+        if self.region_scroll(delta, size.1)
+            || self.world_scroll(delta, size.1)
+            || self.player_scroll(delta, size)
+            || self.reset_scroll(delta, size)
+        {
+            return;
+        }
+        if self.is_configuration() {
+            self.scroll_configuration(delta, size.1);
+            return;
+        }
+        if self.page == Page::Invites {
+            self.scroll_invites(delta, size.1);
+            return;
+        }
+        if matches!(self.page, Page::List | Page::Pdp) {
+            let step = if self.page == Page::Pdp { 22.0 } else { 18.0 };
+            let max = (self.content_height.get() - (self.list_bottom(size.1) - 44.0)).max(0.0);
+            self.pixel_scroll
+                .set((self.pixel_scroll.get() - delta * step).clamp(0.0, max));
+            return;
+        }
+        let visible = ((self.list_bottom(size.1) - 44.0) / 36.0).floor().max(1.0) as usize;
+        let max = self.rows().len().saturating_sub(visible);
+        self.offset = (self.offset as i64 - (delta * 3.0) as i64).clamp(0, max as i64) as usize;
+    }
+    pub(super) fn arrow(&mut self, up: bool, size: (f32, f32)) {
+        if self.is_configuration() || self.player_arrow(up, size) || self.reset_arrow(up, size) {
+            return;
+        }
+        if self.page == Page::List && self.servers_loaded && !self.main_has_list() {
+            self.list_focused.set(true);
+            return;
+        }
+        if self.page == Page::Invites {
+            self.arrow_invites(up, size.1);
+            return;
+        }
+        if matches!(self.page, Page::List | Page::Pdp) {
+            self.arrow_entry(up, size);
+            return;
+        }
+        let len = self.rows().len();
+        if len == 0 {
+            return;
+        }
+        let selected = self.selected.map_or(0, |i| {
+            if up {
+                i.saturating_sub(1)
+            } else {
+                (i + 1).min(len - 1)
+            }
+        });
+        self.selected = Some(selected);
+        let visible = ((self.list_bottom(size.1) - 44.0) / 36.0).floor().max(1.0) as usize;
+        if selected < self.offset {
+            self.offset = selected
+        } else if selected >= self.offset + visible {
+            self.offset = selected + 1 - visible
+        }
+    }
+    pub(super) fn tab(&mut self, reverse: bool, buttons: &[u8], focus: &mut Option<u8>) {
+        if self.region_tab(reverse, focus) || self.player_tab(reverse, buttons, focus) {
+            return;
+        }
+        let empty_focusable =
+            self.page == Page::List && self.servers_loaded && !self.main_has_list();
+        if empty_focusable
+            && !self.list_focused.get()
+            && ((!reverse && focus.is_none()) || (reverse && *focus == buttons.first().copied()))
+        {
+            self.list_focused.set(true);
+            *focus = None;
+            return;
+        }
+        self.list_focused.set(false);
+        let mut entries: Vec<(bool, usize)> = (0..self.fields.len()).map(|i| (true, i)).collect();
+        entries.extend(buttons.iter().map(|id| (false, *id as usize)));
+        if entries.is_empty() {
+            return;
+        }
+        let current = self
+            .focused
+            .map(|i| (true, i))
+            .or_else(|| focus.map(|id| (false, id as usize)));
+        let index = current.and_then(|c| entries.iter().position(|e| *e == c));
+        let next = if reverse {
+            index.map_or(entries.len() - 1, |i| {
+                (i + entries.len() - 1) % entries.len()
+            })
+        } else {
+            index.map_or(0, |i| (i + 1) % entries.len())
+        };
+        self.focused = None;
+        *focus = None;
+        let (field, id) = entries[next];
+        if field {
+            self.focused = Some(id)
+        } else {
+            *focus = Some(id as u8);
+            self.entry_focus(id as u8);
+        }
+    }
+    pub(super) fn draw(
+        &self,
+        atlas: &HudAtlas,
+        batch: &mut HudBatch,
+        caret: &mut crate::ui::Caret,
+        started: std::time::Instant,
+    ) {
+        if self.region_draw(atlas, batch)
+            || self.world_draw(atlas, batch, caret, started)
+            || self.player_draw(atlas, batch, caret, started)
+            || self.reset_draw(atlas, batch, caret, started)
+            || self.draw_configuration(atlas, batch, caret, started)
+        {
+            return;
+        }
+        if self.draw_entry(atlas, batch, started) {
+            return;
+        }
+        if self.page == Page::Redeem {
+            self.draw_join(atlas, batch, caret, started);
+            return;
+        }
+        let (w, h) = (batch.width, batch.height);
+        super::centered(atlas, batch, &self.title(), 15.0, u32::MAX);
+        let mut message = if !self.eligible {
+            tr("horizon.realms.sign_in_required")
+        } else if self.loading {
+            tr("mco.configure.world.loading")
+        } else {
+            String::new()
+        };
+        if !self.loading && self.eligible {
+            message = match self.page {
+                Page::List if self.servers.is_empty() => tr("mco.selectServer.noRealms"),
+                Page::Invites if self.invites.is_empty() => tr("mco.invites.nopending"),
+                Page::Backups if self.backups.is_empty() => tr("mco.backup.nobackups"),
+                Page::Upload if self.local_worlds.is_empty() => tr("mco.upload.select.world.none"),
+                Page::Terms => tr("mco.terms.sentence.1"),
+                Page::ResourcePack => tr("mco.configure.world.resourcepack.question"),
+                Page::Confirm => self
+                    .confirmation
+                    .as_ref()
+                    .map(|c| format!("{}\n{}", tr(c.key), c.detail))
+                    .unwrap_or_default(),
+                Page::Subscription => format!(
+                    "{}: {}\n{}: {}",
+                    tr("mco.configure.world.subscription.start"),
+                    self.subscription
+                        .get("startDate")
+                        .map(Value::to_string)
+                        .unwrap_or_default(),
+                    tr("mco.configure.world.subscription.timeleft"),
+                    self.subscription
+                        .get("daysLeft")
+                        .map(Value::to_string)
+                        .unwrap_or_default()
+                ),
+                Page::Configure => format!(
+                    "{}\n{}",
+                    text(&self.server, "name"),
+                    text(&self.server, "motd")
+                ),
+                _ => String::new(),
+            };
+        }
+        if let Some(error) = &self.error {
+            message = error.clone()
+        } else if let Some(status) = &self.status {
+            message = status.clone()
+        }
+        if !message.is_empty() {
+            let lines = atlas
+                .font
+                .split(&Text::literal(message), (w - 40.0).clamp(100.0, 400.0));
+            for (i, line) in lines.iter().enumerate() {
+                super::centered(
+                    atlas,
+                    batch,
+                    &line.plain(),
+                    47.0 + i as f32 * 10.0,
+                    if self.error.is_some() {
+                        rgba(255, 85, 85, 255)
+                    } else {
+                        u32::MAX
+                    },
+                );
+            }
+            if self.loading || self.error.is_some() || self.status.is_some() || !self.eligible {
+                return;
+            }
+        }
+        for (i, field) in self.fields.iter().enumerate() {
+            let rect = self.field_rect(i, w);
+            batch.text(
+                atlas,
+                &tr(field.key),
+                rect[0],
+                rect[1] - 12.0,
+                u32::MAX,
+                true,
+            );
+            caret.draw(
+                batch,
+                atlas,
+                (("realms", i), &field.value, field.max),
+                rect,
+                self.focused == Some(i),
+                started,
+            );
+        }
+        let bottom = self.list_bottom(h);
+        for (i, (name, detail)) in self.rows().into_iter().enumerate().skip(self.offset) {
+            let y = 44.0 + (i - self.offset) as f32 * 36.0;
+            if y + 36.0 > bottom {
+                break;
+            }
+            let x = (w / 2.0).floor() - 154.0;
+            if self.selected == Some(i) {
+                batch.fill(atlas, x, y, 308.0, 34.0, rgba(100, 100, 100, 180));
+            }
+            batch.text(
+                atlas,
+                &name[..atlas.font.fit(&name, 300.0)],
+                x + 4.0,
+                y + 4.0,
+                u32::MAX,
+                true,
+            );
+            batch.text(
+                atlas,
+                &detail[..atlas.font.fit(&detail, 300.0)],
+                x + 4.0,
+                y + 17.0,
+                rgba(170, 170, 170, 255),
+                true,
+            );
+        }
+    }
+}
+
+impl Title {
+    /// Called by the vanilla title button and by alternate startup layouts.
+    pub fn open_realms(&mut self) -> Action {
+        let summaries = self.recent_worlds();
+        let worlds = summaries
+            .iter()
+            .filter(|w| !w.locked && !w.corrupted)
+            .map(|w| (w.name.clone(), self.saves.join(&w.folder)))
+            .collect();
+        let eligible = self.realms_eligible && self.allows_multiplayer;
+        let mut state = State::new(eligible, self.realms_profile_uuid.clone(), worlds);
+        state.reset_set_worlds(summaries);
+        state.set_news_directory(crate::logging::player_dir());
+        state.redirect_to_pdp = true;
+        let action = if eligible {
+            state.dispatch(RealmsAction::Refresh)
+        } else {
+            state.set_availability_error_kind(AvailabilityErrorKind::Unauthorized, String::new());
+            Action::None
+        };
+        self.mode = Mode::Realms(state);
+        self.focused_button = None;
+        action
+    }
+    pub fn realms_mut(&mut self) -> Option<&mut State> {
+        match &mut self.mode {
+            Mode::Realms(state) => Some(state),
+            _ => None,
+        }
+    }
+}

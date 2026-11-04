@@ -246,6 +246,7 @@ mod net_harness;
 mod nether_portal;
 mod no_resources;
 mod ominous_item_spawner;
+mod online_options;
 mod options;
 mod ordered_tick;
 mod packs;
@@ -272,6 +273,9 @@ mod quick_actions;
 mod raids;
 mod ram_limit;
 mod random_textures;
+mod realms;
+mod realms_entry;
+mod realms_ui;
 mod recipe_book;
 mod remote;
 mod remote_camera;
@@ -2656,6 +2660,10 @@ struct Game<'a> {
     /// Duration of the last frame in ticks (GUI easing).
     frame_ticks: f32,
     title: Option<Title>,
+    online: online_options::OnlineState,
+    realms: realms::RealmsRuntime,
+    realms_entry: realms_entry::RealmEntryState,
+    realms_ui: realms_ui::RealmsUi,
     /// Armor slots: head, chest, legs, feet.
     armor: [Option<ItemStack>; 4],
     /// The off hand (Inventory slot 40, saved as slot 150; menu slot 504 here).
@@ -8474,6 +8482,27 @@ impl Game<'_> {
         if self.screen != Screen::Options && self.ui.options.calibration_fullscreen.is_some() {
             self.show_calibration(h);
         }
+        let draw_title = self.screen != Screen::Win
+            && (self.screen != Screen::Options
+                || self.ui.options.page() == horizon_client::options_ui::Page::Friends);
+        if draw_title
+            && self
+                .title
+                .as_ref()
+                .is_some_and(|title| matches!(title.mode, horizon_client::title::Mode::Realms(_)))
+        {
+            self.flush_skin_slots();
+        }
+        self.realms_ui.prepare(
+            if draw_title {
+                self.title.as_mut()
+            } else {
+                None
+            },
+            &mut self.gui.atlas,
+            &mut batch,
+            &mut self.skin_profiles.borrow_mut(),
+        );
         if self.screen == Screen::Win {
             self.draw_win_screen(&mut batch);
             // The early return skips the match below: the hook still sees the
@@ -8487,6 +8516,7 @@ impl Game<'_> {
                 self.update_remote_skins();
             }
             self.draw_options(&mut batch);
+            self.draw_online_toasts(&mut batch, false);
             self.fire_screen_render_post(&mut batch);
             self.draw_split_hud(&mut batch, true);
             return batch;
@@ -8531,6 +8561,7 @@ impl Game<'_> {
             self.draw_toasts(&mut batch, false);
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
+            self.draw_online_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
             return batch;
         }
@@ -8540,6 +8571,7 @@ impl Game<'_> {
         // download while the connection screen shows.
         if self.remote_overlay(&mut batch) {
             self.draw_pack_toasts(&mut batch, false);
+            self.draw_online_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
             return batch;
         }
@@ -8849,6 +8881,7 @@ impl Game<'_> {
         self.draw_toasts(&mut batch, !show_hud);
         self.draw_tutorial_toasts(&mut batch, !show_hud);
         self.draw_pack_toasts(&mut batch, !show_hud);
+        self.draw_online_toasts(&mut batch, !show_hud);
         self.draw_music_toast(&mut batch, !show_hud);
         if self.server_packs.prompt.is_none() {
             self.remote_hud(&mut batch);
@@ -12114,13 +12147,50 @@ impl Game<'_> {
         }
         Ok(())
     }
+    fn realm_effect(&mut self, effect: Option<realms_entry::EntryEffect>) -> Result<()> {
+        match effect {
+            Some(realms_entry::EntryEffect::Join(join)) => self.begin_realm_join(join)?,
+            Some(realms_entry::EntryEffect::OpenUri(uri)) => packs::open_uri(&uri),
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn poll_realms_menu(&mut self) -> Result<()> {
+        if let Some(title) = self.title.as_mut() {
+            realms::prepare_title(title);
+            self.realms
+                .poll_notifications(title, self.settings.file.bool("realmsNotifications"));
+            let effect = if let Some(done) = self.realms.poll(title) {
+                self.realms_entry.handle_completion(done, title)
+            } else {
+                self.realms_entry.poll(title)
+            };
+            self.realm_effect(effect)?;
+        } else {
+            self.realms.cancel();
+            self.realms_entry.cancel();
+        }
+        self.poll_realm_join()
+    }
+
     /// What the title screen asked for, from a click or Enter.
     fn title_action(&mut self, event_loop: &dyn EventLoopCtl, action: Action) -> Result<()> {
+        if let Some(title) = self.title.as_mut()
+            && self
+                .realms_entry
+                .create(&action, &self.options.resources, title)
+        {
+            return Ok(());
+        }
         match action {
             // A splitscreen player's title never ends the process (P1's does).
             Action::Quit if self.options.split_guest => {}
             Action::Quit => event_loop.exit(),
             Action::Options => self.open_options(true),
+            Action::SocialFriends => {
+                self.open_options_at(true, horizon_client::options_ui::Page::Friends)
+            }
             Action::Accessibility => {
                 self.open_options_at(true, horizon_client::options_ui::Page::Accessibility)
             }
@@ -12130,6 +12200,19 @@ impl Game<'_> {
             Action::Sounds => self.open_options_at(true, horizon_client::options_ui::Page::Sound),
             Action::Credits => {
                 self.open_options_at(true, horizon_client::options_ui::Page::Credits)
+            }
+            Action::Realms(action) => {
+                if let Some(title) = self.title.as_mut() {
+                    if let horizon_client::title::realms::RealmsAction::ConfirmJoinPack(yes) =
+                        action
+                    {
+                        let effect = self.realms_entry.confirm_join_pack(yes, title);
+                        self.realm_effect(effect)?;
+                    } else {
+                        self.realms_entry.cancel();
+                        self.realms.start(action, title);
+                    }
+                }
             }
             Action::OpenUri(uri) => packs::open_uri(&uri),
             Action::CopyText(text) => {
@@ -15531,6 +15614,8 @@ impl Game<'_> {
         });
     }
     fn render(&mut self) -> Result<bool> {
+        self.tick_online_options();
+        self.poll_realms_menu()?;
         // The window's GPU holds the atlas: its copy in memory is kept
         // compressed (a no-op once it is).
         if self.renderer.is_some() {
@@ -17508,6 +17593,10 @@ impl Game<'_> {
         } = &event
             && key_event.state == ElementState::Pressed
             && let PhysicalKey::Code(key) = key_event.physical_key
+            && !(self.screen != Screen::Options
+                && self.title.as_ref().is_some_and(|title| {
+                    matches!(title.mode, horizon_client::title::Mode::Realms(_))
+                }))
             && self.key_focus_key(event_loop, key)
         {
             // The keyboard's focus took the key; its characters are a separate
@@ -17922,6 +18011,18 @@ impl Game<'_> {
                         title.select_world_at(self.cursor.0, self.cursor.1, (b.width, b.height));
                     }
                 }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Right,
+                    ..
+                } if self.title.is_some() => {
+                    let viewport = self.gui_size();
+                    if self.title.as_mut().is_some_and(|title| {
+                        title.realms_right_click(self.cursor.0, self.cursor.1, viewport)
+                    }) {
+                        self.audio.play_button_click();
+                    }
+                }
                 WindowEvent::MouseInput { .. } if self.title.is_some() => {}
                 WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
@@ -18287,6 +18388,11 @@ impl Game<'_> {
                                 .title
                                 .as_mut()
                                 .and_then(|t| t.tab_bar_key(key, ctrl, shift));
+                            let pending = self.title.as_mut().and_then(Title::take_pending_action);
+                            if let Some(action) = pending {
+                                self.save_title_options();
+                                self.title_action(event_loop, action)?;
+                            }
                             if let Some(sound) = tab {
                                 if sound {
                                     self.audio.play_button_click();
@@ -18300,10 +18406,7 @@ impl Game<'_> {
                             PhysicalKey::Code(
                                 code @ (KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space),
                             ) if code != KeyCode::Space
-                                || self.title.as_mut().is_some_and(|t| {
-                                    !t.has_caret_field()
-                                        && (t.list_focused() || t.focused_button.is_some())
-                                }) =>
+                                || self.title.as_mut().is_some_and(Title::space_selects) =>
                             {
                                 let (action, sound) = self
                                     .title
@@ -18339,6 +18442,12 @@ impl Game<'_> {
                                 if let Some(t) = self.title.as_mut() {
                                     t.arrow_key(key, (w, h), shift);
                                 }
+                                if let Some(action) =
+                                    self.title.as_mut().and_then(Title::take_pending_action)
+                                {
+                                    self.save_title_options();
+                                    self.title_action(event_loop, action)?;
+                                }
                             }
                             PhysicalKey::Code(KeyCode::Backspace) => self.title_edit(None, true),
                             PhysicalKey::Code(KeyCode::Tab) => {
@@ -18349,7 +18458,8 @@ impl Game<'_> {
                             }
                             PhysicalKey::Code(KeyCode::Escape) => {
                                 if let Some(t) = self.title.as_mut() {
-                                    t.escape();
+                                    let action = t.escape_action();
+                                    self.title_action(event_loop, action)?;
                                     self.reopen_data_packs(event_loop)?;
                                 }
                                 self.save_title_options();
@@ -18642,6 +18752,9 @@ impl Game<'_> {
     }
     /// The loop ended: close the pads' output, save the world, write the perf report.
     pub(super) fn shut_down(&mut self) {
+        self.online.send_offline_presence();
+        self.realms.cancel();
+        self.realms_entry.cancel();
         self.pad_close_output();
         if let Err(e) = self.save_for_exit() {
             log::warn!("Horizon: failed to save the world on exit: {e}");
@@ -19010,6 +19123,10 @@ impl<'a> Game<'a> {
             scope_scale: 0.5,
             frame_ticks: 0.0,
             title: None,
+            online: Default::default(),
+            realms: Default::default(),
+            realms_entry: Default::default(),
+            realms_ui: Default::default(),
             armor: [None, None, None, None],
             offhand: None,
             hotbar_pop: [0; 10],
@@ -19405,6 +19522,7 @@ enum LoaderMsg {
 }
 
 enum PendingWorldEntry {
+    Realm(realms_entry::RealmJoin),
     Local {
         folder: String,
         name: Option<String>,
@@ -19485,6 +19603,7 @@ impl Game<'_> {
             self.reload_packs();
         }
         match self.pending_entry.take() {
+            Some(PendingWorldEntry::Realm(join)) => self.begin_realm_join(join)?,
             Some(PendingWorldEntry::Local {
                 folder,
                 name,
@@ -21178,6 +21297,9 @@ impl Loading {
         self.draw_menu(&mut batch);
         self.menu.frame_drawn((batch.width, batch.height));
         let mut frame = loading_frame(&batch);
+        if self.menu.friends_overlay_open() && self.settings.menu_blur >= 1 {
+            frame.menu_blur = Some(self.settings.menu_blur as f32);
+        }
         frame.yaw = self.panorama_rotation.update(
             self.started.elapsed().as_secs_f32(),
             self.settings.file.double("panoramaScrollSpeed") as f32,
@@ -21358,8 +21480,9 @@ impl ApplicationHandler for App {
         }
     }
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
-        if let App::Ready(game) = self {
-            game.exiting(event_loop);
+        match self {
+            App::Ready(game) => game.exiting(event_loop),
+            App::Loading(loading) => loading.menu.stop_online(),
         }
     }
 }

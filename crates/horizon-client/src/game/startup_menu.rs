@@ -14,6 +14,11 @@ use winit::{event::KeyEvent, keyboard::ModifiersState};
 pub(super) struct StartupMenu {
     title: Option<Title>,
     options: OptionsUi,
+    online: super::online_options::OnlineState,
+    realms: super::realms::RealmsRuntime,
+    realms_entry: super::realms_entry::RealmEntryState,
+    realms_ui: super::realms_ui::RealmsUi,
+    skin_profiles: horizon_client::skins::Resolver,
     options_open: bool,
     /// The credits from Credits & Attribution, and their last frame.
     win: Option<(horizon_client::win_screen::WinScreen, Instant)>,
@@ -51,6 +56,16 @@ pub(super) struct StartupMenu {
 }
 
 impl StartupMenu {
+    pub(super) fn friends_overlay_open(&self) -> bool {
+        self.options_open && self.options.page() == Page::Friends
+    }
+
+    pub(super) fn stop_online(&mut self) {
+        self.online.send_offline_presence();
+        self.realms.cancel();
+        self.realms_entry.cancel();
+    }
+
     pub fn new(options: &Options, pack_error: Option<&str>) -> Result<Self> {
         let pending = if let Some(address) = &options.server {
             Some(PendingWorldEntry::Server {
@@ -115,6 +130,11 @@ impl StartupMenu {
             .take()
             .map(|title| title.with_user(|| game.options.player_name()));
         game.pending_entry = self.pending.take();
+        game.online = std::mem::take(&mut self.online);
+        game.realms = std::mem::take(&mut self.realms);
+        game.realms_entry = std::mem::take(&mut self.realms_entry);
+        game.realms_ui = std::mem::take(&mut self.realms_ui);
+        *game.skin_profiles.get_mut() = std::mem::take(&mut self.skin_profiles);
         game.cursor = self.cursor;
         game.modifiers = self.modifiers;
         game.physical_keys = std::mem::take(&mut self.physical_keys);
@@ -267,15 +287,17 @@ impl StartupMenu {
         } else {
             self.modifiers.control_key()
         };
-        if let PhysicalKey::Code(key) = event.physical_key
-            && title
-                .tab_bar_key(key, ctrl, self.modifiers.shift_key())
-                .is_some()
-        {
-            return Action::None;
+        if let PhysicalKey::Code(key) = event.physical_key {
+            let tab = title.tab_bar_key(key, ctrl, self.modifiers.shift_key());
+            if let Some(action) = title.take_pending_action() {
+                return action;
+            }
+            if tab.is_some() {
+                return Action::None;
+            }
         }
         match event.physical_key {
-            PhysicalKey::Code(KeyCode::Escape) => title.escape(),
+            PhysicalKey::Code(KeyCode::Escape) => return title.escape_action(),
             PhysicalKey::Code(KeyCode::F5) => title.refresh_servers(),
             PhysicalKey::Code(KeyCode::Tab) => {
                 title.tab_dir(self.modifiers.shift_key(), viewport);
@@ -283,10 +305,7 @@ impl StartupMenu {
             PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => {
                 return title.confirm_key_size(viewport).0;
             }
-            PhysicalKey::Code(KeyCode::Space)
-                if !title.has_caret_field()
-                    && (title.list_focused() || title.focused_button.is_some()) =>
-            {
+            PhysicalKey::Code(KeyCode::Space) if title.space_selects() => {
                 return title.confirm_key_size(viewport).0;
             }
             PhysicalKey::Code(
@@ -310,6 +329,7 @@ impl StartupMenu {
                 | KeyCode::ArrowDown),
             ) => {
                 title.arrow_key(key, viewport, self.modifiers.shift_key());
+                return title.take_pending_action().unwrap_or(Action::None);
             }
             _ => {
                 let cleared = !title.has_caret_field()
@@ -507,6 +527,30 @@ impl Loading {
     fn menu_option_events(&mut self, events: Vec<Event>) {
         for event in events {
             match event {
+                Event::JoinFriendCode => {
+                    if let Some(title) = self.menu.title.as_mut() {
+                        title.mode = horizon_client::title::Mode::Multiplayer(
+                            horizon_client::multiplayer::Screen::friend(),
+                        );
+                        self.menu.options_open = false;
+                    }
+                }
+                Event::CopyFriendProfile => {
+                    use horizon_client::clipboard::Clipboard;
+                    if let Some(auth) = horizon_client::auth::current() {
+                        self.menu.clipboard.set(&auth.name);
+                    }
+                }
+                Event::Online(action) => {
+                    if self
+                        .menu
+                        .online
+                        .action(action, &mut self.settings, &mut self.menu.options)
+                    {
+                        super::packs::open_uri(super::online_options::PRIVACY_URL);
+                    }
+                    self.save_menu_settings();
+                }
                 Event::Changed => {
                     self.save_menu_settings();
                     self.apply_menu_settings();
@@ -685,9 +729,34 @@ impl Loading {
     }
 
     fn menu_action(&mut self, event_loop: &dyn EventLoopCtl, action: Action) {
+        if let Some(title) = self.menu.title.as_mut()
+            && self
+                .menu
+                .realms_entry
+                .create(&action, &self.vanilla_root, title)
+        {
+            return;
+        }
         match action {
-            Action::Quit => event_loop.exit(),
+            Action::Quit => {
+                self.menu.online.send_offline_presence();
+                event_loop.exit();
+            }
+            Action::Realms(action) => {
+                if let Some(title) = self.menu.title.as_mut() {
+                    if let horizon_client::title::realms::RealmsAction::ConfirmJoinPack(yes) =
+                        action
+                    {
+                        let effect = self.menu.realms_entry.confirm_join_pack(yes, title);
+                        self.startup_realm_effect(effect);
+                    } else {
+                        self.menu.realms_entry.cancel();
+                        self.menu.realms.start(action, title);
+                    }
+                }
+            }
             Action::Options => self.open_menu_options(Page::Main),
+            Action::SocialFriends => self.open_menu_options(Page::Friends),
             Action::Accessibility => self.open_menu_options(Page::Accessibility),
             Action::Language => self.open_menu_options(Page::Language),
             Action::Sounds => self.open_menu_options(Page::Sound),
@@ -762,7 +831,13 @@ impl Loading {
             return false;
         };
         let options = &self.menu.options;
-        if self.gui.is_none()
+        if (!self.menu.options_open
+            && self
+                .menu
+                .title
+                .as_ref()
+                .is_some_and(|title| matches!(title.mode, horizon_client::title::Mode::Realms(_))))
+            || self.gui.is_none()
             || self.menu.pending.is_some()
             || self.menu.win.is_some()
             || (self.menu.options_open
@@ -1073,6 +1148,20 @@ impl Loading {
                     }
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let batch = HudBatch::new(self.menu_size());
+                if let Some(title) = &mut self.menu.title {
+                    title.realms_right_click(
+                        self.menu.cursor.0,
+                        self.menu.cursor.1,
+                        (batch.width, batch.height),
+                    );
+                }
+            }
             // AbstractSelectionList.mouseClicked: a world row takes a click
             // of any button, so the middle one selects it without joining.
             WindowEvent::MouseInput {
@@ -1120,6 +1209,21 @@ impl Loading {
                     self.apply_menu_settings();
                     self.save_menu_settings();
                 } else if self.menu.options_open {
+                    let control = if cfg!(target_os = "macos") {
+                        self.menu.modifiers.super_key()
+                    } else {
+                        self.menu.modifiers.control_key()
+                    };
+                    if let PhysicalKey::Code(key) = event.physical_key
+                        && let Some(events) = self.menu.options.friends_tab_shortcut(
+                            key,
+                            control,
+                            self.menu.modifiers.shift_key(),
+                        )
+                    {
+                        self.menu_option_events(events);
+                        return Ok(());
+                    }
                     let shortcut = self.menu.shortcut(&event);
                     let atlas = &self.gui.as_ref().unwrap().atlas;
                     let handled = shortcut.is_some_and(|s| {
@@ -1147,7 +1251,58 @@ impl Loading {
         Ok(())
     }
 
+    fn startup_realm_effect(&mut self, effect: Option<super::realms_entry::EntryEffect>) {
+        match effect {
+            Some(super::realms_entry::EntryEffect::Join(join)) => {
+                self.menu.pending = Some(PendingWorldEntry::Realm(join));
+                self.menu.perf.world_opening();
+            }
+            Some(super::realms_entry::EntryEffect::OpenUri(uri)) => super::packs::open_uri(&uri),
+            None => {}
+        }
+    }
+
+    fn poll_startup_realms(&mut self) {
+        let Some(title) = self.menu.title.as_mut() else {
+            return;
+        };
+        super::realms::prepare_title(title);
+        self.menu
+            .realms
+            .poll_notifications(title, self.settings.file.bool("realmsNotifications"));
+        let effect = if let Some(done) = self.menu.realms.poll(title) {
+            self.menu.realms_entry.handle_completion(done, title)
+        } else {
+            self.menu.realms_entry.poll(title)
+        };
+        self.startup_realm_effect(effect);
+    }
+
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
+        self.menu.online.tick(
+            horizon_client::auth::current(),
+            &self.settings,
+            &mut self.menu.options,
+            false,
+            horizon_client::social_service::PresenceStatus::Online,
+            true,
+        );
+        self.poll_startup_realms();
+        if let Some(gui) = &mut self.gui {
+            let draw_title = self.menu.pending.is_none()
+                && self.menu.win.is_none()
+                && (!self.menu.options_open || self.menu.options.page() == Page::Friends);
+            self.menu.realms_ui.prepare(
+                if draw_title {
+                    self.menu.title.as_mut()
+                } else {
+                    None
+                },
+                &mut gui.atlas,
+                batch,
+                &mut self.menu.skin_profiles,
+            );
+        }
         let logs = horizon_client::logging::recent_lines();
         let Some(gui) = &self.gui else {
             // The pack's screens do not exist yet: the boot screen holds the
@@ -1174,6 +1329,23 @@ impl Loading {
                 self.menu.win = None;
             }
         } else if self.menu.options_open {
+            if self.menu.options.page() == Page::Friends
+                && let Some(title) = &self.menu.title
+            {
+                let items = match &self.loaded {
+                    Some(Ok(loaded)) => Some(&*loaded.pack.item_renderer),
+                    _ => None,
+                };
+                title.draw_with_items(
+                    &gui.atlas,
+                    items,
+                    batch,
+                    (-1.0, -1.0),
+                    self.settings.file.bool("hideSplashTexts"),
+                    self.settings.file.bool("hideServerAddress"),
+                );
+                batch.blur_at = batch.vertices.len() as u32;
+            }
             self.menu
                 .options
                 .draw(&self.settings, batch, &gui.atlas, self.menu.cursor);
@@ -1212,9 +1384,16 @@ impl Loading {
         }
         // Over every screen, as the game's; no sound before the sound engine.
         let title_toast = self.menu.title.as_ref().is_some_and(|t| t.has_toast());
+        let _ = self.menu.online.draw_toasts(
+            &gui.atlas,
+            batch,
+            u32::from(title_toast),
+            f64::from(self.settings.notification_display_time),
+            false,
+        );
         super::narrator::draw_toast(
             &mut self.menu.narrator_toast,
-            u32::from(title_toast),
+            u32::from(title_toast) | self.menu.online.toast_slots(),
             f64::from(self.settings.notification_display_time),
             &gui.atlas,
             batch,

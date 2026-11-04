@@ -4,6 +4,8 @@
 //! OptionsList screens and drawn with the shared widgets.
 use std::time::Instant;
 
+mod friends;
+
 pub use crate::settings::Opt;
 
 use crate::{
@@ -128,11 +130,12 @@ impl Opt {
             // Stored, but there are no blocked players or signed chat yet.
             Opt::HideMatchedNames
                 | Opt::OnlySecureChat
-                // Saved, but no Horizon system reads them yet: no Realms, no
-                // friends list, no directional audio.
+                // Online controls use OnlineStatus and OnlineAction: their
+                // account-dependent availability is not a static Opt property.
                 | Opt::RealmsNotifications
                 | Opt::InGameNotification
                 | Opt::SharePresence
+                // Saved, but these consumers are not implemented.
                 | Opt::DirectionalAudio
                 // Saved, but nothing in rendering reads it yet.
                 | Opt::ChunkBuilder
@@ -1266,6 +1269,8 @@ pub enum Page {
     Skin,
     /// OnlineOptionsScreen: server listing, Realms and friends notifications.
     Online,
+    /// Official account friends and pending requests.
+    Friends,
     /// Splitscreen: the profile another player joins as (`split_profiles`).
     SplitProfiles,
     /// Splitscreen: the monitor map and draft window arrangement.
@@ -1274,9 +1279,44 @@ pub enum Page {
     /// (vanilla's `minecraft:audio/background_music` pools).
     Music,
 }
+/// Account-dependent state supplied by gameplay; the render library does no network I/O.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnlineStatus {
+    pub available: bool,
+    pub busy: bool,
+    pub friends_enabled: bool,
+    pub allow_requests: bool,
+    pub realms_available: bool,
+    /// A translated service status, never a raw HTTP error or credential.
+    pub message: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineAction {
+    FriendsList,
+    AcceptRequests,
+    Notifications,
+    Presence,
+    RealmsNotifications,
+    XboxPrivacy,
+    OpenPrivacy,
+    CancelPrivacy,
+    CancelUpdates,
+    ConfirmFriends(bool),
+    SendRequest,
+    AcceptRequest(u128),
+    DeclineRequest(u128),
+    RevokeRequest(u128),
+    RemoveFriend(u128),
+    ConfirmRemoval(bool),
+    JoinByCode,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Act {
     None,
+    Online(OnlineAction),
+    FriendsTab(bool),
     Push(Page),
     Done,
     Cycle(Opt),
@@ -1318,6 +1358,7 @@ enum Act {
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
+    CopyFriendProfile,
     /// AI Agent: start or stop the repro recording.
     ToggleRecording,
     /// AI Agent: write the repro bundle now.
@@ -1410,6 +1451,9 @@ fn matches_focus(id: &FocusId, i: usize, wd: &Widget) -> bool {
 /// What the game must do after an interaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    Online(OnlineAction),
+    /// Open Horizon's existing invite-code screen.
+    JoinFriendCode,
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack
@@ -1459,6 +1503,7 @@ pub enum Event {
     Credits,
     /// Copy how an agent connects (the AI Agent page).
     CopyAgentDetails,
+    CopyFriendProfile,
     /// The AI Agent page's recording button: start or stop.
     ToggleRecording,
     /// The AI Agent page's export button.
@@ -1506,6 +1551,23 @@ fn slider_unsnapped(opt: Opt, held: bool, moved: Instant) -> bool {
     }
 }
 pub struct OptionsUi {
+    online_status: OnlineStatus,
+    online_consent: bool,
+    online_privacy: bool,
+    friend_removal: Option<(u128, String)>,
+    friend_list: crate::social_service::FriendsList,
+    friend_order: Vec<usize>,
+    friend_list_refreshed: bool,
+    friend_presence: crate::social_service::PresenceResponse,
+    friend_profile: String,
+    friends_ready: bool,
+    friends_high_contrast: bool,
+    friends_pending_tab: bool,
+    friends_text_height: f32,
+    friends_profile_rect: [f32; 4],
+    friends_link_rects: Vec<[f32; 4]>,
+    friends_dialog_buttons: [[f32; 4]; 2],
+    friends_pending_action: Option<OnlineAction>,
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
@@ -1598,6 +1660,23 @@ impl Default for OptionsUi {
         let mut settings_search = ui::EditBox::new(0.0, 0.0, 200.0, 15.0);
         settings_search.focused = false;
         Self {
+            online_status: OnlineStatus::default(),
+            online_consent: false,
+            online_privacy: false,
+            friend_removal: None,
+            friend_list: Default::default(),
+            friend_order: Vec::new(),
+            friend_list_refreshed: true,
+            friend_presence: Default::default(),
+            friend_profile: String::new(),
+            friends_ready: false,
+            friends_high_contrast: false,
+            friends_pending_tab: false,
+            friends_text_height: 0.0,
+            friends_profile_rect: [0.0; 4],
+            friends_link_rects: Vec::new(),
+            friends_dialog_buttons: [[0.0; 4]; 2],
+            friends_pending_action: None,
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
@@ -1879,6 +1958,16 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
     }
     let key = match act {
         Act::Cycle(opt) => Some(opt.tooltip_key(s)),
+        Act::Online(OnlineAction::AcceptRequests) => {
+            Some("options.allowFriendRequests.tooltip".into())
+        }
+        Act::Online(OnlineAction::Notifications) => {
+            Some("options.inGameNotification.tooltip".into())
+        }
+        Act::Online(OnlineAction::Presence) => Some(Opt::SharePresence.tooltip_key(s)),
+        Act::Online(OnlineAction::RealmsNotifications) => {
+            Some(Opt::RealmsNotifications.tooltip_key(s))
+        }
         Act::Push(Page::Language) => Some("options.language.tooltip".into()),
         Act::Push(Page::Accessibility) => Some("options.accessibility.tooltip".into()),
         _ => None,
@@ -2043,6 +2132,165 @@ fn pairs(opts: &[Opt]) -> Vec<Row> {
         .collect()
 }
 impl OptionsUi {
+    pub fn set_online_status(&mut self, status: OnlineStatus) {
+        if !status.available {
+            if self.page() != Page::Friends {
+                self.online_consent = false;
+            }
+            self.friend_removal = None;
+        }
+        if !status.busy {
+            self.friends_pending_action = None;
+        }
+        self.online_status = status;
+    }
+
+    pub fn set_friends(
+        &mut self,
+        profile: &str,
+        friends: Option<&crate::social_service::FriendsList>,
+        presence: Option<&crate::social_service::PresenceResponse>,
+        ready: bool,
+    ) {
+        let refresh = self.friend_list_refreshed
+            || self.friend_profile != profile
+            || friends != Some(&self.friend_list)
+            || (ready && !self.friends_ready);
+        if self.friend_profile != profile {
+            self.friend_removal = None;
+            self.clear_friend_request();
+            profile.clone_into(&mut self.friend_profile);
+        }
+        if friends != Some(&self.friend_list) {
+            self.friend_list = friends.cloned().unwrap_or_default();
+        }
+        if presence != Some(&self.friend_presence) {
+            self.friend_presence = presence.cloned().unwrap_or_default();
+        }
+        self.friends_ready = ready;
+        if refresh {
+            self.refresh_friend_order();
+            self.friend_list_refreshed = false;
+        }
+    }
+
+    /// Mark a completed list fetch even when its contents are unchanged. The next
+    /// set_friends snapshots its ordering using the latest presence; presence-only
+    /// updates keep the existing entry order (FriendsTab.applyPresenceUpdate).
+    pub fn mark_friends_list_refreshed(&mut self) {
+        self.friend_list_refreshed = true;
+    }
+
+    pub fn friend_request_name(&self) -> &str {
+        self.settings_search.value.trim()
+    }
+
+    pub fn clear_friend_request(&mut self) {
+        if self.page() == Page::Friends {
+            self.settings_search.set_value("");
+        }
+    }
+
+    pub fn confirm_friend_removal(&mut self, id: u128, name: String) {
+        self.friend_removal = Some((id, name));
+        self.focus = None;
+    }
+
+    fn friends_editable(&self) -> bool {
+        self.page() == Page::Friends
+            && !self.friends_pending_tab
+            && self.friends_ready
+            && self.online_status.available
+            && self.online_status.friends_enabled
+            && self.friend_list_error().is_none()
+            && !self.online_status.busy
+            && !self.split_guest
+            && !self.online_consent
+            && !self.online_privacy
+            && self.friend_removal.is_none()
+    }
+
+    pub fn confirm_online_friends(&mut self) {
+        self.online_consent = true;
+        self.focus = None;
+        self.scroll = 0.0;
+    }
+
+    /// Complete the Friends entry-point consent request. Only success opens the overlay;
+    /// a failed settings update leaves the confirmation available for retry.
+    pub fn complete_friends_consent(&mut self, successful: bool) {
+        if self.page() == Page::Friends && self.online_consent {
+            self.online_status.busy = false;
+            if successful {
+                self.online_consent = false;
+                self.online_status.friends_enabled = true;
+                self.online_status.allow_requests = true;
+                self.focus = None;
+            }
+        }
+    }
+
+    fn online_action(&mut self, action: OnlineAction, events: &mut Vec<Event>) {
+        match action {
+            OnlineAction::JoinByCode => {
+                events.push(Event::JoinFriendCode);
+                return;
+            }
+            OnlineAction::XboxPrivacy => {
+                self.online_privacy = true;
+                self.focus = None;
+                return;
+            }
+            OnlineAction::OpenPrivacy | OnlineAction::CancelPrivacy => {
+                if !self.online_privacy {
+                    return;
+                }
+                self.online_privacy = false;
+                self.focus = None;
+                if action == OnlineAction::CancelPrivacy {
+                    return;
+                }
+            }
+            _ => {}
+        }
+        if let OnlineAction::ConfirmRemoval(true) = action {
+            self.friends_pending_action = self
+                .friend_removal
+                .as_ref()
+                .map(|(id, _)| OnlineAction::RemoveFriend(*id));
+        } else if matches!(
+            action,
+            OnlineAction::SendRequest
+                | OnlineAction::AcceptRequest(_)
+                | OnlineAction::DeclineRequest(_)
+                | OnlineAction::RevokeRequest(_)
+        ) {
+            self.friends_pending_action = Some(action);
+        }
+        if matches!(action, OnlineAction::ConfirmRemoval(_)) {
+            self.friend_removal = None;
+            self.focus = None;
+        }
+        if let OnlineAction::ConfirmFriends(accepted) = action {
+            self.focus = None;
+            if self.page() == Page::Friends {
+                if accepted {
+                    self.online_status.busy = true;
+                } else {
+                    self.online_consent = false;
+                    self.stack.clear();
+                    self.settings_search.focused = false;
+                    events.push(Event::Online(action));
+                    events.push(Event::Close);
+                    return;
+                }
+            } else {
+                self.online_consent = false;
+            }
+        }
+        events.push(Event::Online(action));
+    }
+
     /// A switch of `horizon-extras.txt` as the Extras page draws it: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
         let label = Text::option_name_value(
@@ -2053,7 +2301,8 @@ impl OptionsUi {
     }
     fn settings_search_active(&self) -> bool {
         self.settings_search.focused
-            && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
+            && (matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
+                || self.friends_editable())
     }
     /// Whether the resource pack screen is open (not Create World's data packs on the same
     /// page).
@@ -2166,6 +2415,9 @@ impl OptionsUi {
     /// Open a page whose Done/Escape returns directly to the calling screen.
     pub fn open_at(&mut self, in_world: bool, page: Page) {
         self.stack.clear();
+        self.online_consent = false;
+        self.online_privacy = false;
+        self.friend_removal = None;
         self.data_pack_dir = None;
         self.focus = None;
         self.focus_from_keyboard = false;
@@ -2175,13 +2427,20 @@ impl OptionsUi {
         self.selected_key = None;
     }
     fn push(&mut self, page: Page) {
+        if page == Page::Friends {
+            self.friends_pending_tab = false;
+            self.refresh_friend_order();
+        }
         self.stack.push(page);
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.focus = None;
         self.focus_from_keyboard = false;
         self.can_change_value = false;
-        if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
+        if matches!(
+            page,
+            Page::Video | Page::Controls | Page::KeyBinds | Page::Friends
+        ) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
         }
@@ -2250,6 +2509,7 @@ impl OptionsUi {
             Page::Sound => "options.sounds.title",
             Page::Skin => "options.skinCustomisation.title",
             Page::Online => "options.online.title",
+            Page::Friends => "gui.friends.open",
             Page::Controls => "controls.title",
             Page::KeyBinds => "controls.keybinds.title",
             Page::Mouse => "options.mouse_settings.title",
@@ -2281,6 +2541,7 @@ impl OptionsUi {
             + match self.page() {
                 Page::KeyBinds | Page::PadBinds => 178.0,
                 Page::Language => 118.0,
+                Page::Friends => 104.0,
                 _ => 163.0,
             }
     }
@@ -2625,15 +2886,78 @@ impl OptionsUi {
                 pairs(&opts)
             }
             Page::Online => {
-                // OnlineOptionsScreen without the Xbox and friends-list parts.
-                let mut rows = vec![Row::Header("options.online.friends.header")];
-                rows.extend(pairs(&[Opt::InGameNotification, Opt::SharePresence]));
+                let state = &self.online_status;
+                let control = |label, action, active, wide| {
+                    let widget = button(
+                        0.0,
+                        0.0,
+                        if wide { 310.0 } else { 150.0 },
+                        label,
+                        Act::Online(action),
+                    );
+                    if active { widget } else { inactive(widget) }
+                };
+                let toggle = |key, value| tr(key).append(Text::literal(": ")).append(on_off(value));
+                let available = state.available && !state.busy && !self.split_guest;
+                let dependent = available && state.friends_enabled;
+                let mut rows = vec![
+                    Row::Header("options.online.friends.header"),
+                    Row::Buttons(
+                        control(
+                            toggle("options.friendsList", state.friends_enabled),
+                            OnlineAction::FriendsList,
+                            available,
+                            false,
+                        ),
+                        Some(control(
+                            toggle("options.allowFriendRequests", state.allow_requests),
+                            OnlineAction::AcceptRequests,
+                            dependent,
+                            false,
+                        )),
+                    ),
+                    Row::Buttons(
+                        control(
+                            Opt::InGameNotification.label(s),
+                            OnlineAction::Notifications,
+                            dependent,
+                            false,
+                        ),
+                        Some(control(
+                            Opt::SharePresence.label(s),
+                            OnlineAction::Presence,
+                            dependent,
+                            false,
+                        )),
+                    ),
+                    Row::Buttons(
+                        control(
+                            tr("options.online.xboxSettings"),
+                            OnlineAction::XboxPrivacy,
+                            true,
+                            true,
+                        ),
+                        None,
+                    ),
+                ];
+                if let Some(message) = state.message {
+                    rows.push(Row::Header(message));
+                }
                 rows.push(Row::Header("options.online.servers.header"));
                 rows.push(Row::Big(Opt::AllowServerListing));
                 rows.push(Row::Header("options.online.realms.header"));
-                rows.push(Row::Big(Opt::RealmsNotifications));
+                rows.push(Row::Buttons(
+                    control(
+                        Opt::RealmsNotifications.label(s),
+                        OnlineAction::RealmsNotifications,
+                        state.realms_available,
+                        true,
+                    ),
+                    None,
+                ));
                 rows
             }
+            Page::Friends => Vec::new(),
             Page::Controls => {
                 let mut rows = vec![Row::Buttons(
                     button(
@@ -2862,7 +3186,76 @@ impl OptionsUi {
         let mut rows = ListRows::default();
         let page = self.page();
         let cx = (w / 2.0).floor();
+        if page == Page::Friends
+            && !self.online_privacy
+            && (self.online_consent || self.friend_removal.is_some())
+        {
+            return (self.friends_dialog_layout(), 0.0, 0.0, 0.0);
+        }
+        if self.friend_removal.is_some() {
+            out.push(button(
+                cx - 155.0,
+                h - 28.0,
+                150.0,
+                tr("gui.remove"),
+                Act::Online(OnlineAction::ConfirmRemoval(true)),
+            ));
+            out.push(button(
+                cx + 5.0,
+                h - 28.0,
+                150.0,
+                tr("gui.cancel"),
+                Act::Online(OnlineAction::ConfirmRemoval(false)),
+            ));
+            return (out, 0.0, 0.0, 0.0);
+        }
+        if matches!(page, Page::Online | Page::Friends) && self.online_privacy {
+            out.push(button(
+                cx - 155.0,
+                h - 28.0,
+                150.0,
+                tr("chat.link.open"),
+                Act::Online(OnlineAction::OpenPrivacy),
+            ));
+            out.push(button(
+                cx + 5.0,
+                h - 28.0,
+                150.0,
+                tr("gui.cancel"),
+                Act::Online(OnlineAction::CancelPrivacy),
+            ));
+            return (out, 0.0, 0.0, 0.0);
+        }
+        if matches!(page, Page::Online | Page::Friends) && self.online_consent {
+            out.push(button(
+                cx - 155.0,
+                h - 28.0,
+                150.0,
+                tr("options.friendsList.confirm.turnOn"),
+                Act::Online(OnlineAction::ConfirmFriends(true)),
+            ));
+            out.push(button(
+                cx + 5.0,
+                h - 28.0,
+                150.0,
+                tr("options.friendsList.confirm.turnOff"),
+                Act::Online(OnlineAction::ConfirmFriends(false)),
+            ));
+            out.push(button(
+                cx - 155.0,
+                h - 54.0,
+                310.0,
+                tr("options.friendsList.confirm.message.link"),
+                Act::Online(OnlineAction::XboxPrivacy),
+            ));
+            return (out, 0.0, 0.0, 0.0);
+        }
+        if page == Page::Friends {
+            return self.friends_layout(w, h);
+        }
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
+            self.settings_search.width = 200.0;
+            self.settings_search.height = 15.0;
             self.settings_search.x = cx - 100.0;
             self.settings_search.y = 17.0;
         }
@@ -3288,12 +3681,12 @@ impl OptionsUi {
             // Drawn by `pack_screen`.
             Page::Packs => {}
             _ => {
-                if matches!(page, Page::Video | Page::Controls) {
+                if matches!(page, Page::Video | Page::Controls | Page::Friends) {
                     top = 38.0;
                 }
                 out.push(Widget {
                     x: 0.0,
-                    y: if matches!(page, Page::Video | Page::Controls) {
+                    y: if matches!(page, Page::Video | Page::Controls | Page::Friends) {
                         4.0
                     } else {
                         12.0
@@ -3531,10 +3924,38 @@ impl OptionsUi {
         // The page is its own screen (OptionsScreen, VideoSettingsScreen...).
         let page = self.page();
         crate::widgets::begin_screen(|| {
-            crate::widgets::ScreenInfo::new(
-                format!("options/{page:?}"),
-                tr(Self::title(page)).plain(),
-            )
+            let (name, message) = if let Some((_, name)) = &self.friend_removal {
+                (
+                    "options/friends/remove".to_owned(),
+                    tr("gui.friends.confirm_title")
+                        .append(Text::literal(format!(
+                            "
+{name}
+"
+                        )))
+                        .append(tr("gui.friends.confirm_unfriend")),
+                )
+            } else if matches!(page, Page::Online | Page::Friends) && self.online_privacy {
+                (
+                    "options/online/privacy".to_owned(),
+                    tr("gui.privacy_link.title")
+                        .append(Text::literal("\n"))
+                        .append(tr("gui.privacy_link.message")),
+                )
+            } else if matches!(page, Page::Online | Page::Friends) && self.online_consent {
+                (
+                    "options/online/consent".to_owned(),
+                    tr("options.friendsList.confirm.title")
+                        .append(Text::literal("\n"))
+                        .append(Text::translate(
+                            "options.friendsList.confirm.message",
+                            &[tr("options.friendsList.confirm.message.link")],
+                        )),
+                )
+            } else {
+                (format!("options/{page:?}"), tr(Self::title(page)))
+            };
+            crate::widgets::ScreenInfo::new(name, message.plain())
         });
         if self.page() == Page::HdrCalibration
             && let Some(c) = &self.calibration
@@ -3571,10 +3992,96 @@ impl OptionsUi {
             crate::screen_draw::paint(batch, atlas, &draws);
             return;
         }
+        if page == Page::Friends && !self.online_privacy {
+            self.friends_high_contrast = s.high_contrast;
+            if self.online_consent || self.friend_removal.is_some() {
+                self.draw_friends_dialog(batch, atlas, cursor);
+            } else {
+                self.draw_friends(batch, atlas, cursor);
+            }
+            return;
+        }
         let (widgets, top, bottom, content) = self.layout(s, w, h);
         self.size = (w, h);
         let in_world = self.in_world;
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
+        if let Some((_, name)) = &self.friend_removal {
+            let message = tr("gui.friends.confirm_title")
+                .append(Text::literal(format!(
+                    "
+
+{name}
+
+"
+                )))
+                .append(tr("gui.friends.confirm_unfriend"));
+            for (i, line) in atlas
+                .font
+                .split(&message, (w - 80.0).max(1.0))
+                .iter()
+                .enumerate()
+            {
+                batch.text_styled(
+                    atlas,
+                    line,
+                    ((w - atlas.font.width_text(line)) / 2.0).floor(),
+                    20.0 + i as f32 * 9.0,
+                    u32::MAX,
+                    true,
+                );
+            }
+        } else if matches!(page, Page::Online | Page::Friends) && self.online_privacy {
+            let message = tr("gui.privacy_link.title")
+                .append(Text::literal("\n\n"))
+                .append(tr("gui.privacy_link.message"))
+                .append(Text::literal(
+                    "\nhttps://aka.ms/MinecraftJavaXboxPrivacyAndSafety",
+                ));
+            for (i, line) in atlas
+                .font
+                .split(&message, (w - 80.0).max(1.0))
+                .iter()
+                .enumerate()
+            {
+                batch.text_styled(
+                    atlas,
+                    line,
+                    ((w - atlas.font.width_text(line)) / 2.0).floor(),
+                    20.0 + i as f32 * 9.0,
+                    u32::MAX,
+                    true,
+                );
+            }
+        } else if matches!(page, Page::Online | Page::Friends) && self.online_consent {
+            let title = tr("options.friendsList.confirm.title");
+            batch.text_styled(
+                atlas,
+                &title,
+                ((w - atlas.font.width_text(&title)) / 2.0).floor(),
+                20.0,
+                u32::MAX,
+                true,
+            );
+            let message = Text::translate(
+                "options.friendsList.confirm.message",
+                &[tr("options.friendsList.confirm.message.link")],
+            );
+            for (i, line) in atlas
+                .font
+                .split(&message, (w - 80.0).max(1.0))
+                .iter()
+                .enumerate()
+            {
+                batch.text_styled(
+                    atlas,
+                    line,
+                    ((w - atlas.font.width_text(line)) / 2.0).floor(),
+                    48.0 + i as f32 * 9.0,
+                    u32::MAX,
+                    true,
+                );
+            }
+        }
         let list = bottom > top;
         if list {
             ui::list_background(batch, atlas, top, bottom, in_world);
@@ -3814,7 +4321,14 @@ impl OptionsUi {
             }
             self.language_search = search;
         }
-        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
+        if matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
+            || self.friends_editable()
+        {
+            let search_key = if self.page() == Page::Friends {
+                "gui.friends.enter_nickname"
+            } else {
+                "horizon.options.search"
+            };
             let mut search = self.settings_search.clone();
             if self.focus == Some(FocusId::Search) {
                 search.focused = true;
@@ -3824,13 +4338,13 @@ impl OptionsUi {
             crate::widgets::last_narratable(|n| {
                 n.order = -1;
                 if let crate::widgets::What::EditBox { message, .. } = &mut n.what {
-                    *message = tr("horizon.options.search").plain();
+                    *message = tr(search_key).plain();
                 }
             });
             if search.value.is_empty() && !search.focused {
                 batch.text_styled(
                     atlas,
-                    &tr("horizon.options.search").with_color(text::GRAY).italic(),
+                    &tr(search_key).with_color(text::GRAY).italic(),
                     search.text_x(),
                     search.text_y(),
                     u32::MAX,
@@ -3959,11 +4473,26 @@ impl OptionsUi {
             }
             return events;
         }
+        if self.friends_overlay_visible()
+            && !drag
+            && !ui::hovered(
+                (x, y),
+                (size.0 / 2.0).floor() - 118.0,
+                13.0,
+                236.0,
+                size.1 - 37.0,
+            )
+        {
+            return self.back(s);
+        }
         let (widgets, top, bottom, content) = self.layout(s, size.0, size.1);
         self.size = size;
         self.framebuffer = framebuffer;
         let mut events = Vec::new();
-        if !drag && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
+        if !drag
+            && (matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
+                || self.friends_editable())
+        {
             let search = &mut self.settings_search;
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
             if search.focused {
@@ -4233,8 +4762,11 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::CopyFriendProfile => events.push(Event::CopyFriendProfile),
+                        Act::FriendsTab(pending) => self.select_friends_tab(pending),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
+                        Act::Online(action) => self.online_action(action, &mut events),
                         Act::None => {}
                     }
                 }
@@ -4550,6 +5082,18 @@ impl OptionsUi {
     }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
         let mut events = Vec::new();
+        if self.online_privacy {
+            self.online_action(OnlineAction::CancelPrivacy, &mut events);
+            return events;
+        }
+        if self.friend_removal.is_some() {
+            self.online_action(OnlineAction::ConfirmRemoval(false), &mut events);
+            return events;
+        }
+        if self.online_consent {
+            self.online_action(OnlineAction::ConfirmFriends(false), &mut events);
+            return events;
+        }
         // A pack's screen goes back to the one that opened it.
         if self.page() == Page::ShaderOptions
             && let Some(options) = &mut s.shader_options
@@ -4559,6 +5103,9 @@ impl OptionsUi {
             return events;
         }
         let page = self.stack.pop().unwrap_or(Page::Main);
+        if matches!(page, Page::Online | Page::Friends) {
+            events.push(Event::Online(OnlineAction::CancelUpdates));
+        }
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.dragging = None;
@@ -4794,6 +5341,15 @@ impl OptionsUi {
             return self.back(s);
         }
 
+        if self.page() == Page::Friends && self.focus == Some(FocusId::Search) {
+            if !self.friends_editable() {
+                self.focus = None;
+            } else if key == K::Enter && !self.friend_request_name().is_empty() {
+                let mut events = vec![Event::ButtonClick];
+                self.online_action(OnlineAction::SendRequest, &mut events);
+                return events;
+            }
+        }
         // Search field text entry when search box is focused
         if self.focus == Some(FocusId::Search) {
             if key != K::Tab && key != K::ArrowDown {
@@ -4837,7 +5393,9 @@ impl OptionsUi {
 
         // Gather focusables on the current page
         let (widgets, top, bottom, content) = self.layout(s, self.size.0, self.size.1);
-        let has_search = (self.page() == Page::Language) || self.settings_search_active();
+        let has_search = (self.page() == Page::Language)
+            || self.settings_search_active()
+            || self.friends_editable();
         let mut focusables: Vec<(FocusId, [f32; 4], bool)> = Vec::new();
         if has_search {
             let search = if self.page() == Page::Language {
@@ -5148,8 +5706,11 @@ impl OptionsUi {
                         }
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::CopyFriendProfile => events.push(Event::CopyFriendProfile),
+                        Act::FriendsTab(pending) => self.select_friends_tab(pending),
                         Act::ToggleRecording => events.push(Event::ToggleRecording),
                         Act::ExportRepro => events.push(Event::ExportRepro),
+                        Act::Online(action) => self.online_action(action, &mut events),
                         Act::None => {}
                     }
                     return events;

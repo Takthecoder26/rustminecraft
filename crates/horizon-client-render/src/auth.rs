@@ -40,6 +40,12 @@ pub fn parse_uuid(text: &str) -> Option<u128> {
 }
 
 impl AuthSession {
+    /// The Minecraft services credential, used only by authenticated service clients.
+    /// Callers must never log it or persist it outside the launcher's session handoff.
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
     /// For tests and harnesses.
     pub fn new(name: &str, uuid: u128, access_token: &str) -> Self {
         Self {
