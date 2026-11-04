@@ -381,18 +381,7 @@ impl Game<'_> {
                 }))
             }),
         };
-        let mut options = self.options.clone();
-        // A server without a console: no local player, no window, no control socket.
-        // Compatibility for gameplay checks outside startup/world loading.
-        options.dedicated = Some(Vec::new());
-        options.execution_role = ExecutionRole::IntegratedServer;
-        options.control = None;
-        options.benchmark = None;
-        options.frames = None;
-        options.world_frames = None;
-        options.report = None;
-        options.server = None;
-        options.world = None;
+        let options = server_thread_options(&self.options);
         self.join_world_rest()?;
         // The window plays against the world's own biome table (its chunks
         // carry the packs' ids past the built-in list, `set_registries`
@@ -1240,6 +1229,24 @@ impl Game<'_> {
             .map_err(|_| "the component harness server panicked")?;
         result.map_err(Into::into)
     }
+}
+
+/// What the integrated server's own Game runs with, from before its world
+/// opens: a server without a console, no local player, no window, no control
+/// socket.
+pub(super) fn server_thread_options(window: &Options) -> Options {
+    let mut options = window.clone();
+    // Compatibility for gameplay checks outside startup/world loading.
+    options.dedicated = Some(Vec::new());
+    options.execution_role = ExecutionRole::IntegratedServer;
+    options.control = None;
+    options.benchmark = None;
+    options.frames = None;
+    options.world_frames = None;
+    options.report = None;
+    options.server = None;
+    options.world = None;
+    options
 }
 
 fn server_game(
