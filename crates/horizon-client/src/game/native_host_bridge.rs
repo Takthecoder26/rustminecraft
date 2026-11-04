@@ -37,6 +37,8 @@ impl Game<'_> {
     /// comparators read it again when its items changed. False, with
     /// `change` not run, where `native_with_mod_block_entity` finds none.
     /// Call `native_block_entity_sync` too when what clients draw changed.
+    /// On a client it changes only that client's copy: the server never sees
+    /// it, and the server's next update overwrites the fields it carries.
     /// API @API:host_bridge@.
     pub(super) fn native_change_mod_block_entity(
         &mut self,
@@ -93,11 +95,12 @@ impl Game<'_> {
     /// The stack in the player's equipment slot `slot`
     /// (`LivingEntity.getItemBySlot`): on a client the player's own, as
     /// goggles worn or a tank on the back show their overlay; on a server the
-    /// acting player's. None for an empty slot, and for `Body` and `Saddle`,
-    /// which a player has none of. API @API:host_bridge@.
+    /// acting player's. `MainHand` is the selected slot and `OffHand` the off
+    /// hand, whichever hand is acting. None for an empty slot, and for `Body`
+    /// and `Saddle`, which a player has none of. API @API:host_bridge@.
     pub(super) fn native_equipment(&self, slot: EquipmentSlot) -> Option<ItemStack> {
         match slot {
-            EquipmentSlot::MainHand => self.held().cloned(),
+            EquipmentSlot::MainHand => self.stack_in(self.selected).cloned(),
             EquipmentSlot::OffHand => self.offhand.clone(),
             EquipmentSlot::Head => self.armor[0].clone(),
             EquipmentSlot::Chest => self.armor[1].clone(),
@@ -116,5 +119,96 @@ impl Game<'_> {
     /// API @API:host_bridge@.
     pub(super) fn native_sneaking(&self) -> bool {
         self.keys.contains(&KeyCode::ShiftLeft)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        Audio, Game, Hand, Options, Progress, Settings, execution_role::ExecutionRole,
+        load_resources,
+    };
+    use super::{EquipmentSlot, ItemStack};
+
+    /// A pickaxe in the main hand and a torch in the off hand answer for their
+    /// own slots during either hand's use pass (`use_hand` runs both).
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn equipment_reads_each_slot_whichever_hand_is_acting() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
+        );
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!("no menu handoff"),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = ExecutionRole::Client;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+
+        let stack = |item| Some(ItemStack::new(item, 1));
+        game.inventory = vec![None; 36];
+        game.inventory[0] = stack("minecraft:stick");
+        game.inventory[3] = stack("minecraft:iron_pickaxe");
+        game.selected = 3;
+        game.offhand = stack("minecraft:torch");
+        game.armor = [
+            stack("minecraft:iron_helmet"),
+            stack("minecraft:iron_chestplate"),
+            stack("minecraft:iron_leggings"),
+            stack("minecraft:iron_boots"),
+        ];
+
+        let item = |game: &Game<'_>, slot| {
+            game.native_equipment(slot)
+                .map(|stack| stack.item.to_string())
+        };
+        let expected = [
+            (EquipmentSlot::MainHand, Some("minecraft:iron_pickaxe")),
+            (EquipmentSlot::OffHand, Some("minecraft:torch")),
+            (EquipmentSlot::Head, Some("minecraft:iron_helmet")),
+            (EquipmentSlot::Chest, Some("minecraft:iron_chestplate")),
+            (EquipmentSlot::Legs, Some("minecraft:iron_leggings")),
+            (EquipmentSlot::Feet, Some("minecraft:iron_boots")),
+            (EquipmentSlot::Body, None),
+            (EquipmentSlot::Saddle, None),
+        ];
+        for hand in [Hand::Main, Hand::Off] {
+            for (slot, want) in expected {
+                let got = game.with_hand(hand, |game| item(game, slot));
+                assert_eq!(got.as_deref(), want, "{slot:?} while {hand:?} acts");
+            }
+        }
+
+        // An empty main hand stays empty rather than answering with the off hand.
+        game.selected = 5;
+        let (main, off) = game.with_hand(Hand::Off, |game| {
+            (
+                item(game, EquipmentSlot::MainHand),
+                item(game, EquipmentSlot::OffHand),
+            )
+        });
+        assert_eq!(main, None);
+        assert_eq!(off.as_deref(), Some("minecraft:torch"));
     }
 }
