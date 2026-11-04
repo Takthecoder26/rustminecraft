@@ -3018,6 +3018,44 @@ impl Game<'_> {
             bounds,
         );
     }
+    /// Draw the `minecraft:interaction` entity `id` at `position` (its box's
+    /// bottom centre) on this client, once a frame while it is within 128
+    /// blocks: a mod's contraption, train or seat carried by an invisible
+    /// interaction entity that the server moves (`native_move_entity`) and
+    /// that carries what to draw in a synced attachment
+    /// (`Holder::Entity(id)`). `draw` is a block entity's frame
+    /// (`native_block_entity_submit`) whose pose starts at `position`, in
+    /// blocks, unturned; `spin` parts turn with the game time. Vanilla draws
+    /// nothing for these entities, so whatever is drawn here is all there is.
+    /// Bundles need "hooks": @API:entity_carriers@.
+    pub(super) fn native_entity_submit(
+        &self,
+        id: u32,
+        kind: &str,
+        position: [f64; 3],
+        draw: &mut BlockEntityDraw,
+    ) {
+        mod_api::dispatch_entity_submit(self, mod_api::mods(), id, kind, position, draw);
+    }
+    /// The boxes the `minecraft:interaction` entity `id` at `position` adds
+    /// to what a player collides with (`EntityGetter.getEntityCollisions`), as
+    /// a boat's or a shulker's box: a contraption players stand on and walk
+    /// against. Each box is `[min_x, min_y, min_z, max_x, max_y, max_z]` in
+    /// blocks from `position`. Asked for every such entity within 64 blocks
+    /// of a player each time that player moves, on the server (as the
+    /// player's moves are checked) and on that player's client (as it moves
+    /// itself): answer alike on both, from a synced attachment. A moving
+    /// carrier doesn't carry who stands on it yet. Bundles need "hooks":
+    /// @API:entity_carriers@.
+    pub(super) fn native_entity_collisions(
+        &self,
+        id: u32,
+        kind: &str,
+        position: [f64; 3],
+        boxes: &mut Vec<[f64; 6]>,
+    ) {
+        mod_api::dispatch_entity_collisions(self, mod_api::mods(), id, kind, position, boxes);
+    }
     /// Draw the mob `mob` (its id, kind, custom name and the frame's body
     /// and head turns and walk cycle, `LivingEntityRenderState`) on this
     /// client with a model of your own, once a frame while it is in view

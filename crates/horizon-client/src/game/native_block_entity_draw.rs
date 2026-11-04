@@ -403,6 +403,51 @@ impl Game<'_> {
             .filter(|&(_, state)| !self.res.facts().get(BlockStateId(state)).block_entity)
             .collect()
     }
+    /// `native_entity_submit` for each `minecraft:interaction` entity this
+    /// client knows within `ENTITY_VIEW_DISTANCE` of the camera: what a mod
+    /// carries on one (a contraption) is drawn under its pose, moved to the
+    /// camera, its `spin` parts turned. Nothing is asked with no native mod.
+    pub(super) fn mod_entity_geometry(&self, camera: DVec3, partial: f32, out: &mut Vec<Vertex>) {
+        const ENTITY_VIEW_DISTANCE: f64 = 128.0;
+        if horizon_client::mod_api::mods().is_empty() || self.interactions.is_empty() {
+            return;
+        }
+        let mut carriers: Vec<(i32, DVec3)> = self
+            .interactions
+            .iter()
+            .map(|(&id, e)| (id, DVec3::new(e.position.x, e.position.y, e.position.z)))
+            .filter(|(_, at)| at.distance_squared(camera) < ENTITY_VIEW_DISTANCE.powi(2))
+            .collect();
+        // The map's order changes from run to run; the frame's shouldn't.
+        carriers.sort_unstable_by_key(|(id, _)| *id);
+        for (id, at) in carriers {
+            let block = at.floor().as_ivec3().to_array();
+            let light = vertex_light(self.world.light(block[0], block[1], block[2]));
+            let mut draw = BlockEntityDraw::posed(
+                partial,
+                self.world.game_time,
+                light,
+                block,
+                Mat4::IDENTITY,
+                diffuse_lights(self.dim == Dim::Nether),
+                Vec::new(),
+            );
+            self.native_entity_submit(id as u32, "minecraft:interaction", at.to_array(), &mut draw);
+            let (drawn, spins) = draw.into_turning();
+            if drawn.is_empty() {
+                continue;
+            }
+            self.mark_entity(out.len(), "minecraft:interaction");
+            place_turning(
+                &drawn,
+                &spins,
+                self.world.game_time,
+                partial,
+                (at - camera).as_vec3(),
+                out,
+            );
+        }
+    }
     /// `native_block_entity_submit` for each of `blocks` (in drawn sections,
     /// drawn by no vanilla renderer) whose block entity is a mod's, closer than
     /// `BlockEntityRenderer.getViewDistance` to the camera (`shouldRender`)
