@@ -28,10 +28,16 @@ membership revision also detects resets and replacement. Block changes alone
 do not rebuild topology. Resident connectivity defines ownership, not proof
 that two simulations commute.
 
-Every entity retains its global insertion slot. Region-local entity and player
-indexes preserve the filtered order of those slots. At the tick barrier an
-entity belongs to exactly one resident component, or to the dormant list when
-its chunk is unloaded. Movement may cross owners during the tick; ownership is
+Topology follows `ChunkMap::deltas_since` a chunk at a time. An added chunk joins
+or merges the regions around it. A removed chunk keeps its region whole when the
+chunks around it still connect among themselves; when they don't, the region may
+have split, and the whole map is rebuilt. So is a reset or a gap in the deltas.
+Legacy mode and automatic mode below its mob threshold keep no regions at all.
+
+Every entity retains its global insertion slot. Region-local entity indexes
+preserve the filtered order of those slots. At the tick barrier an entity belongs
+to exactly one resident component, or to none when its chunk is unloaded; the
+coordinator's walk reaches it either way. Movement may cross owners during the tick; ownership is
 frozen until the next barrier, when migration, removals and new entities are
 indexed together. Migration never loads or retains a chunk. Existing admission,
 entity-ticking ticket, despawn, portal, persistence and save rules remain in
@@ -126,24 +132,45 @@ Automatic mode uses region transactions for at least 128 mobs in at least two
 resident regions. Small or connected workloads retain the direct serial path.
 The threshold only controls scheduling overhead; it never limits interactions.
 
+A region that wastes its predictions (half or more thrown away, four rounds in a
+row) sits out in automatic mode: 20 ticks, doubling up to 640 while each new try
+is wasted too, and forgiven by a round that commits. Its mobs run on the
+coordinator meanwhile, exactly as a replay does, and other regions keep their
+workers. This only changes cost. Level RNG draws (school leaders, nectar bees,
+villagers) and shared villager reads are the usual causes. The forced modes below
+never sit out, so that they test everything. How much this saves on a mixed
+population has not been measured; `tools/bench_region_ticks.py --species
+zombie,cow,villager` runs one.
+
 - `HORIZON_SIMULATION_MODE=legacy`: retained direct serial mob loop.
 - `HORIZON_SIMULATION_MODE=serial`: region transactions on the server thread.
 - `HORIZON_SIMULATION_MODE=parallel`: force region transactions, including small
   test scenarios.
+- `HORIZON_SIMULATION_MODE=verify`: `parallel`, and every commit is also replayed
+  on the coordinator from the same mob and RNG. A different mob, event list, RNG
+  or keep decision panics and names the first difference. It catches what the
+  read tracking can't see: a new thread-local, a global counter, or a `MobWorld`
+  override only one of the two paths sets. CI runs the server harnesses this way
+  (`tools/ci/region-verify.sh`).
 - `HORIZON_SIMULATION_WORKERS=1..8`: bounded pool size; defaults to the project's
   worker-count policy, capped at eight. Pool construction failure falls back
   to serial execution.
 - `HORIZON_REGION_METRICS=1`: region, predicted, committed and replayed counts.
 
-The older snapshot projection knob (`HORIZON_REGION_SNAPSHOT_WORKERS`) stays at
-one by default: snapshot copying alone did not benefit from scoped threads.
-The persistent simulation pool performs real mob ticks.
+What a prediction replaces is guarded in debug builds too: `TickRound::commit`
+panics when the walk wrote to the mob since its prediction was made. Every event
+that writes to another mob says so in `MobEvent::immediate_write`, an exhaustive
+match that the prediction, the invalidation and `apply_brain_events` all read.
+
+A panic during the mob tick leaves the mob list in `MobRescue`, and the crash save
+takes it back, so the save doesn't write the level's entities as if it had no mobs.
 
 ## Validation and benchmark
 
 The focused tests cover topology/bridge merge and split, stable ordering,
 negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
-sparse-grid equivalence, negative-space reads, distant ID/full-scan reads,
+sparse-grid equivalence, chunk-by-chunk topology against a whole rebuild,
+negative-space reads, distant ID/full-scan reads,
 foreign bounds growth, sparse populated-cell queries, shared RNG/Gaussian
 consumption, complete mutable-mob transactions and exact indexed player
 selection. At implementation revision `4c5925eb2`, the full mob-AI vanilla oracle passes all 272 scenarios and all

@@ -2580,12 +2580,165 @@ pub fn apply_mob_pushes(m: &mut Mob, pending: &mut PendingPushes) {
         pushes.into_iter().for_each(add);
     }
 }
+/// What applying an event does at once to a mob other than its source.
+pub enum ImmediateWrite {
+    Nothing,
+    Target(u32),
+    /// Riding and schooling reach more mobs than the event names.
+    Everyone,
+}
+impl MobEvent {
+    /// The one list of what [`apply_brain_events`] writes: the region tick's
+    /// predictions and invalidations read it too, so they can't disagree with
+    /// it. No wildcard: a new event has to say. An event listed as `Nothing`
+    /// never reaches the application.
+    pub fn immediate_write(&self) -> ImmediateWrite {
+        match self {
+            MobEvent::BreedTarget { mob, .. }
+            | MobEvent::LockGaze { mob, .. }
+            | MobEvent::Retreat { mob, .. } => ImmediateWrite::Target(*mob),
+            MobEvent::SchoolSize { leader, .. } => ImmediateWrite::Target(*leader),
+            MobEvent::Breed { partner, .. } => ImmediateWrite::Target(*partner),
+            MobEvent::StartRiding { .. } | MobEvent::StartFollowing { .. } => {
+                ImmediateWrite::Everyone
+            }
+            MobEvent::SquidCycle { .. }
+            | MobEvent::RabbitHop { .. }
+            | MobEvent::Drown { .. }
+            | MobEvent::PowderSnowParticle { .. }
+            | MobEvent::SunProtectionWear { .. }
+            | MobEvent::EntityEvent { .. }
+            | MobEvent::LevelParticles { .. }
+            | MobEvent::ItemParticles { .. }
+            | MobEvent::Sound(..)
+            | MobEvent::BubbleColumnParticles { .. }
+            | MobEvent::LandingDust { .. }
+            | MobEvent::Bonemeal { .. }
+            | MobEvent::RingBell { .. }
+            | MobEvent::ChestOpen { .. }
+            | MobEvent::EnterHive { .. }
+            | MobEvent::ParrotToShoulder { .. }
+            | MobEvent::BecomeStatue { .. }
+            | MobEvent::ChestSlot { .. }
+            | MobEvent::Infested { .. }
+            | MobEvent::ArmorHurt { .. }
+            | MobEvent::Gift { .. }
+            | MobEvent::SoundId(..)
+            | MobEvent::LocalSound(..)
+            | MobEvent::LevelEventSound { .. }
+            | MobEvent::GameEvent { .. }
+            | MobEvent::AttackPlayer(..)
+            | MobEvent::StingPlayer { .. }
+            | MobEvent::AttackPlayerWithEffect { .. }
+            | MobEvent::DamagePlayer { .. }
+            | MobEvent::ElderCurse { .. }
+            | MobEvent::SetVelocity { .. }
+            | MobEvent::RemoveKilled { .. }
+            | MobEvent::Push { .. }
+            | MobEvent::SonicBoom { .. }
+            | MobEvent::Shift { .. }
+            | MobEvent::Wololo { .. }
+            | MobEvent::Fangs { .. }
+            | MobEvent::Shoot(..)
+            | MobEvent::ExplosionSource { .. }
+            | MobEvent::Explode(..)
+            | MobEvent::LingeringCloud { .. }
+            | MobEvent::AttackMob { .. }
+            | MobEvent::AttackMobWithEffect { .. }
+            | MobEvent::CubeHurtPlayer { .. }
+            | MobEvent::CubeHurtMob { .. }
+            | MobEvent::PufferfishSting { .. }
+            | MobEvent::StabDismount { .. }
+            | MobEvent::Knockback { .. }
+            | MobEvent::SetTarget { .. }
+            | MobEvent::HuntHoglin { .. }
+            | MobEvent::Projectile(..)
+            | MobEvent::BowShot { .. }
+            | MobEvent::CrossbowLoad { .. }
+            | MobEvent::CrossbowShot { .. }
+            | MobEvent::Spawn(..)
+            | MobEvent::SpawnKind { .. }
+            | MobEvent::Convert { .. }
+            | MobEvent::DropItem { .. }
+            | MobEvent::ThrowItem { .. }
+            | MobEvent::DropGoatHorn { .. }
+            | MobEvent::DropGift { .. }
+            | MobEvent::SetBlock { .. }
+            | MobEvent::CrackTurtleEgg { .. }
+            | MobEvent::BedOccupied { .. }
+            | MobEvent::SetDoorOpen { .. }
+            | MobEvent::BreakDoor { .. }
+            | MobEvent::DestroyProgress { .. }
+            | MobEvent::CropRaided { .. }
+            | MobEvent::LevelEvent { .. }
+            | MobEvent::Infest { .. }
+            | MobEvent::BreakBlock { .. }
+            | MobEvent::Particles { .. }
+            | MobEvent::AroundSelf { .. }
+            | MobEvent::ParticleAt { .. }
+            | MobEvent::ParticleColored { .. }
+            | MobEvent::Experience { .. }
+            | MobEvent::AxolotlSupportPlayer { .. }
+            | MobEvent::DolphinTreasure { .. }
+            | MobEvent::EffectPlayer { .. }
+            | MobEvent::Ignite { .. }
+            | MobEvent::SetBlockName { .. }
+            | MobEvent::Hiss { .. }
+            | MobEvent::Tamed { .. }
+            | MobEvent::Buck { .. }
+            | MobEvent::FinishAdmiring { .. }
+            | MobEvent::Launch { .. }
+            | MobEvent::HurtSelf { .. }
+            | MobEvent::VillagerMeet { .. }
+            | MobEvent::VillagerOffers { .. }
+            | MobEvent::VillagerBirth { .. }
+            | MobEvent::WorkAtComposter { .. }
+            | MobEvent::GolemCheck { .. }
+            | MobEvent::Firework { .. }
+            | MobEvent::ThrowGift { .. }
+            | MobEvent::PatrolTarget { .. }
+            | MobEvent::RaiderTarget { .. }
+            | MobEvent::GiftLoot { .. }
+            | MobEvent::ShedScute { .. }
+            | MobEvent::LeashBreak { .. }
+            | MobEvent::NotifyLeashHolder { .. }
+            | MobEvent::CureZombieVillager { .. }
+            | MobEvent::Vibration { .. }
+            | MobEvent::DigParticles { .. }
+            | MobEvent::Reinforcements { .. }
+            | MobEvent::BlockBreakEffect { .. }
+            | MobEvent::Darkness { .. }
+            | MobEvent::CreakingHurt { .. }
+            | MobEvent::CreakingTearDown { .. }
+            | MobEvent::PandaSneezed { .. }
+            | MobEvent::FallToPassengers { .. } => ImmediateWrite::Nothing,
+        }
+    }
+}
+
 /// Mutable inputs changed by immediate brain events. Complex passenger and
 /// schooling changes remain explicit global conflicts.
 #[derive(Default)]
 pub struct BrainWrites {
     pub targets: Vec<u32>,
     pub global: bool,
+}
+impl BrainWrites {
+    fn note(&mut self, write: &ImmediateWrite) {
+        match write {
+            ImmediateWrite::Nothing => {}
+            ImmediateWrite::Target(target) => self.targets.push(*target),
+            ImmediateWrite::Everyone => self.global = true,
+        }
+    }
+    /// What applying `events` would write, without applying them.
+    pub fn of(events: &[MobEvent]) -> Self {
+        let mut writes = Self::default();
+        for event in events {
+            writes.note(&event.immediate_write());
+        }
+        writes
+    }
 }
 
 /// Applies the brain memories a mob's tick set on other mobs (from event
@@ -2599,16 +2752,20 @@ pub fn apply_brain_events(
     let mut writes = BrainWrites::default();
     let mut i = from;
     while i < events.len() {
+        let write = events[i].immediate_write();
+        if matches!(write, ImmediateWrite::Nothing) {
+            i += 1;
+            continue;
+        }
+        writes.note(&write);
         match events[i] {
             MobEvent::BreedTarget { mob, partner } => {
-                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     animal_brain::set_breed_partner(m, partner);
                 }
                 events.remove(i);
             }
             MobEvent::LockGaze { mob, partner } => {
-                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     animal_brain::lock_gaze(m, partner);
                     villager_brain::lock_gaze_half(m, Who::Mob(partner));
@@ -2616,24 +2773,20 @@ pub fn apply_brain_events(
                 events.remove(i);
             }
             MobEvent::Retreat { mob, from, at } => {
-                writes.targets.push(mob);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
                     piglin::receive_retreat(m, from, at);
                 }
                 events.remove(i);
             }
             MobEvent::StartRiding { rider, vehicle } => {
-                writes.global = true;
                 riders::start_riding(mobs, rider, vehicle);
                 events.remove(i);
             }
             MobEvent::StartFollowing { fish, leader } => {
-                writes.global = true;
                 aquatic::start_following(mobs, fish, leader);
                 events.remove(i);
             }
             MobEvent::SchoolSize { leader, by } => {
-                writes.targets.push(leader);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == leader) {
                     m.extra.followers += by;
                 }
@@ -2644,7 +2797,6 @@ pub fn apply_brain_events(
             MobEvent::Breed {
                 parent, partner, ..
             } => {
-                writes.targets.push(partner);
                 if let Some(m) = mobs.iter_mut().find(|m| m.id == partner) {
                     m.extra.age = 6000;
                     m.extra.in_love = 0;

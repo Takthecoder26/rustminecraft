@@ -144,7 +144,8 @@ def run(mode, args, out):
         commands = []
         for mob in range(args.mobs_per_player):
             dx, dz = (mob % 10) * 2 - 9, (mob // 10) * 2 - 6
-            commands.append(f'execute as @a at @s run summon {args.species} ~{dx} ~ ~{dz} '
+            species = args.species.split(',')
+            commands.append(f'execute as @a at @s run summon {species[mob % len(species)]} ~{dx} ~ ~{dz} '
                             '{Tags:["region_bench"],PersistenceRequired:1b,Invulnerable:1b,Silent:1b}')
         command_barrier(server, commands)
         # Start both engines at the same simulation age even when their TPS
@@ -222,7 +223,7 @@ def main():
     parser.add_argument('--before-bin', type=Path)
     parser.add_argument('--players', type=int, default=100)
     parser.add_argument('--mobs-per-player', type=int, default=70)
-    parser.add_argument('--species', default='zombie')
+    parser.add_argument('--species', default='zombie', help='comma-separated: a mixed population takes turns')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--settle', type=int, default=20)
     parser.add_argument('--warmup', type=int, default=15, help='simulation seconds, stepped as exactly N*20 frozen ticks')

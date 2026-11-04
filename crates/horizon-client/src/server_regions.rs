@@ -3,8 +3,8 @@
 //!
 //! No world data is copied here. Slots refer to the level's ordered entity
 //! list, and chunk membership is frozen until all work at the barrier joins.
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::chunk_map::ChunkMembershipDelta;
+use crate::fast_hash::{FxHashMap, FxHashSet};
 
 pub type Chunk = (i32, i32);
 
@@ -15,10 +15,9 @@ pub struct RegionId(pub Chunk);
 #[derive(Debug)]
 pub struct Region {
     pub id: RegionId,
-    pub chunks: Vec<Chunk>,
-    /// Slots retain the input entity/player order, including ties.
+    chunks: FxHashSet<Chunk>,
+    /// Slots retain the input entity order, including ties.
     pub entities: Vec<usize>,
-    pub players: Vec<usize>,
 }
 
 /// A level's ownership directory. Never shared mutably with a worker.
@@ -26,13 +25,152 @@ pub struct Region {
 pub struct Regions {
     revision: Option<u64>,
     regions: Vec<Region>,
-    owners: HashMap<Chunk, usize>,
-    /// Entities in nonresident chunks still participate in the serial despawn
-    /// pass and the global snapshot. They do not own or keep chunks loaded.
-    dormant: Vec<usize>,
+    owners: FxHashMap<Chunk, usize>,
+}
+
+/// The eight chunks around one, in no particular order.
+fn around((x, z): Chunk) -> impl Iterator<Item = Chunk> {
+    (-1..=1)
+        .flat_map(move |dx| (-1..=1).map(move |dz| (dx, dz)))
+        .filter(|&offset| offset != (0, 0))
+        .filter_map(move |(dx, dz)| Some((x.checked_add(dx)?, z.checked_add(dz)?)))
 }
 
 impl Regions {
+    /// Follows the chunk map, a chunk at a time when `deltas` (the changes since
+    /// the revision this last saw, from `ChunkMap::deltas_since`) allow it: a
+    /// moving player changes dozens of chunks of a map that can hold tens of
+    /// thousands. `chunks` is the whole membership, for when they don't.
+    pub fn update(
+        &mut self,
+        revision: u64,
+        deltas: impl FnOnce(u64) -> Option<Vec<ChunkMembershipDelta>>,
+        chunks: impl Iterator<Item = Chunk>,
+    ) {
+        if self.revision == Some(revision) {
+            return;
+        }
+        let applied = self
+            .revision
+            .and_then(deltas)
+            .is_some_and(|deltas| deltas.into_iter().all(|delta| self.apply(delta)));
+        if applied {
+            self.revision = Some(revision);
+        } else {
+            self.rebuild(revision, chunks);
+        }
+    }
+
+    /// One membership change. False when only a whole rebuild can answer it,
+    /// which leaves the regions to that rebuild.
+    fn apply(&mut self, delta: ChunkMembershipDelta) -> bool {
+        match delta {
+            ChunkMembershipDelta::Added(chunk) => {
+                self.add(chunk);
+                true
+            }
+            ChunkMembershipDelta::Removed(chunk) => self.remove(chunk),
+            ChunkMembershipDelta::Reset => false,
+        }
+    }
+
+    /// A new chunk joins the regions around it, and merges them.
+    fn add(&mut self, chunk: Chunk) {
+        if self.owners.contains_key(&chunk) {
+            return;
+        }
+        let mut neighbours: Vec<usize> = around(chunk)
+            .filter_map(|next| self.owners.get(&next).copied())
+            .collect();
+        neighbours.sort_unstable();
+        neighbours.dedup();
+        let Some(&largest) = neighbours
+            .iter()
+            .max_by_key(|&&slot| self.regions[slot].chunks.len())
+        else {
+            self.owners.insert(chunk, self.regions.len());
+            self.regions.push(Region {
+                id: RegionId(chunk),
+                chunks: FxHashSet::from_iter([chunk]),
+                entities: Vec::new(),
+            });
+            return;
+        };
+        let mut into = largest;
+        // Highest slot first: taking one moves only the last region.
+        for slot in neighbours.into_iter().rev() {
+            if slot == largest {
+                continue;
+            }
+            let last = self.regions.len() - 1;
+            let merged = self.take_region(slot);
+            if into == last {
+                into = slot;
+            }
+            for &moved in &merged.chunks {
+                self.owners.insert(moved, into);
+            }
+            let region = &mut self.regions[into];
+            region.chunks.extend(merged.chunks);
+            region.id = region.id.min(merged.id);
+        }
+        self.owners.insert(chunk, into);
+        let region = &mut self.regions[into];
+        region.chunks.insert(chunk);
+        region.id = region.id.min(RegionId(chunk));
+    }
+
+    /// A chunk leaves. Any path through it entered and left by the chunks around
+    /// it, so while those still connect among themselves its region stays whole.
+    /// False when they don't: the region may have split.
+    fn remove(&mut self, chunk: Chunk) -> bool {
+        let Some(&slot) = self.owners.get(&chunk) else {
+            return true;
+        };
+        let ring: Vec<Chunk> = around(chunk)
+            .filter(|next| self.owners.contains_key(next))
+            .collect();
+        let mut reached = vec![false; ring.len()];
+        let mut stack = Vec::new();
+        if !ring.is_empty() {
+            reached[0] = true;
+            stack.push(0);
+        }
+        while let Some(at) = stack.pop() {
+            for (next, seen) in reached.iter_mut().enumerate() {
+                let (a, b): (Chunk, Chunk) = (ring[at], ring[next]);
+                let near = a.0.abs_diff(b.0) <= 1 && a.1.abs_diff(b.1) <= 1;
+                if near && !*seen {
+                    *seen = true;
+                    stack.push(next);
+                }
+            }
+        }
+        if reached.contains(&false) {
+            return false;
+        }
+        self.owners.remove(&chunk);
+        let region = &mut self.regions[slot];
+        region.chunks.remove(&chunk);
+        if region.chunks.is_empty() {
+            self.take_region(slot);
+        } else if region.id == RegionId(chunk) {
+            region.id = RegionId(*region.chunks.iter().min().expect("not empty"));
+        }
+        true
+    }
+
+    /// Removes a region; the last one takes its slot.
+    fn take_region(&mut self, slot: usize) -> Region {
+        let region = self.regions.swap_remove(slot);
+        if let Some(moved) = self.regions.get(slot) {
+            for &chunk in &moved.chunks {
+                self.owners.insert(chunk, slot);
+            }
+        }
+        region
+    }
+
     /// Rebuild only when chunk membership changes. The caller's revision must
     /// change on load, unload, reset, or replacement of the whole chunk map.
     /// Eight-connected resident chunks share an owner (including diagonals).
@@ -41,12 +179,11 @@ impl Regions {
         if self.revision == Some(revision) {
             return;
         }
-        let mut remaining: HashSet<Chunk> = chunks.collect();
+        let mut remaining: FxHashSet<Chunk> = chunks.collect();
         let mut ordered: Vec<_> = remaining.iter().copied().collect();
         ordered.sort_unstable();
         self.owners.clear();
         self.regions.clear();
-        self.dormant.clear();
         for start in ordered {
             if !remaining.remove(&start) {
                 continue;
@@ -54,28 +191,20 @@ impl Regions {
             let mut chunks = vec![start];
             let mut head = 0;
             while head < chunks.len() {
-                let (x, z) = chunks[head];
+                let at = chunks[head];
                 head += 1;
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        let (Some(nx), Some(nz)) = (x.checked_add(dx), z.checked_add(dz)) else {
-                            continue;
-                        };
-                        let next = (nx, nz);
-                        if remaining.remove(&next) {
-                            chunks.push(next);
-                        }
+                for next in around(at) {
+                    if remaining.remove(&next) {
+                        chunks.push(next);
                     }
                 }
             }
-            chunks.sort_unstable();
             let slot = self.regions.len();
             self.owners.extend(chunks.iter().map(|&c| (c, slot)));
             self.regions.push(Region {
                 id: RegionId(start),
-                chunks,
+                chunks: chunks.into_iter().collect(),
                 entities: Vec::new(),
-                players: Vec::new(),
             });
         }
         self.revision = Some(revision);
@@ -84,26 +213,15 @@ impl Regions {
     /// Publish migrations together at a barrier. Input slots are unchanged:
     /// grouping by region must never reorder the serial entity tick walk.
     /// Removed entities disappear; new entities enter once, at their new slot.
-    /// Chunks are not loaded or retained by a migrating entity/player here.
-    pub fn index(
-        &mut self,
-        entities: impl Iterator<Item = Chunk>,
-        players: impl Iterator<Item = Chunk>,
-    ) {
+    /// An entity in no resident chunk belongs to no region; the coordinator's
+    /// walk still reaches it. Chunks are not loaded or retained by a migration.
+    pub fn index(&mut self, entities: impl Iterator<Item = Chunk>) {
         for region in &mut self.regions {
             region.entities.clear();
-            region.players.clear();
         }
-        self.dormant.clear();
         for (i, chunk) in entities.enumerate() {
-            match self.owners.get(&chunk) {
-                Some(&owner) => self.regions[owner].entities.push(i),
-                None => self.dormant.push(i),
-            }
-        }
-        for (i, chunk) in players.enumerate() {
             if let Some(&owner) = self.owners.get(&chunk) {
-                self.regions[owner].players.push(i);
+                self.regions[owner].entities.push(i);
             }
         }
     }
@@ -111,162 +229,9 @@ impl Regions {
     pub fn regions(&self) -> &[Region] {
         &self.regions
     }
-    pub fn dormant(&self) -> &[usize] {
-        &self.dormant
-    }
     pub fn owner(&self, chunk: Chunk) -> Option<RegionId> {
         self.owners.get(&chunk).map(|&i| self.regions[i].id)
     }
-
-    /// A pure projection of the ordered level entities, prepared by region.
-    /// Workers borrow immutable inputs; each result is owned by one worker.
-    /// The join is the publication barrier. No callback can mutate the level.
-    /// Dormant entities remain visible, in their original snapshot slots.
-    pub fn project<T: Sync, R: Send>(
-        &self,
-        entities: &[T],
-        workers: Workers,
-        f: impl Fn(&T) -> R + Sync,
-    ) -> Vec<R> {
-        // A worker launch is more expensive than small snapshots. This is a
-        // scheduling threshold, not a gameplay boundary or independence test.
-        if entities.len() < 1024 || self.regions.len() < 2 || workers.count == 1 {
-            return entities.iter().map(f).collect();
-        }
-        let groups: Vec<&[usize]> = self
-            .regions
-            .iter()
-            .map(|r| r.entities.as_slice())
-            .chain(std::iter::once(self.dormant.as_slice()))
-            .filter(|g| !g.is_empty())
-            .collect();
-        let results = workers.map(&groups, |slots| {
-            slots
-                .iter()
-                .map(|&i| (i, f(&entities[i])))
-                .collect::<Vec<_>>()
-        });
-        let mut out: Vec<Option<R>> = (0..entities.len()).map(|_| None).collect();
-        for group in results {
-            for (i, value) in group {
-                out[i] = Some(value);
-            }
-        }
-        out.into_iter()
-            .map(|v| v.expect("region index must cover the frozen entity list"))
-            .collect()
-    }
-}
-
-/// Bounded scoped workers, lending data without unsafe lifetime erasure or
-/// cloning a level. All workers join even when a callback panics.
-#[derive(Clone, Copy)]
-pub struct Workers {
-    count: usize,
-}
-impl Workers {
-    pub fn new(count: usize) -> Self {
-        Self {
-            count: count.clamp(1, 8),
-        }
-    }
-    pub fn count(self) -> usize {
-        self.count
-    }
-    pub fn map<T: Sync, R: Send>(self, items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-        let count = self.count.min(items.len());
-        if count <= 1 {
-            return items.iter().map(f).collect();
-        }
-        let next = AtomicUsize::new(0);
-        let mut out: Vec<(usize, R)> = std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..count)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut out = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(item) = items.get(i) else {
-                                break;
-                            };
-                            out.push((i, f(item)));
-                        }
-                        out
-                    })
-                })
-                .collect();
-            // Drain every join before propagating the first panic.
-            let mut out = Vec::new();
-            let mut panic = None;
-            for worker in workers {
-                match worker.join() {
-                    Ok(values) => out.extend(values),
-                    Err(error) => {
-                        panic.get_or_insert(error);
-                    }
-                }
-            }
-            if let Some(error) = panic {
-                std::panic::resume_unwind(error);
-            }
-            out
-        });
-        out.sort_unstable_by_key(|(i, _)| *i);
-        out.into_iter().map(|(_, value)| value).collect()
-    }
-}
-impl Default for Workers {
-    fn default() -> Self {
-        // Opt in only: the cheap projection benchmark is slower with scoped
-        // workers. Do not regress production ticks to exercise concurrency.
-        Self::new(
-            std::env::var("HORIZON_REGION_SNAPSHOT_WORKERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1),
-        )
-    }
-}
-
-/// Capabilities required by a phase. `Global` includes unbounded queries,
-/// shared RNG, native callbacks, spawn caps and cross-entity writes whose
-/// complete footprint has not been proved. Such a phase stays serial.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
-    Read(Chunk),
-    Write(Chunk),
-    Global,
-}
-impl Access {
-    pub fn conflicts(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Global, _) | (_, Self::Global) => true,
-            (Self::Read(_), Self::Read(_)) => false,
-            (Self::Read(a) | Self::Write(a), Self::Read(b) | Self::Write(b)) => a == b,
-        }
-    }
-}
-
-/// Consecutive jobs that can share a barrier. A later job never passes a
-/// conflicting earlier job. Spatially separate jobs with Global access are
-/// intentionally singleton batches, even if their owners differ.
-pub fn batches(access: &[Vec<Access>]) -> Vec<std::ops::Range<usize>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for i in 0..access.len() {
-        let conflict = access[start..i].iter().any(|job| {
-            job.iter()
-                .any(|&a| access[i].iter().any(|&b| a.conflicts(b)))
-        });
-        if conflict {
-            out.push(start..i);
-            start = i;
-        }
-    }
-    if start < access.len() {
-        out.push(start..access.len());
-    }
-    out
 }
 
 #[cfg(test)]
@@ -274,6 +239,21 @@ mod tests {
     use super::*;
     fn rebuild(r: &mut Regions, rev: u64, chunks: &[Chunk]) {
         r.rebuild(rev, chunks.iter().copied());
+    }
+
+    /// The regions as sets of chunks, in an order of their own.
+    fn partition(r: &Regions) -> Vec<(RegionId, Vec<Chunk>)> {
+        let mut out: Vec<_> = r
+            .regions()
+            .iter()
+            .map(|region| {
+                let mut chunks: Vec<_> = region.chunks.iter().copied().collect();
+                chunks.sort_unstable();
+                (region.id, chunks)
+            })
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     #[test]
@@ -306,92 +286,93 @@ mod tests {
     fn migration_removal_and_unload_keep_local_and_global_order() {
         let mut r = Regions::default();
         rebuild(&mut r, 1, &[(0, 0), (10, 0)]);
-        r.index(
-            [(10, 0), (0, 0), (10, 0), (99, 0)].into_iter(),
-            [(10, 0), (0, 0)].into_iter(),
-        );
+        r.index([(10, 0), (0, 0), (10, 0), (99, 0)].into_iter());
         assert_eq!(r.regions()[0].entities, [1]);
         assert_eq!(r.regions()[1].entities, [0, 2]);
-        assert_eq!(r.regions()[1].players, [0]);
-        assert_eq!(r.dormant(), [3]);
-        r.index([(0, 0), (0, 0), (10, 0)].into_iter(), std::iter::empty());
+        r.index([(0, 0), (0, 0), (10, 0)].into_iter());
         assert_eq!(r.regions()[0].entities, [0, 1]);
         assert_eq!(r.regions()[1].entities, [2]);
-        assert!(r.dormant().is_empty());
-        assert!(r.regions()[1].players.is_empty());
         rebuild(&mut r, 2, &[]);
-        r.index([(0, 0)].into_iter(), std::iter::empty());
-        assert_eq!(r.dormant(), [0]);
+        r.index([(0, 0)].into_iter());
+        assert!(r.regions().is_empty());
     }
 
+    /// Chunk by chunk must land on what a whole rebuild finds, whatever the
+    /// order of the changes: regions, their ids and who owns each chunk.
     #[test]
-    fn parallel_projection_including_dormant_entities_is_serial_equivalent() {
-        let mut r = Regions::default();
-        rebuild(&mut r, 1, &[(0, 0), (10, 0), (20, 0)]);
-        let entities: Vec<_> = (0..4097).collect();
-        r.index(
-            entities.iter().map(|i| ((i % 4) * 10, 0)),
-            std::iter::empty(),
-        );
-        let expected: Vec<_> = entities.iter().map(|i| i * 13).collect();
-        for workers in [1, 2, 8] {
-            assert_eq!(
-                r.project(&entities, Workers::new(workers), |i| i * 13),
-                expected
+    fn chunk_by_chunk_updates_match_a_whole_rebuild() {
+        // A fixed small generator: enough to bridge, split and empty regions in
+        // a small area, the same on every run.
+        let mut state = 0x2545_f491_u32;
+        let mut next = move |bound: u32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state % bound
+        };
+        let mut chunks: FxHashSet<Chunk> = FxHashSet::default();
+        let mut live = Regions::default();
+        live.update(1, |_| None, std::iter::empty());
+        let mut incremental = 0;
+        for step in 0..4000 {
+            let chunk = (next(12) as i32 - 6, next(12) as i32 - 6);
+            let delta = if chunks.remove(&chunk) {
+                ChunkMembershipDelta::Removed(chunk)
+            } else {
+                chunks.insert(chunk);
+                ChunkMembershipDelta::Added(chunk)
+            };
+            let revision = step + 2;
+            let mut whole = false;
+            live.update(
+                revision,
+                |_| Some(vec![delta]),
+                chunks.iter().copied().inspect(|_| whole = true),
             );
+            incremental += usize::from(!whole);
+            let mut expected = Regions::default();
+            expected.rebuild(revision, chunks.iter().copied());
+            assert_eq!(partition(&live), partition(&expected), "step {step}");
+            for &chunk in &chunks {
+                assert_eq!(live.owner(chunk), expected.owner(chunk), "step {step}");
+            }
         }
+        assert!(
+            incremental > 2000,
+            "most changes should not rebuild: {incremental}"
+        );
     }
 
     #[test]
-    fn bounded_workers_overlap_and_publish_only_after_all_jobs_complete() {
-        use std::sync::{Barrier, atomic::AtomicUsize};
-        let barrier = Barrier::new(2);
-        let active = AtomicUsize::new(0);
-        let peak = AtomicUsize::new(0);
-        let finished = AtomicUsize::new(0);
-        let values = Workers::new(2).map(&[0, 1], |i| {
-            let n = active.fetch_add(1, Ordering::SeqCst) + 1;
-            peak.fetch_max(n, Ordering::SeqCst);
-            barrier.wait();
-            active.fetch_sub(1, Ordering::SeqCst);
-            finished.fetch_add(1, Ordering::SeqCst);
-            i + 1
-        });
-        assert_eq!(values, [1, 2]);
-        assert_eq!(peak.load(Ordering::SeqCst), 2);
-        assert_eq!(finished.load(Ordering::SeqCst), 2);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+    fn removing_a_chunk_splits_or_keeps_its_region_by_what_connects_around_it() {
+        let mut r = Regions::default();
+        // A straight bridge: its middle joins two ends that don't touch.
+        rebuild(&mut r, 1, &[(0, 0), (1, 0), (2, 0)]);
+        assert!(!r.remove((1, 0)));
+        // A block: anything around the middle still connects.
+        let mut r = Regions::default();
+        let block: Vec<_> = (0..3).flat_map(|x| (0..3).map(move |z| (x, z))).collect();
+        rebuild(&mut r, 1, &block);
+        assert!(r.remove((1, 1)));
+        assert_eq!(r.regions().len(), 1);
+        // The region's own id leaves: the next smallest chunk takes over.
+        assert!(r.remove((0, 0)));
+        assert_eq!(r.owner((2, 2)), Some(RegionId((0, 1))));
     }
 
     #[test]
-    fn conflicts_cannot_overtake_and_global_rng_serializes_distant_owners() {
-        use Access::*;
-        let jobs = vec![
-            vec![Read((0, 0))],
-            vec![Read((0, 0))],
-            vec![Write((0, 0))],
-            vec![Write((99, 0))],
-            vec![Global],
-            vec![Global],
-        ];
-        assert_eq!(batches(&jobs), [0..2, 2..4, 4..5, 5..6]);
-        assert!(batches(&[]).is_empty());
-    }
-
-    #[test]
-    fn panic_joins_other_workers_before_returning() {
-        let finished = AtomicUsize::new(0);
-        let barrier = std::sync::Barrier::new(2);
-        let result = std::panic::catch_unwind(|| {
-            Workers::new(2).map(&[0, 1], |i| {
-                barrier.wait();
-                if *i == 0 {
-                    panic!("failed region");
-                }
-                finished.fetch_add(1, Ordering::SeqCst);
-            })
-        });
-        assert!(result.is_err());
-        assert_eq!(finished.load(Ordering::SeqCst), 1);
+    fn a_reset_or_an_unknown_past_rebuilds_the_whole_map() {
+        let mut r = Regions::default();
+        rebuild(&mut r, 1, &[(0, 0)]);
+        r.update(
+            2,
+            |_| Some(vec![ChunkMembershipDelta::Reset]),
+            [(5, 5)].into_iter(),
+        );
+        assert_eq!(r.owner((0, 0)), None);
+        assert_eq!(r.owner((5, 5)), Some(RegionId((5, 5))));
+        r.update(3, |_| None, [(7, 7)].into_iter());
+        assert_eq!(r.owner((5, 5)), None);
+        assert_eq!(r.owner((7, 7)), Some(RegionId((7, 7))));
     }
 }

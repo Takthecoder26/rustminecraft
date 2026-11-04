@@ -994,19 +994,34 @@ impl Game<'_> {
         }
         laps.lap("mob_pre");
         let uuid = self.level.player_uuid;
-        // Freeze ownership before lending immutable inputs to snapshot workers.
+        // Freeze ownership before lending immutable inputs to the workers.
         // Topology is cached by chunk-map membership, never by world edits.
         let players = self.level_players();
-        self.simulation.regions.rebuild(
-            self.simulation.world.chunks.membership_revision(),
-            self.simulation.world.chunks.iter().map(|(&chunk, _)| chunk),
-        );
         let chunk_at = |p: Vec3| (p.x.floor() as i32 >> 4, p.z.floor() as i32 >> 4);
-        self.simulation.regions.index(
-            self.simulation.mobs.iter().map(|m| chunk_at(m.position)),
-            players.iter().map(|p| chunk_at(p.position)),
-        );
         let mob_count = self.simulation.mobs.len();
+        // Legacy mode and a level with few mobs don't pay for regions they won't use.
+        let predicting = if self.simulation_server.wants_regions(mob_count) {
+            let chunks = &self.simulation.world.chunks;
+            self.simulation.regions.update(
+                chunks.membership_revision(),
+                |last| {
+                    let deltas = chunks.deltas_since(last)?;
+                    Some(deltas.map(|(_, delta)| delta).collect())
+                },
+                chunks.iter().map(|(&chunk, _)| chunk),
+            );
+            self.simulation
+                .regions
+                .index(self.simulation.mobs.iter().map(|m| chunk_at(m.position)));
+            let regions = self.simulation.regions.regions();
+            if self.simulation_server.backs_off() {
+                self.simulation.prediction_backoff.tick(regions)
+            } else {
+                vec![true; regions.len()]
+            }
+        } else {
+            Vec::new()
+        };
         let mut snapshot: Vec<Seen> = match self
             .simulation_server
             .executor(self.simulation.regions.regions().len(), mob_count)
@@ -1017,11 +1032,16 @@ impl Game<'_> {
         let species_index = horizon_client::mobs::snapshot::SpeciesIndex::new(&snapshot);
         laps.lap("mob_snapshot");
         let mut events = Vec::new();
-        let mut mobs = std::mem::take(&mut self.simulation.mobs);
-        let section_base = self.simulation.section_order.reserve(&mobs);
+        // A panic from here on leaves them to the crash save.
+        let mut taken = self.simulation.mob_rescue.hold(
+            std::mem::take(&mut self.simulation.mobs),
+            std::mem::take(&mut self.simulation.died),
+        );
+        let mobs = &mut taken.mobs;
+        let died = &mut taken.died;
+        let section_base = self.simulation.section_order.reserve(mobs);
         let mut dead = Vec::new();
         let mut corpses = Vec::new();
-        let mut died = std::mem::take(&mut self.simulation.died);
         let ticking = self.entity_ticking_area();
         // With guests on, each mob sees its nearest player (game/lan_mobs.rs).
         let guests = self.lan_guest_views();
@@ -1096,9 +1116,11 @@ impl Game<'_> {
             // One region owns each mutable prediction. Resource/world reads
             // remain borrowed until the worker barrier; callbacks stay serial.
             laps.lap("mob_base");
+            let verifying = self.simulation_server.verifies();
             let region_executor = if horizon_client::mod_api::mods().is_empty()
                 && !round.listening()
                 && index.len() == mobs.len()
+                && predicting.contains(&true)
             {
                 self.simulation_server
                     .executor(self.simulation.regions.regions().len(), mobs.len())
@@ -1113,7 +1135,7 @@ impl Game<'_> {
                 // Each mob's context, whether its tick is due, and whether a
                 // region's run of mobs can go on past it.
                 let (contexts, gates): (Vec<_>, Vec<(bool, bool)>) = executor
-                    .map(&mobs, |slot, mob| {
+                    .map(mobs, |slot, mob| {
                         let (x, z) = (mob.position.x.floor() as i32, mob.position.z.floor() as i32);
                         (
                             MobContext {
@@ -1153,7 +1175,7 @@ impl Game<'_> {
                             .filter(|&slot| {
                                 gates[slot].0 && (none_canceled || !round.canceled(mobs[slot].id))
                             })
-                            .take_while(|&slot| gates[slot].1)
+                            .take_while(|&slot| predicting[owner] && gates[slot].1)
                             .map(|slot| (slot, &mobs[slot]))
                             .collect();
                         RegionInput {
@@ -1261,12 +1283,28 @@ impl Game<'_> {
                 horizon_client::mobs::apply_mob_pushes(m, &mut pushes);
                 horizon_client::mobs::blocks_changed(m, &path_changes);
                 let from = events.len();
+                let before_commit = verifying.then(|| (m.clone(), scratch.clone()));
                 let committed = region_round.as_mut().and_then(|transaction| {
                     transaction.commit(i, m, &grid, &mut scratch, &mut events)
                 });
                 let mut seen_after = None;
                 let (kept, seen_guest) = match committed {
                     Some(horizon_client::mobs::region_tick::Committed { kept, conn, seen }) => {
+                        if let Some((mut replayed, mut random)) = before_commit {
+                            let (w, _) = mob_view!(&replayed);
+                            let mut replayed_events = Vec::new();
+                            let replayed_kept = replayed.tick_with_order(
+                                &w,
+                                &mut random,
+                                &mut replayed_events,
+                                section_base.wrapping_add(i as u64),
+                            );
+                            horizon_client::mobs::region_tick::verify_commit(
+                                i,
+                                (m, kept, &events[from..], &scratch),
+                                (&replayed, replayed_kept, &replayed_events, &random),
+                            );
+                        }
                         seen_after = Some(seen);
                         if !guests.is_empty() {
                             match conn {
@@ -1352,8 +1390,7 @@ impl Game<'_> {
                 if let Some(transaction) = region_round.as_mut() {
                     transaction.snapshot_changed(i, &before, &snapshot[i]);
                 }
-                let immediate =
-                    horizon_client::mobs::apply_brain_events(&mut mobs, &mut events, from);
+                let immediate = horizon_client::mobs::apply_brain_events(mobs, &mut events, from);
                 if let Some(transaction) = region_round.as_mut() {
                     transaction.immediate_brain_write(i, &immediate, &index);
                 }
@@ -1364,12 +1401,24 @@ impl Game<'_> {
             laps.lap("mob_walk");
             let mut flags = keep.into_iter();
             mobs.retain(|_| flags.next().unwrap_or(true));
-            for m in &mut mobs {
+            for m in mobs.iter_mut() {
                 horizon_client::mobs::apply_mob_pushes(m, &mut pushes);
             }
             level_random = scratch;
             // The immutable base view is no longer used before publishing
             // coordinator statistics and then completed gameplay state.
+            if let Some(transaction) = region_round.as_ref()
+                && self.simulation_server.backs_off()
+            {
+                let regions = self.simulation.regions.regions();
+                for (owner, predicted, committed) in transaction.outcomes() {
+                    self.simulation.prediction_backoff.observe(
+                        regions[owner].id,
+                        predicted,
+                        committed,
+                    );
+                }
+            }
             self.simulation_server
                 .publish(region_round.map_or_else(Default::default, |round| round.stats));
         }
@@ -1388,11 +1437,11 @@ impl Game<'_> {
         // first, as `append` put them; with none, the ticked list goes back
         // as it is instead of being copied into a new one, every mob a tick.
         if self.simulation.mobs.is_empty() {
-            self.simulation.mobs = mobs;
+            self.simulation.mobs = std::mem::take(mobs);
         } else {
-            self.simulation.mobs.append(&mut mobs);
+            self.simulation.mobs.append(mobs);
         }
-        self.simulation.died = died;
+        self.simulation.died = std::mem::take(died);
         self.native_tick_post_batch(round);
         // ... and entity event 60 goes out as it is: the poof.
         for (id, at, width, height) in gone {

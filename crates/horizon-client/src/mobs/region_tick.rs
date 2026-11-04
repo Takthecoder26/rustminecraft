@@ -168,6 +168,9 @@ pub struct TickPrediction {
     pub reads: snapshot::ReadSet,
     pub random_before: LegacyRandom,
     pub random_after: LegacyRandom,
+    /// The mob this ticked from, to check a commit replaces nothing newer.
+    #[cfg(debug_assertions)]
+    pub input: String,
 }
 impl TickPrediction {
     pub fn rng_valid(&self, current: &LegacyRandom) -> bool {
@@ -227,6 +230,8 @@ impl RegionTick<'_> {
             }
             apply_mob_pushes(&mut mob, &mut pending);
             blocks_changed(&mut mob, self.path_changes);
+            #[cfg(debug_assertions)]
+            let mob_input = format!("{mob:?}");
             let reads = RefCell::new(snapshot::ReadSet::default());
             let mut events = Vec::new();
             let random_before = random.clone();
@@ -270,11 +275,7 @@ impl RegionTick<'_> {
             overlay.update(slot, current);
             // Replay known single-entity brain writes into the corresponding
             // future owned inputs, preserving their original event order.
-            let mut writes = if events.is_empty() {
-                BrainWrites::default()
-            } else {
-                apply_brain_events(&mut [], &mut events.clone(), 0)
-            };
+            let mut writes = BrainWrites::of(&events);
             writes.targets.sort_unstable();
             writes.targets.dedup();
             for target in writes.targets {
@@ -300,6 +301,8 @@ impl RegionTick<'_> {
                 reads: reads.into_inner(),
                 random_before,
                 random_after: random.clone(),
+                #[cfg(debug_assertions)]
+                input: mob_input,
             });
             if global_conflict {
                 break;
@@ -459,6 +462,9 @@ pub struct TickRound {
     cursors: Vec<usize>,
     owners: Vec<usize>,
     failed: Vec<bool>,
+    /// What each owner predicted and how much of it committed this round.
+    predicted: Vec<usize>,
+    committed: Vec<usize>,
     changes: snapshot::SnapshotChanges,
     pub stats: RegionStats,
     section_base: u64,
@@ -475,10 +481,10 @@ impl TickRound {
             .count();
         let regions = owners.iter().copied().max().map_or(0, |owner| owner + 1);
         let mut queues = vec![None; regions];
-        let mut predicted = 0;
+        let mut predicted = vec![0; regions];
         for (queue, list) in predictions.iter().enumerate() {
-            predicted += list.len();
             if let Some(first) = list.first() {
+                predicted[first.owner] = list.len();
                 debug_assert!(list.iter().all(|p| owners[p.slot] == first.owner));
                 debug_assert!(list.windows(2).all(|p| p[0].slot < p[1].slot));
                 assert!(queues[first.owner].is_none(), "one list per owner");
@@ -491,13 +497,15 @@ impl TickRound {
             changes: snapshot::SnapshotChanges::new(owners.clone()),
             owners,
             failed: vec![false; regions],
-            predictions,
-            section_base,
+            committed: vec![0; regions],
             stats: RegionStats {
                 regions: active_regions,
-                predicted,
+                predicted: predicted.iter().sum(),
                 ..Default::default()
             },
+            predicted,
+            predictions,
+            section_base,
         }
     }
     /// Publishes this slot's prediction if it is still valid, returning what
@@ -525,6 +533,15 @@ impl TickRound {
             let rng_valid = prediction.rng_valid(random);
             let read_conflict = self.changes.conflict(&prediction.reads, owner, grid);
             if rng_valid && read_conflict.is_none() {
+                // The swap drops whatever the walk wrote to this mob since the
+                // prediction cloned it. Every such write has to reach the
+                // prediction or void it (`immediate_write`, pushes).
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    prediction.input == format!("{mob:?}"),
+                    "the walk wrote to mob {} after its prediction was made",
+                    mob.id
+                );
                 // The replaced mob stays in the list for [`RegionExecutor::retire`].
                 std::mem::swap(mob, &mut prediction.mob);
                 if prediction.random_after.was_used() {
@@ -532,6 +549,7 @@ impl TickRound {
                 }
                 events.append(&mut prediction.events);
                 self.stats.committed += 1;
+                self.committed[owner] += 1;
                 return Some(Committed {
                     kept: prediction.kept,
                     conn: prediction.conn,
@@ -570,6 +588,16 @@ impl TickRound {
             events,
             self.section_base.wrapping_add(slot as u64),
         )
+    }
+    /// Each owner that predicted anything: its slot, what it predicted, and how
+    /// much of that committed.
+    pub fn outcomes(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        self.predicted
+            .iter()
+            .zip(&self.committed)
+            .enumerate()
+            .filter(|(_, (predicted, _))| **predicted > 0)
+            .map(|(owner, (&predicted, &committed))| (owner, predicted, committed))
     }
     /// The round's predictions, for [`RegionExecutor::retire`] once the walk ends.
     pub fn take_predictions(&mut self) -> Vec<Vec<TickPrediction>> {
@@ -626,6 +654,175 @@ impl TickRound {
                     self.failed[target_owner] = true;
                 }
             }
+        }
+    }
+}
+
+/// Rounds in a row a region must waste before it sits out.
+const WASTED_ROUNDS: u32 = 4;
+/// Ticks of the first time it sits out; each wasted try after doubles them.
+const FIRST_SKIP: u32 = 20;
+const MAX_SKIP: u32 = 640;
+
+#[derive(Default)]
+struct RegionBackoff {
+    wasted_rounds: u32,
+    skip: u32,
+    penalty: u32,
+}
+
+/// Which regions keep paying for predictions that don't commit. Level RNG draws
+/// and shared villager reads can void most of a region's work every tick, and
+/// then it costs the prediction and the replay. A region that keeps doing so
+/// runs on the coordinator for a while, as one with no prediction always can.
+/// This changes cost only: a commit and a replay give the same result. Regions
+/// that do commit keep their workers.
+#[derive(Default)]
+pub struct PredictionBackoff {
+    regions: crate::fast_hash::FxHashMap<crate::server_regions::RegionId, RegionBackoff>,
+}
+impl PredictionBackoff {
+    /// Whether each of this tick's regions predicts. Counts down the waits, and
+    /// forgets regions that are gone (an id changes with the region's chunks,
+    /// which at worst costs a few wasted rounds to learn again).
+    pub fn tick(&mut self, regions: &[crate::server_regions::Region]) -> Vec<bool> {
+        if self.regions.is_empty() {
+            return vec![true; regions.len()];
+        }
+        let mut live = crate::fast_hash::FxHashMap::default();
+        let predicts = regions
+            .iter()
+            .map(|region| {
+                let Some(mut state) = self.regions.remove(&region.id) else {
+                    return true;
+                };
+                let predicts = state.skip == 0;
+                state.skip = state.skip.saturating_sub(1);
+                live.insert(region.id, state);
+                predicts
+            })
+            .collect();
+        self.regions = live;
+        predicts
+    }
+    /// A round's result for one region: half or more thrown away is a waste.
+    pub fn observe(
+        &mut self,
+        region: crate::server_regions::RegionId,
+        predicted: usize,
+        committed: usize,
+    ) {
+        if committed * 2 > predicted {
+            self.regions.remove(&region);
+            return;
+        }
+        let state = self.regions.entry(region).or_default();
+        state.wasted_rounds += 1;
+        if state.wasted_rounds >= WASTED_ROUNDS {
+            state.penalty = (state.penalty * 2).clamp(FIRST_SKIP, MAX_SKIP);
+            state.skip = state.penalty;
+            // The next round after the wait is the test: one more waste waits longer.
+            state.wasted_rounds = WASTED_ROUNDS - 1;
+        }
+    }
+}
+
+/// A level's mob list and death records while a tick holds them out of the
+/// level. A panic during the tick leaves them here instead of dropping them, so
+/// the crash save doesn't write the level's entities as if it had no mobs.
+pub struct TakenMobs {
+    pub mobs: crate::join_seq::JoinList<Mob>,
+    pub died: crate::fast_hash::FxHashSet<u32>,
+    rescue: MobRescue,
+}
+impl Drop for TakenMobs {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let mut rescued = self
+                .rescue
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *rescued = Some((
+                std::mem::take(&mut self.mobs),
+                std::mem::take(&mut self.died),
+            ));
+        }
+    }
+}
+type RescuedMobs = (
+    crate::join_seq::JoinList<Mob>,
+    crate::fast_hash::FxHashSet<u32>,
+);
+/// Where [`TakenMobs`] leaves them.
+#[derive(Clone, Default)]
+pub struct MobRescue(std::sync::Arc<std::sync::Mutex<Option<RescuedMobs>>>);
+impl MobRescue {
+    pub fn hold(
+        &self,
+        mobs: crate::join_seq::JoinList<Mob>,
+        died: crate::fast_hash::FxHashSet<u32>,
+    ) -> TakenMobs {
+        TakenMobs {
+            mobs,
+            died,
+            rescue: self.clone(),
+        }
+    }
+    /// What a tick left here when it panicked.
+    pub fn recover(&self) -> Option<RescuedMobs> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// Runs in `HORIZON_SIMULATION_MODE=verify`, with the mob as it was before its
+/// commit replayed on the coordinator: a commit must be what a serial tick gives,
+/// or a read or write got past the tracking. A panic names the first difference.
+pub fn verify_commit(
+    slot: usize,
+    committed: (&Mob, bool, &[MobEvent], &LegacyRandom),
+    replayed: (&Mob, bool, &[MobEvent], &LegacyRandom),
+) {
+    let id = committed.0.id;
+    assert_eq!(
+        committed.1, replayed.1,
+        "slot {slot}, mob {id}: a commit and its replay disagree on keeping the mob"
+    );
+    assert!(
+        committed.3.same_stream(replayed.3),
+        "slot {slot}, mob {id}: a commit and its replay left the level random differently"
+    );
+    for (what, committed, replayed) in [
+        (
+            "mob",
+            format!("{:?}", committed.0),
+            format!("{:?}", replayed.0),
+        ),
+        (
+            "events",
+            format!("{:?}", committed.2),
+            format!("{:?}", replayed.2),
+        ),
+    ] {
+        if committed != replayed {
+            let at = committed
+                .bytes()
+                .zip(replayed.bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or(committed.len().min(replayed.len()));
+            let part = |text: &str| {
+                let bytes = text.as_bytes();
+                let (from, to) = (at.saturating_sub(100), (at + 180).min(bytes.len()));
+                String::from_utf8_lossy(&bytes[from..to]).into_owned()
+            };
+            panic!(
+                "slot {slot}, mob {id}: the commit and its replay differ in the {what} at {at}\ncommit: {}\nreplay: {}",
+                part(&committed),
+                part(&replayed)
+            );
         }
     }
 }
@@ -918,10 +1115,166 @@ mod tests {
                 }
             }
         });
+        // The parity job has the data and says so, so that this can't quietly
+        // stop running there.
+        assert!(
+            ran || std::env::var_os("HORIZON_REQUIRE_TEST_RESOURCES").is_none(),
+            "HORIZON_REQUIRE_TEST_RESOURCES is set and the prepared resources are missing"
+        );
         if !ran {
             eprintln!(
                 "prepared vanilla resources unavailable; resource-backed transaction test skipped"
             );
         }
+    }
+
+    fn test_mob(id: u32) -> Mob {
+        Mob::new(id, super::super::sensor_scan_tests::kind(), Vec3::ZERO, 0.0)
+    }
+
+    #[test]
+    fn a_region_wasting_its_predictions_sits_out_and_gets_retried() {
+        use crate::server_regions::{RegionId, Regions};
+        let mut regions = Regions::default();
+        regions.rebuild(1, [(0, 0), (10, 0)].into_iter());
+        let (bad, good) = (RegionId((0, 0)), RegionId((10, 0)));
+        let mut backoff = PredictionBackoff::default();
+        let slot = |id| regions.regions().iter().position(|r| r.id == id).unwrap();
+        let (bad_slot, good_slot) = (slot(bad), slot(good));
+        // A few bad rounds in a row are not enough, and a good one starts over.
+        for _ in 0..3 {
+            backoff.observe(bad, 10, 5);
+        }
+        backoff.observe(bad, 10, 6);
+        for _ in 0..3 {
+            backoff.observe(bad, 10, 0);
+            assert!(backoff.tick(regions.regions())[bad_slot]);
+        }
+        // The fourth makes it sit out, without touching the other region.
+        backoff.observe(bad, 10, 0);
+        backoff.observe(good, 10, 10);
+        let ticks_out = |backoff: &mut PredictionBackoff| {
+            (0..)
+                .take_while(|_| {
+                    let predicts = backoff.tick(regions.regions());
+                    assert!(predicts[good_slot]);
+                    !predicts[bad_slot]
+                })
+                .count()
+        };
+        assert_eq!(ticks_out(&mut backoff), FIRST_SKIP as usize);
+        // Back and still wasting: longer, up to the limit.
+        backoff.observe(bad, 10, 0);
+        assert_eq!(ticks_out(&mut backoff), FIRST_SKIP as usize * 2);
+        for _ in 0..8 {
+            backoff.observe(bad, 10, 0);
+            ticks_out(&mut backoff);
+        }
+        backoff.observe(bad, 10, 0);
+        assert_eq!(ticks_out(&mut backoff), MAX_SKIP as usize);
+        // Back and committing: forgiven, and it takes a full run of waste again.
+        backoff.observe(bad, 10, 10);
+        for _ in 0..3 {
+            backoff.observe(bad, 10, 0);
+            assert!(backoff.tick(regions.regions())[bad_slot]);
+        }
+    }
+
+    #[test]
+    fn backoff_forgets_a_region_that_is_gone() {
+        use crate::server_regions::{RegionId, Regions};
+        let mut regions = Regions::default();
+        regions.rebuild(1, [(0, 0)].into_iter());
+        let mut backoff = PredictionBackoff::default();
+        for _ in 0..WASTED_ROUNDS {
+            backoff.observe(RegionId((0, 0)), 10, 0);
+        }
+        assert_eq!(backoff.tick(regions.regions()), [false]);
+        regions.rebuild(2, [(5, 5)].into_iter());
+        assert_eq!(backoff.tick(regions.regions()), [true]);
+        regions.rebuild(3, [(0, 0)].into_iter());
+        assert_eq!(backoff.tick(regions.regions()), [true]);
+    }
+
+    /// A prediction of `mob` that commits unless something stopped it.
+    fn round_predicting(mob: &Mob) -> (TickRound, seen_grid::SeenGrid) {
+        let random = LegacyRandom::new(1);
+        let seen = mob.seen(None);
+        let grid = seen_grid::SeenGrid::new(std::iter::once(seen.bounds));
+        let prediction = TickPrediction {
+            slot: 0,
+            owner: 0,
+            mob: mob.clone(),
+            conn: None,
+            seen,
+            kept: true,
+            events: Vec::new(),
+            reads: Default::default(),
+            random_before: random.clone(),
+            random_after: random,
+            #[cfg(debug_assertions)]
+            input: format!("{mob:?}"),
+        };
+        (TickRound::new(vec![0], vec![vec![prediction]], 1), grid)
+    }
+
+    #[test]
+    fn a_commit_replacing_an_untouched_mob_passes_the_check_and_counts() {
+        let mut mob = test_mob(1);
+        let (mut round, grid) = round_predicting(&mob);
+        let mut random = LegacyRandom::new(1);
+        let committed = round.commit(0, &mut mob, &grid, &mut random, &mut Vec::new());
+        assert!(committed.is_some());
+        assert_eq!(round.outcomes().collect::<Vec<_>>(), [(0, 1, 1)]);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "after its prediction was made")]
+    fn a_commit_over_a_write_the_prediction_never_saw_panics() {
+        let mut mob = test_mob(1);
+        let (mut round, grid) = round_predicting(&mob);
+        mob.extra.age = 6000;
+        let mut random = LegacyRandom::new(1);
+        round.commit(0, &mut mob, &grid, &mut random, &mut Vec::new());
+    }
+
+    #[test]
+    fn a_panic_during_the_tick_leaves_the_mobs_to_be_recovered() {
+        let rescue = MobRescue::default();
+        let mut mobs = crate::join_seq::JoinList::default();
+        mobs.push(test_mob(7));
+        let died = crate::fast_hash::FxHashSet::from_iter([7]);
+        let held = rescue.clone();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _taken = held.hold(mobs, died);
+            panic!("a tick");
+        }));
+        assert!(unwound.is_err());
+        let (mobs, died) = rescue.recover().expect("left for the crash save");
+        assert_eq!(mobs.iter().map(|m| m.id).collect::<Vec<_>>(), [7]);
+        assert!(died.contains(&7));
+        assert!(rescue.recover().is_none(), "recovered once");
+    }
+
+    #[test]
+    fn a_tick_that_ends_normally_leaves_nothing_to_recover() {
+        let rescue = MobRescue::default();
+        drop(rescue.hold(Default::default(), Default::default()));
+        assert!(rescue.recover().is_none());
+    }
+
+    #[test]
+    fn verify_accepts_equal_results_and_names_a_difference() {
+        let (a, mut b) = (test_mob(1), test_mob(1));
+        let random = LegacyRandom::new(1);
+        verify_commit(0, (&a, true, &[], &random), (&b, true, &[], &random));
+        b.extra.age = 6000;
+        let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_commit(0, (&a, true, &[], &random), (&b, true, &[], &random));
+        }))
+        .unwrap_err();
+        let message = message.downcast_ref::<String>().unwrap();
+        assert!(message.contains("differ in the mob"), "{message}");
     }
 }

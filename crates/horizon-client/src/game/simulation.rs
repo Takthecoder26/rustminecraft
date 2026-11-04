@@ -60,6 +60,10 @@ pub(super) struct LevelSimulation {
     pub spawn_scratch: SpawnScratch,
     pub regions: Regions,
     pub section_order: horizon_client::mobs::region_tick::SectionOrder,
+    /// Which regions' predictions keep failing here, in automatic mode.
+    pub prediction_backoff: horizon_client::mobs::region_tick::PredictionBackoff,
+    /// The mobs a panicking tick was holding, until a save takes them back.
+    pub mob_rescue: horizon_client::mobs::region_tick::MobRescue,
 }
 
 impl LevelSimulation {
@@ -106,6 +110,20 @@ impl LevelSimulation {
             spawn_scratch: Default::default(),
             regions: Default::default(),
             section_order: Default::default(),
+            prediction_backoff: Default::default(),
+            mob_rescue: Default::default(),
+        }
+    }
+    /// Takes the mobs a panicking tick held back into the level. Those added
+    /// during that tick come first, as the tick's own end would put them.
+    pub fn recover_taken_mobs(&mut self) {
+        if let Some((mut mobs, died)) = self.mob_rescue.recover() {
+            if self.mobs.is_empty() {
+                self.mobs = mobs;
+            } else {
+                self.mobs.append(&mut mobs);
+            }
+            self.died.extend(died);
         }
     }
 }
@@ -116,6 +134,8 @@ enum Execution {
     Legacy,
     SerialRegions,
     Parallel,
+    /// `Parallel`, with every commit replayed and compared.
+    Verify,
 }
 
 /// Server-wide scheduling, shared by dimensions and separate from their owned
@@ -140,12 +160,16 @@ pub(super) struct ServerCoordination {
 
 pub(super) use horizon_client::mobs::region_tick::RegionStats as TickStats;
 
+/// Below this, automatic mode keeps the direct serial loop.
+const MIN_AUTO_MOBS: usize = 128;
+
 impl Default for ServerCoordination {
     fn default() -> Self {
         let execution = match std::env::var("HORIZON_SIMULATION_MODE").as_deref() {
             Ok("legacy") => Execution::Legacy,
             Ok("serial") => Execution::SerialRegions,
             Ok("parallel") => Execution::Parallel,
+            Ok("verify") => Execution::Verify,
             _ => Execution::Auto,
         };
         Self {
@@ -166,6 +190,24 @@ impl Default for ServerCoordination {
     }
 }
 impl ServerCoordination {
+    /// Whether a level of `mobs` mobs needs its regions: whether `executor` can
+    /// answer for it. Their upkeep is not free on a server whose players move.
+    pub fn wants_regions(&self, mobs: usize) -> bool {
+        match self.execution {
+            Execution::Legacy => false,
+            Execution::Auto => mobs >= MIN_AUTO_MOBS,
+            _ => true,
+        }
+    }
+    /// Whether regions that keep wasting their predictions sit out. A forced
+    /// mode keeps predicting everything, so that it tests all of it.
+    pub fn backs_off(&self) -> bool {
+        self.execution == Execution::Auto
+    }
+    /// Whether every commit is replayed and compared.
+    pub fn verifies(&self) -> bool {
+        self.execution == Execution::Verify
+    }
     pub fn executor(
         &self,
         regions: usize,
@@ -176,7 +218,7 @@ impl ServerCoordination {
         if self.execution == Execution::Legacy
             || regions == 0
             || mobs == 0
-            || (self.execution == Execution::Auto && (regions < 2 || mobs < 128))
+            || (self.execution == Execution::Auto && (regions < 2 || mobs < MIN_AUTO_MOBS))
             || cfg!(feature = "rng-trace")
         {
             return None;
