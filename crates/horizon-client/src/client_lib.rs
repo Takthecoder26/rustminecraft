@@ -7,6 +7,7 @@ pub mod ambience;
 pub mod animate_tick;
 pub mod arrows;
 pub mod block_contact;
+pub mod powder_snow;
 pub mod realms_service;
 pub mod realms_transfer;
 pub use horizon_client_render::{

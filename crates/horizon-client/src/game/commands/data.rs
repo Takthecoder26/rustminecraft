@@ -388,6 +388,17 @@ impl Game<'_> {
             | Target::Other(id)
             | Target::Fangs(id)
             | Target::Cloud(id) => Some(self.persist.raw.entry(id).or_insert_with(empty)),
+            // `tags_of` reads these two from the same map and a falling
+            // block from its saved compound; without these arms `/tag`
+            // wrote nothing and still reported success.
+            Target::Rocket(id) | Target::Trident(id) => {
+                Some(self.persist.raw.entry(id).or_insert_with(empty))
+            }
+            Target::Falling(id) => {
+                let uuid = self.uuid_for(id);
+                let f = self.falling.iter_mut().find(|f| f.id == id)?;
+                Some(&mut f.saved.get_or_insert_with(|| Box::new((uuid, empty()))).1)
+            }
             _ => None,
         }
     }
@@ -470,8 +481,14 @@ impl Game<'_> {
                     .get(&key)
                     .ok_or_else(|| err("commands.data.block.invalid", &[]))?;
                 // BlockEntity.saveWithFullMetadata: no chunk-only keepPacked,
-                // and the lock the model does not hold.
+                // and the lock and custom name the model does not hold.
                 let mut tag = save::block_entity_data(key, e, &name, self.world.block_lock(key));
+                if let (Some(custom), Tag::Compound(map)) =
+                    (self.world.block_names.get(&key), &mut tag)
+                {
+                    map.entry("CustomName".into())
+                        .or_insert_with(|| Tag::String(custom.as_str().into()));
+                }
                 self.restore_loot_table(key, &mut tag);
                 Ok(tag)
             }
@@ -485,6 +502,7 @@ impl Game<'_> {
                 let key = (p[0], p[1], p[2]);
                 if let Some((_, mut new)) = save::decode_block_entity(&tag) {
                     self.take_loot_table(key, &tag, &mut new);
+                    self.load_block_name(key, &new, &tag);
                     self.world.block_entities.insert(key, new);
                     self.world.set_block_lock(key, &tag);
                     self.update_spawner_display(key);

@@ -345,6 +345,7 @@ struct Shared {
     /// Only workers use this pool; frames never wait for its lock. Retaining
     /// cleared buffers avoids racing the renderer for the process heap.
     meshes: Mutex<MeshPool>,
+    aborted: std::sync::atomic::AtomicBool,
 }
 #[derive(Default)]
 struct MeshPool {
@@ -780,6 +781,18 @@ struct Jobs<G: ChunkGenerator> {
 impl<G: ChunkGenerator> Source for Jobs<G> {
     fn next(&self) -> Option<Rank> {
         let queue = self.shared.queue.lock().unwrap();
+        if self
+            .shared
+            .aborted
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            for q in queue.iter() {
+                if matches!(q.job, Job::Save(..)) {
+                    return Some(Rank::new(Class::Urgent, q.priority));
+                }
+            }
+            return None;
+        }
         queue.peek().map(|q| {
             // Jobs without a column (saves, meshes to free) go first.
             let class = if q.at.is_none() {
@@ -794,6 +807,14 @@ impl<G: ChunkGenerator> Source for Jobs<G> {
         let Some(job) = self.shared.queue.lock().unwrap().pop() else {
             return false;
         };
+        if self
+            .shared
+            .aborted
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !matches!(job.job, Job::Save(..))
+        {
+            return true;
+        }
         let started = job_stats::enabled().then(|| {
             let kind = match &job.job {
                 Job::Generate(..) => 1,
@@ -975,6 +996,7 @@ impl Streaming {
             context: RwLock::new(context.clone()),
             done: Mailbox::default(),
             meshes: Mutex::new(MeshPool::default()),
+            aborted: std::sync::atomic::AtomicBool::new(false),
         });
         let light_tables = context.light.clone();
         let saves: Arc<dyn Saves> = generator.clone();
@@ -1201,6 +1223,14 @@ impl Streaming {
                 gone,
                 world.layout().sections() as i32,
             );
+        }
+        // `ChunkTaskPriorityQueue.release` for each of them (`ChunkTaskDispatcher`'s
+        // `release(col, true)` from the chunk's unload): the jobs still queued for a
+        // column go with it instead of running for a level they no longer belong to.
+        if !gone.is_empty()
+            && let Ok(mut queue) = self.shared.queue.lock()
+        {
+            release_columns(&mut queue, gone);
         }
         let mut chunks = Vec::with_capacity(gone.len());
         for &(x, z) in gone {
@@ -2187,6 +2217,30 @@ impl Streaming {
     fn near_finished(&self, x: i32, z: i32, reach: i32) -> bool {
         self.ranges().near_finished(x, z, reach)
     }
+    /// Abort unvisited background chunk generation, decoration, and meshing on world exit.
+    pub fn abort_generation(&mut self) {
+        self.shared
+            .aborted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut queue) = self.shared.queue.lock() {
+            let mut saves = Vec::new();
+            for item in std::mem::take(&mut *queue).into_vec() {
+                if matches!(item.job, Job::Save(..)) {
+                    saves.push(item);
+                }
+            }
+            *queue = std::collections::BinaryHeap::from(saves);
+        }
+        self.generating.clear();
+        self.decorating = 0;
+        self.decorating_finals.clear();
+        self.finishing.clear();
+        self.viewing.clear();
+        self.waiting.clear();
+        self.meshing.clear();
+        self.lighting.clear();
+        self.jobs.notify_all();
+    }
     /// Save what generation holds outside the world: the proto chunks
     /// decoration wrote to. With `wait`, the decorations, columns and saves
     /// in flight are waited for first (their proto chunks are out in the
@@ -2201,10 +2255,13 @@ impl Streaming {
             return;
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while self.decorating > 0
-            || !self.finishing.is_empty()
-            || self.saving > 0
-            || !self.viewing.is_empty()
+        let aborted = self
+            .shared
+            .aborted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        while (self.saving > 0)
+            || (!aborted
+                && (self.decorating > 0 || !self.finishing.is_empty() || !self.viewing.is_empty()))
         {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.shared.done.recv_timeout(left) {
@@ -2253,10 +2310,13 @@ impl Streaming {
                 return false;
             }
         }
-        if self.decorating > 0
-            || !self.finishing.is_empty()
-            || self.saving > 0
-            || !self.viewing.is_empty()
+        let aborted = self
+            .shared
+            .aborted
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if (self.saving > 0)
+            || (!aborted
+                && (self.decorating > 0 || !self.finishing.is_empty() || !self.viewing.is_empty()))
         {
             return false;
         }
@@ -2798,6 +2858,7 @@ impl Ranges<'_> {
 }
 impl Drop for Streaming {
     fn drop(&mut self) {
+        self.abort_generation();
         // Saves in flight hold proto chunks nothing else would save.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while self.saving > 0 {
@@ -2825,6 +2886,25 @@ fn rank_again(queue: &mut BinaryHeap<Queued>, distance: impl Fn(i32, i32) -> i64
         }
     }
     *queue = BinaryHeap::from(jobs);
+}
+/// `ChunkTaskPriorityQueue.release(pos, clearQueue=true)`: the jobs queued for the
+/// `gone` columns are dropped, so a view that moved or shrank does not wait behind the
+/// generation of the chunks it left. A job without a column (a save, meshes to free)
+/// stays, as vanilla keeps the tasks of a chunk that is still loaded. Returns how many
+/// jobs went.
+fn release_columns(queue: &mut BinaryHeap<Queued>, gone: &FxHashSet<(i32, i32)>) -> usize {
+    if queue.is_empty() || gone.is_empty() {
+        return 0;
+    }
+    let queued = std::mem::take(queue).into_vec();
+    let before = queued.len();
+    let kept: Vec<Queued> = queued
+        .into_iter()
+        .filter(|job| !job.at.is_some_and(|at| gone.contains(&at)))
+        .collect();
+    let released = before - kept.len();
+    *queue = BinaryHeap::from(kept);
+    released
 }
 /// Whether the 3x3 a light job for (x, z) reads is all there: every
 /// neighbour a finished column, or a decorated proto chunk past the area
@@ -3255,6 +3335,59 @@ mod tests {
         let moved = ranges((19, 0));
         rank_again(&mut queue, |x, z| moved.priority(x, z));
         assert_eq!(queue.pop().and_then(|q| q.at), Some((20, 0)));
+    }
+
+    /// `ChunkTaskPriorityQueue.release`: a column that unloaded keeps no queued job, so
+    /// a teleport or a smaller render distance does not spend its workers on the world
+    /// it left; the other columns' jobs and the jobs without a column (saves, meshes to
+    /// free) stay, in the same order.
+    #[test]
+    fn a_released_column_keeps_no_queued_job() {
+        let generate = |x, z, priority, order| Queued {
+            priority,
+            at: Some((x, z)),
+            bias: 0,
+            order,
+            job: Job::Generate(x, z),
+        };
+        let save = |order| Queued {
+            priority: i64::MIN,
+            at: None,
+            bias: 0,
+            order,
+            job: Job::Save(Vec::new()),
+        };
+        let queued = || {
+            BinaryHeap::from(vec![
+                generate(0, 0, 0, 1),
+                generate(0, 0, 4, 2),
+                generate(1, 0, 8, 3),
+                generate(9, 9, 12, 4),
+                save(5),
+            ])
+        };
+        let pops = |mut queue: BinaryHeap<Queued>| {
+            std::iter::from_fn(move || queue.pop())
+                .map(|q| q.at)
+                .collect::<Vec<_>>()
+        };
+        // Nothing goes for a column that is still loaded, or for nothing at all.
+        let mut queue = queued();
+        assert_eq!(release_columns(&mut queue, &FxHashSet::default()), 0);
+        assert_eq!(
+            release_columns(&mut queue, &[(20, 20)].into_iter().collect()),
+            0
+        );
+        assert_eq!(queue.len(), 5);
+        // Both of (0, 0)'s jobs go, its neighbour's and the save stay.
+        let gone: FxHashSet<(i32, i32)> = [(0, 0)].into_iter().collect();
+        assert_eq!(release_columns(&mut queue, &gone), 2);
+        assert_eq!(pops(queue), [None, Some((1, 0)), Some((9, 9))]);
+        // Every column leaving at once: only the jobs without one are left.
+        let mut queue = queued();
+        let all: FxHashSet<(i32, i32)> = [(0, 0), (1, 0), (9, 9)].into_iter().collect();
+        assert_eq!(release_columns(&mut queue, &all), 4);
+        assert_eq!(pops(queue), [None]);
     }
 
     /// The light and mesh stages submit bounded work, the nearest first:

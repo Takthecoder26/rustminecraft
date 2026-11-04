@@ -1342,6 +1342,7 @@ impl Loading {
                     batch,
                     (-1.0, -1.0),
                     self.settings.file.bool("hideSplashTexts"),
+                    self.settings.file.bool("hideServerAddress"),
                 );
                 batch.blur_at = batch.vertices.len() as u32;
             }
@@ -1372,6 +1373,7 @@ impl Loading {
                 batch,
                 self.menu.cursor,
                 self.settings.file.bool("hideSplashTexts"),
+                self.settings.file.bool("hideServerAddress"),
             );
         }
         if let Some(focus) = self.menu.key_focus
