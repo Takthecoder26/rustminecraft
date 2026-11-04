@@ -1362,7 +1362,7 @@ impl Game<'_> {
     }
     /// `EntityHurtPlayerTrigger`: the player and the damage it took.
     pub(super) fn trigger_entity_hurt_player(&mut self, damage: &adv::DamageView) {
-        let me = self.player_entity();
+        let me = self.player_entity_for("minecraft:entity_hurt_player");
         let damage = damage.clone();
         self.trigger("minecraft:entity_hurt_player", move |c, w| {
             let pctx = adv::Entities {
