@@ -37,6 +37,83 @@ fn read_target(
     encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
 ) -> wgpu::Buffer {
+    // Pack targets are sampleable, but need not support direct copies.
+    let readback = device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("Material route readback texture"),
+            size: view.texture().size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+        .create_view(&Default::default());
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Material route exact texel readback"),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+            "@group(0) @binding(0) var source: texture_2d<f32>;
+             @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                 let corners = array<vec2<f32>, 3>(vec2(-1.,-1.), vec2(3.,-1.), vec2(-1.,3.));
+                 return vec4(corners[i],0.,1.);
+             }
+             @fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+                 return textureLoad(source,vec2<i32>(p.xy),0);
+             }",
+        )),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Material route readback"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Material route readback source"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(view),
+        }],
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Material route readback"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &readback,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
+    }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Material route pixel receipt"),
         size: u64::from(256 * view.texture().height()),
@@ -44,7 +121,7 @@ fn read_target(
         mapped_at_creation: false,
     });
     encoder.copy_texture_to_buffer(
-        view.texture().as_image_copy(),
+        readback.texture().as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
@@ -53,7 +130,7 @@ fn read_target(
                 rows_per_image: None,
             },
         },
-        view.texture().size(),
+        readback.texture().size(),
     );
     buffer
 }
@@ -289,7 +366,7 @@ fn gpu_material_routes_render_both_phases_ids_and_block_shadow_owner() {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(0.0),
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
