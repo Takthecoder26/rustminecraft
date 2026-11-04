@@ -107,7 +107,9 @@ impl PackText {
         program: &CoreProgram,
         uv: u64,
     ) -> Option<Self> {
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // A pack's shader is untrusted: the backend failing to compile it is an internal error.
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = |label, module: &naga::Module| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -117,6 +119,8 @@ impl PackText {
         let vertex = module("Resource pack text (vertex)", &program.vertex);
         let fragment = module("Resource pack text (fragment)", &program.fragment);
         let visibility = wgpu::ShaderStages::VERTEX_FRAGMENT;
+        // The blocks' sizes are checked here, not at the draw: a pack's own larger block fails
+        // in this scope.
         let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..4)
             .map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
@@ -124,7 +128,7 @@ impl PackText {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: wgpu::BufferSize::new(BLOCK_SIZES[binding as usize]),
                 },
                 count: None,
             })
@@ -212,7 +216,8 @@ impl PackText {
             multiview_mask: None,
             cache: None,
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
             log::warn!("a resource pack's GUI shader is not used: {e}");
             return None;
         }
@@ -462,6 +467,68 @@ mod tests {
         }
         // A pack finds the GUI scale as ScreenSize.x * ProjMat[0][0] / 2.
         assert!((data[8] * data[64] / 2.0 - 4.0).abs() < 1e-4);
+    }
+
+    /// A GUI blit shader in `position_tex_color`'s shape, its blocks from `include`.
+    fn blit_program(include: &dyn Fn(&str) -> Option<String>) -> CoreProgram {
+        const VSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            #include <minecraft:projection.glsl>\n\
+            in vec3 Position;\nin vec2 UV0;\nin vec4 Color;\nout vec2 texCoord0;\nout vec4 vertexColor;\n\
+            void main() {\n    gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);\n\
+                texCoord0 = UV0;\n    vertexColor = Color;\n}\n";
+        const FSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            uniform sampler2D Sampler0;\nin vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() {\n    fragColor = texture(Sampler0, texCoord0) * vertexColor * ColorModulator;\n}\n";
+        horizon_shaders::translate_core(VSH, FSH, &[], include, &GLUE)
+            .expect("the shaders translate")
+    }
+
+    /// A pack's own include with a bigger block than vanilla's is not used, and blits draw
+    /// natively, rather than failing at the draw.
+    #[test]
+    fn a_pack_block_bigger_than_vanillas_falls_back() {
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("no GPU: skipping");
+            return;
+        };
+        let (device, _) =
+            pollster::block_on(adapter.request_device(&Default::default())).expect("a device");
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let include = |id: &str| match id {
+            "minecraft:shaders/include/dynamictransforms.glsl" => Some(
+                "layout(std140) uniform DynamicTransforms {\n    mat4 ModelViewMat;\n    \
+                 mat4 TextureMat;\n    vec4 ColorModulator;\n    vec3 ModelOffset;\n};\n"
+                    .to_owned(),
+            ),
+            "minecraft:shaders/include/projection.glsl" => {
+                Some("layout(std140) uniform Projection {\n    mat4 ProjMat;\n};\n".to_owned())
+            }
+            _ => None,
+        };
+        let bigger = |id: &str| {
+            include(id)
+                .map(|text| text.replace("vec3 ModelOffset;", "vec3 ModelOffset;\n    vec4 More;"))
+        };
+        let new = |program: &CoreProgram| {
+            PackText::new(&device, wgpu::TextureFormat::Rgba8Unorm, &view, program, 0)
+        };
+        assert!(new(&blit_program(&include)).is_some());
+        assert!(new(&blit_program(&bigger)).is_none());
     }
 
     #[test]
