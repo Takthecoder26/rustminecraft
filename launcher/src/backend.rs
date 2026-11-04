@@ -3937,11 +3937,9 @@ pub fn {f}("
     fn an_nvidia_game_on_wayland_starts_on_x11() {
         let mut cmd = Command::new("horizon-client");
         play_through_x11_on(&mut cmd, true, true, true);
-        assert!(
-            cmd.get_envs().any(
-                |(key, value)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY") && value.is_none()
-            )
-        );
+        assert!(cmd
+            .get_envs()
+            .any(|(key, value)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY") && value.is_none()));
         // No X server to play through, another driver, or a plain X11 session: the game keeps the
         // session it would have had.
         for (wayland, x11, nvidia) in [
@@ -3951,10 +3949,9 @@ pub fn {f}("
         ] {
             let mut cmd = Command::new("horizon-client");
             play_through_x11_on(&mut cmd, wayland, x11, nvidia);
-            assert!(
-                !cmd.get_envs()
-                    .any(|(key, _)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY"))
-            );
+            assert!(!cmd
+                .get_envs()
+                .any(|(key, _)| key == std::ffi::OsStr::new("WAYLAND_DISPLAY")));
         }
     }
 
@@ -4733,11 +4730,9 @@ pub fn {f}("
             Some("v2026.10.13".into())
         );
         assert!(is_prepared("v2026.10.13.1"));
-        assert!(
-            resources_at(&versions.join("v2026.10.13.1"))
-                .join("worldgen/biomes.json")
-                .exists()
-        );
+        assert!(resources_at(&versions.join("v2026.10.13.1"))
+            .join("worldgen/biomes.json")
+            .exists());
         let left: Vec<_> = fs::read_dir(versions.join("v2026.10.13.1/.local/horizon-client"))
             .unwrap()
             .flatten()
@@ -5082,11 +5077,9 @@ pub fn {f}("
                 "v0.2.2: The sounds",
             ]
         );
-        assert!(
-            resources_at(&versions.join("v0.2.2"))
-                .join(RESOURCES_MANIFEST)
-                .exists()
-        );
+        assert!(resources_at(&versions.join("v0.2.2"))
+            .join(RESOURCES_MANIFEST)
+            .exists());
         assert_eq!(
             asset("v0.2.2", &format!("{background}/panorama_0.png")).as_deref(),
             Some(&placeholder[..])
