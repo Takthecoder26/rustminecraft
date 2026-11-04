@@ -172,9 +172,14 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let at = block_of(m);
         let below = [at[0], at[1] - 1, at[2]];
         if is_sand(w, below) {
-            events.push(MobEvent::BlockBreakEffect {
+            // Vanilla: LevelEvent 2001 (PARTICLES_DESTROY_BLOCK) at the turtle's
+            // block for the sand below: sand crumb particles plus the sand
+            // break sound.
+            let state = w.world.block(below[0], below[1], below[2]);
+            events.push(MobEvent::LevelEvent {
+                id: 2001,
                 pos: at,
-                block: below,
+                data: state.0 as i32,
             });
         }
     }
