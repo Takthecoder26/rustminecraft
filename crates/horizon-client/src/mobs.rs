@@ -351,7 +351,7 @@ pub struct Flags {
     pub burns_in_day: bool,
     pub undead: bool,
     pub breathes_water: bool,
-    /// Drowns out of water (fish, squid, dolphins after their air runs out).
+    /// Drowns out of water (fish, squid); a dolphin has the generic air logic.
     pub needs_water: bool,
     /// Hurt by water (endermen, blazes, striders out of lava, snow golems).
     pub water_sensitive: bool,

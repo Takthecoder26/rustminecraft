@@ -1890,7 +1890,8 @@ pub fn mob_from_nbt(
     }
     read_variant(&mut m, tag);
     m.fire_ticks = number(tag.get("Fire")).unwrap_or(0) as i32;
-    m.air = number(tag.get("Air")).unwrap_or(300) as i32;
+    // Entity.load: `getIntOr("Air", getMaxAirSupply())`.
+    m.air = number(tag.get("Air")).unwrap_or(i64::from(m.max_air_supply())) as i32;
     if m.species() == crate::mobs::Species::Allay {
         if let Some(Tag::List(inv)) = tag.get("Inventory") {
             for stack in inv.iter().filter_map(item_from_nbt) {
@@ -5481,6 +5482,39 @@ mod sheep_nbt_tests {
         let back = mob_from_nbt(&bare, &types, 3, None).unwrap();
         assert!(!back.extra.flag);
         assert_eq!(back.extra.counter, 2400);
+    }
+
+    /// `Entity.load` reads a missing `Air` as the species' `getMaxAirSupply`.
+    #[test]
+    fn a_missing_air_tag_reads_as_the_species_maximum() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let types: HashMap<String, Arc<MobType>> = data
+            .types
+            .iter()
+            .map(|(k, v)| (k.clone(), Arc::new(v.clone())))
+            .collect();
+        let bare =
+            |id: &str| Tag::compound([("id", string(id)), ("Pos", doubles(&[0.5, 64.0, 0.5]))]);
+        for (id, air) in [
+            ("minecraft:cow", 300),
+            ("minecraft:dolphin", 4800),
+            ("minecraft:axolotl", 6000),
+        ] {
+            let back = mob_from_nbt(&bare(id), &types, 1, None).unwrap();
+            assert_eq!(back.air, air, "{id}");
+        }
+        let saved = Tag::compound([
+            ("id", string("minecraft:dolphin")),
+            ("Pos", doubles(&[0.5, 64.0, 0.5])),
+            ("Air", Tag::Short(123)),
+        ]);
+        assert_eq!(mob_from_nbt(&saved, &types, 1, None).unwrap().air, 123);
     }
 
     /// `WanderingTrader.addAdditionalSaveData`: the visit's countdown and the
