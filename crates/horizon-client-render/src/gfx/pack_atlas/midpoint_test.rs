@@ -108,7 +108,7 @@ fn mid_tex_coord_follows_each_quads_mapped_corners() {
                     &atlas.terrain_inputs(flat),
                     &vertices,
                     [0., 0., 0., origin],
-                    [flat, shadow],
+                    [flat, shadow, false],
                     [
                         "attribute vec2 mc_midTexCoord;",
                         "vec4(mc_midTexCoord, gl_MultiTexCoord0.xy)",
@@ -152,7 +152,15 @@ fn chunk_fade_decodes_visibility_without_moving_or_losing_vertices() {
     if std::env::var_os("HORIZON_REQUIRE_CHUNK_FADE_GPU").is_some() {
         assert_ne!(adapter.get_info().device_type, wgpu::DeviceType::Cpu);
     }
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let geometry_supported = adapter.limits().max_bind_groups >= 6;
+    if std::env::var_os("HORIZON_REQUIRE_CHUNK_FADE_GPU").is_some() {
+        assert!(geometry_supported, "geometry control needs six bind groups");
+    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .unwrap();
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d {
@@ -190,43 +198,48 @@ fn chunk_fade_decodes_visibility_without_moving_or_losing_vertices() {
     ];
     for flat in [false, true] {
         for shadow in [false, true] {
-            for declaration in ["", "attribute float mc_chunkFade;"] {
-                for (bits, fade) in cases {
-                    for offset in [[0., 0., 0.], [128.5, -32., 64.]] {
-                        let origin = [offset[0], offset[1], offset[2], f32::from_bits(bits)];
-                        let pixels = sample(
-                            &device,
-                            &queue,
-                            &atlas.terrain_inputs(flat),
-                            &vertices,
-                            origin,
-                            [flat, shadow],
-                            [declaration, "vec4(mc_chunkFade, gl_Vertex.xyz)"],
-                        );
-                        for (pixel, p) in pixels.iter().zip(positions) {
-                            assert_eq!(
-                                *pixel,
-                                [fade, offset[0] + p[0], offset[1] + p[1], offset[2] + p[2]],
-                                "origin={origin:?}, flat={flat}, shadow={shadow}, declaration={declaration:?}"
+            for geometry in [false, true]
+                .into_iter()
+                .filter(|g| !g || flat && shadow && geometry_supported)
+            {
+                for declaration in ["", "attribute float mc_chunkFade;"] {
+                    for (bits, fade) in cases {
+                        for offset in [[0., 0., 0.], [128.5, -32., 64.]] {
+                            let origin = [offset[0], offset[1], offset[2], f32::from_bits(bits)];
+                            let pixels = sample(
+                                &device,
+                                &queue,
+                                &atlas.terrain_inputs(flat),
+                                &vertices,
+                                origin,
+                                [flat, shadow, geometry],
+                                [declaration, "vec4(mc_chunkFade, gl_Vertex.xyz)"],
                             );
+                            for (pixel, p) in pixels.iter().zip(positions) {
+                                assert_eq!(
+                                    *pixel,
+                                    [fade, offset[0] + p[0], offset[1] + p[1], offset[2] + p[2]],
+                                    "origin={origin:?}, flat={flat}, shadow={shadow}, declaration={declaration:?}"
+                                );
+                            }
                         }
                     }
-                }
-                // Geometry without a terrain fade source stays fully visible even when a
-                // shared pack vertex program asks for the input.
-                let mut inputs = atlas.terrain_inputs(flat);
-                inputs.attributes.retain(|(name, _)| name != "mc_chunkFade");
-                let pixels = sample(
-                    &device,
-                    &queue,
-                    &inputs,
-                    &vertices,
-                    [0., 0., 0., f32::from_bits(0x3840_0000)],
-                    [flat, shadow],
-                    [declaration, "vec4(mc_chunkFade, gl_Vertex.xyz)"],
-                );
-                for (pixel, p) in pixels.iter().zip(positions) {
-                    assert_eq!(*pixel, [1.0, p[0], p[1], p[2]]);
+                    // Geometry without a terrain fade source stays fully visible even when a
+                    // shared pack vertex program asks for the input.
+                    let mut inputs = atlas.terrain_inputs(flat);
+                    inputs.attributes.retain(|(name, _)| name != "mc_chunkFade");
+                    let pixels = sample(
+                        &device,
+                        &queue,
+                        &inputs,
+                        &vertices,
+                        [0., 0., 0., f32::from_bits(0x3840_0000)],
+                        [flat, shadow, geometry],
+                        [declaration, "vec4(mc_chunkFade, gl_Vertex.xyz)"],
+                    );
+                    for (pixel, p) in pixels.iter().zip(positions) {
+                        assert_eq!(*pixel, [1.0, p[0], p[1], p[2]]);
+                    }
                 }
             }
         }
@@ -239,7 +252,7 @@ fn sample(
     inputs: &horizon_shaders::GbuffersInputs,
     vertices: &[TerrainVertex],
     origin: [f32; 4],
-    [flat, shadow]: [bool; 2],
+    [flat, shadow, geometry]: [bool; 3],
     [declaration, expression]: [&str; 2],
 ) -> Vec<[f32; 4]> {
     let pp = |code| horizon_shaders::Preprocessed {
@@ -254,12 +267,38 @@ fn sample(
     ));
     // Integer attachments retain the float bits without requiring float-render-target
     // capabilities on the adapter that the test runner picks.
-    let fragment = pp(
-        "varying vec4 probe;\nlayout(location = 0) out uvec4 midpoint_bits;\n\
-        void main() { midpoint_bits = floatBitsToUint(probe); }"
-            .into(),
-    );
-    let program = if shadow {
+    let varying = if geometry { "relayed" } else { "probe" };
+    let fragment = pp(format!(
+        "varying vec4 {varying};\nlayout(location = 0) out uvec4 midpoint_bits;\n\
+        void main() {{ midpoint_bits = floatBitsToUint({varying}); }}"
+    ));
+    let program = if geometry {
+        let geometry = pp(
+            "layout(triangles) in; layout(triangle_strip, max_vertices=3) out;\n\
+             in vec4 probe[]; out vec4 relayed;\n\
+             void main() { for (int i=0; i<3; i++) {\n\
+                 gl_Position=gl_in[i].gl_Position; relayed=probe[i]; EmitVertex();\n\
+             } EndPrimitive(); }"
+                .into(),
+        );
+        let mut inputs = inputs.clone();
+        inputs.declarations.push_str(
+            "layout(set=5, binding=0) readonly buffer HzIndices { uint hz_indices[]; };\n",
+        );
+        let (program, triangles) = horizon_shaders::translate_geometry(
+            &vertex,
+            &geometry,
+            &fragment,
+            &horizon_shaders::GeometryInputs {
+                inputs,
+                pull: super::PULL.into(),
+                index: "hz_indices[@]".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(triangles, 1);
+        Ok(program)
+    } else if shadow {
         horizon_shaders::translate_shadow(&vertex, &fragment, inputs)
     } else {
         horizon_shaders::translate_gbuffers(
@@ -280,7 +319,7 @@ fn sample(
         },
         count: None,
     };
-    let entries = [
+    let mut entries = vec![
         vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -295,6 +334,9 @@ fn sample(
         vec![],
         vec![storage(0), storage(1)],
     ];
+    if geometry {
+        entries.extend([vec![], vec![storage(0)]]);
+    }
     let layouts: Vec<_> = entries
         .iter()
         .map(|entries| {
@@ -378,12 +420,19 @@ fn sample(
         bytemuck::cast_slice(vertices),
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
     );
-    let bindings = [
+    let indices = buffer(
+        bytemuck::bytes_of(&[0u32, 1, 2, 0, 2, 3]),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let mut bindings = vec![
         vec![(0, &uniform)],
         vec![(0, &slots), (1, &origin)],
         vec![],
         vec![(0, &ids), (1, &data)],
     ];
+    if geometry {
+        bindings.extend([vec![], vec![(0, &indices)]]);
+    }
     let groups: Vec<_> = bindings
         .iter()
         .zip(&layouts)
@@ -445,7 +494,7 @@ fn sample(
         if !flat {
             pass.set_vertex_buffer(1, origin.slice(..));
         }
-        pass.draw(0..vertices.len() as u32, 0..1);
+        pass.draw(0..if geometry { 6 } else { vertices.len() as u32 }, 0..1);
     }
     encoder.copy_texture_to_buffer(
         output.as_image_copy(),

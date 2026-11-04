@@ -328,6 +328,13 @@ fn combine(
             _ => {}
         }
     }
+    let implicit_fade = vs_tokens.contains(&"mc_chunkFade")
+        && !super::scan::Stage::scan(vertex, naga::ShaderStage::Vertex)
+            .globals
+            .contains("mc_chunkFade");
+    if implicit_fade {
+        vs_attributes.push(("mc_chunkFade".into(), "float".into()));
+    }
     let renamed: BTreeSet<&str> = defined
         .iter()
         .map(String::as_str)
@@ -363,6 +370,9 @@ fn combine(
          int hz_n; int hz_strip; int hz_tri; int hz_want_tri; int hz_want_corner; bool hz_found; bool hz_primary;\n\
          vec4 hz_ring_Position[3]; vec4 hz_res_Position; vec4 hz_vs_Position; int hz_vs_vertex;\n",
     );
+    if implicit_fade {
+        head.push_str("float mc_chunkFade;\n");
+    }
     for (name, ty) in &vs_outs {
         let (base, array) = split_type(ty);
         writeln!(head, "{base} hz_vs_{name}{array};").unwrap();
@@ -417,7 +427,10 @@ fn combine(
             .attributes
             .iter()
             .find(|a| &a.0 == name)
-            .map_or_else(|| format!("{ty}(0)"), |a| format!("{ty}({})", a.1));
+            .map_or_else(
+                || format!("{ty}({})", if name == "mc_chunkFade" { "1.0" } else { "0" }),
+                |a| format!("{ty}({})", a.1),
+            );
         writeln!(main, "        {name} = {value};").unwrap();
     }
     main.push_str("        hz_vs_main();\n");

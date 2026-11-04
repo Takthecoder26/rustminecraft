@@ -1498,6 +1498,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chunk_fade_is_available_to_a_geometry_programs_vertex_stage() {
+        let pp = |code: &str| Preprocessed {
+            code: code.into(),
+            ..Default::default()
+        };
+        let geometry = pp(
+            "layout(triangles) in; layout(triangle_strip, max_vertices=3) out;\n\
+             in float opacity[]; out float fade;\n\
+             void main() { for (int i=0; i<3; i++) {\n\
+                 fade=opacity[i]; gl_Position=gl_in[i].gl_Position; EmitVertex();\n\
+             } EndPrimitive(); }",
+        );
+        let fragment = pp("in float fade; void main() { gl_FragColor=vec4(fade); }");
+        for declaration in ["", "attribute float mc_chunkFade;"] {
+            let vertex = pp(&format!(
+                "{declaration}\nout float opacity;\nvoid main() {{ opacity=mc_chunkFade; gl_Position=gl_Vertex; }}"
+            ));
+            for attributes in [vec![], vec![("mc_chunkFade".into(), "0.25".into())]] {
+                let inputs = GeometryInputs {
+                    inputs: GbuffersInputs {
+                        body: "hz_Vertex=vec4(0.0, 0.0, 0.0, 1.0);".into(),
+                        attributes,
+                        ..Default::default()
+                    },
+                    index: "@".into(),
+                    ..Default::default()
+                };
+                translate_geometry(&vertex, &geometry, &fragment, &inputs).unwrap();
+            }
+        }
+    }
+
     /// A gbuffers program whose fragment stage writes `float(<name>)` after `decl`.
     fn item_program(
         program: &str,
