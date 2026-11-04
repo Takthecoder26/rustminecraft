@@ -348,14 +348,23 @@ impl RegionExecutor {
         use rayon::prelude::*;
         let each = |(slot, item)| f(slot, item);
         match &self.pool {
-            Some(pool) => {
-                pool.install(|| items.par_iter().enumerate().with_min_len(64).map(each).collect())
-            }
+            Some(pool) => pool.install(|| {
+                items
+                    .par_iter()
+                    .enumerate()
+                    .with_min_len(64)
+                    .map(each)
+                    .collect()
+            }),
             None => items.iter().enumerate().map(each).collect(),
         }
     }
     /// The slots of the items `pick` chooses, in order, on the workers.
-    pub fn slots<T: Sync>(&self, items: &[T], pick: impl Fn(&T) -> bool + Send + Sync) -> Vec<usize> {
+    pub fn slots<T: Sync>(
+        &self,
+        items: &[T],
+        pick: impl Fn(&T) -> bool + Send + Sync,
+    ) -> Vec<usize> {
         use rayon::prelude::*;
         let chosen = |(slot, item)| pick(item).then_some(slot);
         match &self.pool {
