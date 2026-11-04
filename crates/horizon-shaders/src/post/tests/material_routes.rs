@@ -165,3 +165,40 @@ fn material_routes_keep_program_specific_blends_and_entity_phase() {
         assert_eq!(post.particles_translucent.unwrap().blend, None);
     }
 }
+
+#[test]
+fn resources_declared_only_by_a_translucent_material_are_visible_to_the_runtime() {
+    for name in [
+        "gbuffers_block_translucent",
+        "gbuffers_particles_translucent",
+    ] {
+        let vertex = "#version 430 compatibility\nvoid main(){gl_Position=gl_Vertex;}";
+        let fragment = "#version 430 compatibility\n\
+            layout(std430,binding=3) readonly buffer RouteData { vec4 shade; };\n\
+            uniform sampler2D shadowtex0;\n\
+            void main(){gl_FragData[0]=shade+texture(shadowtex0,vec2(0.5));}";
+        let names = [format!("shaders/{name}.vsh"), format!("shaders/{name}.fsh")];
+        let pack = Pack::from_zip_bytes(
+            "material-resources",
+            crate::pack::tests::zip(&[(&names[0], vertex), (&names[1], fragment)]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let post = load_post(
+            &pack,
+            "",
+            &Properties::default(),
+            &macros,
+            &GameInputs {
+                entities: Some(GbuffersInputs {
+                    body: "hz_Vertex=vec4(0.0,0.0,0.0,1.0);hz_Color=vec4(1.0);".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(post.notes.is_empty(), "{name}: {:?}", post.notes);
+        assert_eq!(post.buffer_minimums().get(&3), Some(&16), "{name}");
+        assert!(post.shadow_pass, "{name} owns the only shadow sampler");
+    }
+}
