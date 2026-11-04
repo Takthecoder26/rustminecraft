@@ -5,7 +5,7 @@
 //! Signed in, it reads the Wardrobe's own trip to the service (the kept outfit first, then the
 //! answer); signed out, it asks for the catalogue alone, to know whether there is a Shop to show.
 use super::*;
-use horizon_launcher::shop::{self as rules, Window};
+use horizon_launcher::shop::{self as rules, Anon, AnonShows, Window};
 use horizon_launcher::wardrobe::{Entry, Me};
 use horizon_theme::glass::{ink, radius};
 
@@ -28,9 +28,10 @@ pub(crate) struct Shop {
     /// The last claim's failure, in words, and the line to copy.
     failed: Option<(String, String)>,
     /// Signed out: the catalogue, asked without an account.
-    anon: Option<Catalogue>,
-    asking: bool,
-    /// Asked on this visit (a failure waits for the next one).
+    anon: Anon,
+    /// The last failure of that asking, the line to copy.
+    anon_details: String,
+    /// Asked on this visit (a failure waits for Try again or the next one).
     asked: bool,
     /// A redraw for the time left is due.
     ticking: bool,
@@ -264,7 +265,7 @@ impl Launcher {
             .and_then(|w| w.saved.me.as_ref())
             .map(|m| &m.claim)
             .or(self.shop_kept.as_ref());
-        let anon = self.shop.anon.as_ref().map(|c| &c.claim);
+        let anon = self.shop.anon.catalogue.as_ref().map(|c| &c.claim);
         [self.shop_status.as_ref(), anon, own]
             .into_iter()
             .flatten()
@@ -287,10 +288,9 @@ impl Launcher {
     /// Signed out: ask for the catalogue alone (no account, nothing kept), to learn whether the
     /// Shop shows.
     pub(super) fn shop_ask(&mut self, cx: &mut Context<Self>) {
-        if self.shop.asking {
+        if !self.shop.anon.ask() {
             return;
         }
-        self.shop.asking = true;
         self.shop.asked = true;
         let task = cx
             .background_executor()
@@ -298,10 +298,10 @@ impl Launcher {
         cx.spawn(async move |this, cx| {
             let got = task.await;
             let _ = this.update(cx, |this, cx| {
-                this.shop.asking = false;
-                if let Ok(c) = got {
-                    this.shop.anon = Some(c);
+                if let Err(e) = &got {
+                    this.shop.anon_details = details(e);
                 }
+                this.shop.anon.answered(got);
                 cx.notify();
             });
         })
@@ -415,11 +415,26 @@ impl Launcher {
     fn shop_body(&mut self, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let Some(w) = self.wardrobe.as_ref() else {
-            // Signed out: the set, with Microsoft's button where the claim goes.
-            let Some(c) = self.shop.anon.clone() else {
-                return self.shop_loading();
+            // Signed out: the set, with Microsoft's button where the claim goes, or why there is
+            // none and Try again.
+            return match self.shop.anon.shows() {
+                AnonShows::Loading => self.shop_loading(),
+                AnonShows::Catalogue(c) => {
+                    let c = c.clone();
+                    self.founder_panel(&c, None, cx)
+                }
+                AnonShows::Offline => {
+                    let [a, b] =
+                        state_text(&t, tr("You're offline.").into(), Error::Offline.message());
+                    state_card(&t)
+                        .child(a)
+                        .child(b)
+                        .child(self.wardrobe_retry(cx))
+                }
+                AnonShows::Failed(e) => {
+                    self.shop_failed(e.message(), self.shop.anon_details.clone(), cx)
+                }
             };
-            return self.founder_panel(&c, None, cx);
         };
         match w.status.clone() {
             Status::Offline => {
@@ -448,43 +463,15 @@ impl Launcher {
                 });
             }
             Status::Failed(line) => {
-                let [a, b] = state_text(
-                    &t,
-                    tr("The shop didn't load.").into(),
+                return self.shop_failed(
                     tr(
                         "What you wear still shows in the game: the launcher kept your last \
                         outfit. Try again in a moment.",
                     )
                     .into(),
+                    line,
+                    cx,
                 );
-                let copy = line.clone();
-                return state_card(&t)
-                    .child(dot(horizon_theme::glass::DANGER).size(px(9.)))
-                    .child(a)
-                    .child(b)
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(self.wardrobe_retry(cx))
-                            .child(
-                                button("shop-details", "Copy details", Kind::Ghost, &t).on_click(
-                                    move |_: &ClickEvent, _, cx| {
-                                        copy_to_clipboard(
-                                            cx,
-                                            gpui::ClipboardItem::new_string(copy.clone()),
-                                        )
-                                    },
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::MONO)
-                            .text_size(px(11.))
-                            .text_color(tone(&t, ink::PLACEHOLDER))
-                            .child(line),
-                    );
             }
             Status::Account(said) => {
                 let [a, b] = state_text(&t, tr("The shop didn't load.").into(), said);
@@ -500,6 +487,37 @@ impl Launcher {
             return self.shop_loading();
         };
         self.founder_panel(&c, Some(me), cx)
+    }
+
+    /// The service answered with a failure: `note`, Try again, and `line` to copy.
+    fn shop_failed(&self, note: String, line: String, cx: &mut Context<Self>) -> Div {
+        let t = self.theme;
+        let [a, b] = state_text(&t, tr("The shop didn't load.").into(), note);
+        let copy = line.clone();
+        state_card(&t)
+            .child(dot(horizon_theme::glass::DANGER).size(px(9.)))
+            .child(a)
+            .child(b)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(self.wardrobe_retry(cx))
+                    .child(
+                        button("shop-details", "Copy details", Kind::Ghost, &t).on_click(
+                            move |_: &ClickEvent, _, cx| {
+                                copy_to_clipboard(cx, gpui::ClipboardItem::new_string(copy.clone()))
+                            },
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .font_family(theme::MONO)
+                    .text_size(px(11.))
+                    .text_color(tone(&t, ink::PLACEHOLDER))
+                    .child(line),
+            )
     }
 
     /// Before the first answer: placeholders at the panel's size, no spinner.
@@ -1129,7 +1147,7 @@ impl Launcher {
             }
             "signed-out" => {
                 let uuid = w.uuid.clone();
-                self.shop.anon = w.saved.catalogue.clone();
+                self.shop.anon.catalogue = w.saved.catalogue.clone();
                 self.wardrobe = None;
                 self.accounts.accounts.retain(|a| a.uuid != uuid);
             }

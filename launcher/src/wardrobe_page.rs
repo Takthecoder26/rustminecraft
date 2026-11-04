@@ -1051,7 +1051,12 @@ impl Launcher {
             return disabled(b);
         }
         b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.open_wardrobe(cx);
+            // Signed out, only the Shop's catalogue is there to ask for again.
+            if this.wardrobe.is_none() {
+                this.shop_ask(cx);
+            } else {
+                this.open_wardrobe(cx);
+            }
             cx.notify();
         }))
     }

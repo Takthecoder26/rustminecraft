@@ -8,7 +8,7 @@
 //! Also the Shop tab's rules apart from its drawing (`wardrobe_page/shop.rs`): where the claim
 //! window stands, and its dates and the time left in the player's words.
 use crate::i18n::{tr, trf};
-use crate::wardrobe::{Claim, ClaimState, Me};
+use crate::wardrobe::{Catalogue, Claim, ClaimState, Error, Me};
 
 /// Whether `claim`, the service's answer, gives the Shop something to show.
 pub fn shown(claim: &Claim) -> bool {
@@ -22,6 +22,57 @@ pub fn shown(claim: &Claim) -> bool {
 /// the Shop. Cosmetics being on in the game (the default) doesn't: the page waits for the Shop.
 pub fn in_top_bar(forced: bool, status: Option<&Claim>, kept: Option<&Claim>) -> bool {
     forced || status.is_some_and(shown) || kept.is_some_and(shown)
+}
+
+/// Signed out: the catalogue, asked without an account, and how the last asking went.
+#[derive(Default)]
+pub struct Anon {
+    /// The last one the service gave; a failure after it keeps it.
+    pub catalogue: Option<Catalogue>,
+    failure: Option<Error>,
+    asking: bool,
+}
+
+/// What the signed-out Shop tab shows.
+#[derive(Debug, PartialEq)]
+pub enum AnonShows<'a> {
+    /// No answer yet.
+    Loading,
+    Catalogue(&'a Catalogue),
+    /// The service wasn't reached.
+    Offline,
+    /// It answered with a failure.
+    Failed(&'a Error),
+}
+
+impl Anon {
+    /// Starts asking, forgetting the last failure; false while an answer is on its way.
+    pub fn ask(&mut self) -> bool {
+        if self.asking {
+            return false;
+        }
+        self.asking = true;
+        self.failure = None;
+        true
+    }
+
+    /// The service's answer to `ask`.
+    pub fn answered(&mut self, got: Result<Catalogue, Error>) {
+        self.asking = false;
+        match got {
+            Ok(c) => self.catalogue = Some(c),
+            Err(e) => self.failure = Some(e),
+        }
+    }
+
+    pub fn shows(&self) -> AnonShows<'_> {
+        match (&self.catalogue, &self.failure) {
+            (Some(c), _) => AnonShows::Catalogue(c),
+            (None, None) => AnonShows::Loading,
+            (None, Some(Error::Offline)) => AnonShows::Offline,
+            (None, Some(e)) => AnonShows::Failed(e),
+        }
+    }
 }
 
 /// Where the founder set's window stands now.

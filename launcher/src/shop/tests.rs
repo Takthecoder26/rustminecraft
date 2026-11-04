@@ -14,6 +14,39 @@ fn claim(state: ClaimState, open: bool, starts_at: Option<i64>, ends_at: Option<
 }
 
 #[test]
+fn signed_out_a_failed_catalogue_says_so_and_a_later_success_shows_it() {
+    let catalogue = Catalogue {
+        items: Vec::new(),
+        claim: claim(ClaimState::Open, true, Some(100), Some(200)),
+    };
+    let mut anon = Anon::default();
+    assert_eq!(anon.shows(), AnonShows::Loading);
+
+    // Not reached: the offline state, not placeholders for good.
+    assert!(anon.ask());
+    assert_eq!(anon.shows(), AnonShows::Loading);
+    assert!(!anon.ask(), "an answer is still on its way");
+    anon.answered(Err(Error::Offline));
+    assert_eq!(anon.shows(), AnonShows::Offline);
+
+    // Try again: back to placeholders, then the service's own failure.
+    assert!(anon.ask());
+    assert_eq!(anon.shows(), AnonShows::Loading);
+    anon.answered(Err(Error::Service(503)));
+    assert_eq!(anon.shows(), AnonShows::Failed(&Error::Service(503)));
+
+    // Try again, and it answers.
+    assert!(anon.ask());
+    anon.answered(Ok(catalogue.clone()));
+    assert_eq!(anon.shows(), AnonShows::Catalogue(&catalogue));
+
+    // A later visit's failure leaves the set it already has on screen.
+    assert!(anon.ask());
+    anon.answered(Err(Error::Offline));
+    assert_eq!(anon.shows(), AnonShows::Catalogue(&catalogue));
+}
+
+#[test]
 fn the_shop_shows_only_when_the_service_has_something_to_show() {
     // Production today: no window, not open.
     let unset = claim(ClaimState::NotYet, false, None, None);
