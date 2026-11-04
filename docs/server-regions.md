@@ -146,18 +146,32 @@ negative/extreme chunk coordinates, migration/removal/unload/dormancy, exact
 sparse-grid equivalence, negative-space reads, distant ID/full-scan reads,
 foreign bounds growth, sparse populated-cell queries, shared RNG/Gaussian
 consumption, complete mutable-mob transactions and exact indexed player
-selection. The full mob-AI vanilla oracle passes all 272 scenarios and all
+selection. At implementation revision `4c5925eb2`, the full mob-AI vanilla oracle passes all 272 scenarios and all
 127,179 mob ticks. Forced-parallel dedicated-server, server-entity,
 player-damage and natural-spawning harnesses pass. Live server-thread/LAN
 checks pass for mobs, portals, projectiles/vehicles and blasts; the mob check
 was repeated against the final runtime.
 
-The final repository check passes formatting, clippy (including the server
+The repository check at that implementation revision passes formatting, clippy (including the server
 feature configuration), 5,853 workspace Rust tests, 627 Python tests and 24
 content-root tests. Launcher formatting/clippy and 463 launcher tests pass;
 its translation-completeness test fails on missing Hebrew strings. The exact
 unchanged test also fails against base `9697aaf14`, independently reproducing
-that existing failure. The PR records the broader affected-parity sweep.
+that existing failure.
+
+Before integration with newer upstream changes, 225 distinct affected parity
+entries passed without a recorded behavior mismatch. The remaining broad sweep
+was stopped when the user requested delivery after the extended run; it is not
+reported as a completed sweep. Save-fixture setup and an item-order oracle run
+required retries; the fixture startup and both item-order cases then succeeded.
+
+Current main `e41334ac0` is integrated at `98aaa6e9e`. The merged server passes
+`cargo check -p horizon-client --lib`, formatting, seven region topology and
+concurrency tests, and 15 focused mob transaction, player-index and dependency
+tests. These include a new controlling-rider input regression and the complete
+serial/parallel mutable-state, ordered-event and RNG comparison. The full
+workspace/parity sweep and performance measurements were not repeated after
+that integration; the measured engine revisions are explicit below.
 
 `tools/bench_region_ticks.py` starts 100 real `horizon-bots` clients, teleports
 them to a 512-block grid in a fixed-seed flat world, and summons 70 persistent
