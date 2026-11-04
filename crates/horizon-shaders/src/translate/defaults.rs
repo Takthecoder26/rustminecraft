@@ -8,8 +8,9 @@ use super::{Error, scan::Stage};
 
 pub(super) fn merge<'a>(
     stages: impl IntoIterator<Item = (&'a Stage<'a>, &'a Module)>,
-) -> Result<Vec<u8>, Vec<Error>> {
+) -> Result<(Vec<u8>, Vec<Error>), Vec<Error>> {
     let mut result = Vec::new();
+    let mut notes = Vec::new();
     let mut seen = BTreeMap::<String, Vec<u8>>::new();
     for (stage, module) in stages {
         let (span, _) = super::block_layout(module);
@@ -40,28 +41,30 @@ pub(super) fn merge<'a>(
             let constant = module.constants.iter().find_map(|(_, c)| {
                 (c.name.as_deref() == Some(constant_name.as_str())).then_some(c)
             });
-            let failure = || {
-                vec![stage.error(
+            // Compile/validation already checked the GLSL initializer. An evaluator or UBO
+            // type this byte writer does not support must not discard the entire program.
+            // Assemble off to the side so a partially written value never reaches the UBO.
+            let bytes = (|| {
+                let mut words = Vec::new();
+                flatten(module, constant?.init, &mut words)?;
+                let mut bytes = vec![0; span as usize];
+                let mut words = words.into_iter();
+                write(
+                    module,
+                    &module.types[member.ty].inner,
+                    &mut words,
+                    &mut bytes,
+                    member.offset as usize,
+                )?;
+                words.next().is_none().then_some(bytes)
+            })();
+            let Some(bytes) = bytes else {
+                notes.push(stage.error(
                     *at,
-                    &format!("`{name}` needs a supported constant initializer"),
-                )]
+                    &format!("`{name}`: unsupported constant initializer ignored (zero unless another stage supplies a supported value)"),
+                ));
+                continue;
             };
-            let constant = constant.ok_or_else(failure)?;
-            let mut words = Vec::new();
-            flatten(module, constant.init, &mut words).ok_or_else(failure)?;
-            let mut bytes = vec![0; span as usize];
-            let mut words = words.into_iter();
-            write(
-                module,
-                &module.types[member.ty].inner,
-                &mut words,
-                &mut bytes,
-                member.offset as usize,
-            )
-            .ok_or_else(failure)?;
-            if words.next().is_some() {
-                return Err(failure());
-            }
             if let Some(previous) = seen.get(name) {
                 if previous != &bytes {
                     return Err(vec![stage.error(
@@ -77,7 +80,7 @@ pub(super) fn merge<'a>(
             }
         }
     }
-    Ok(result)
+    Ok((result, notes))
 }
 
 fn flatten(module: &Module, value: Handle<Expression>, out: &mut Vec<[u8; 4]>) -> Option<()> {

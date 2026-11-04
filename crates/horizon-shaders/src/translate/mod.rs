@@ -54,6 +54,8 @@ pub struct Interface {
     pub uniforms: Vec<Uniform>,
     /// std140 initial contents; runtime values overwrite their members each frame.
     pub initial_values: Vec<u8>,
+    /// Non-fatal translation diagnostics, at the original pack file and line.
+    pub notes: Vec<Error>,
     /// Each sampler: texture at `binding`, sampler object at `binding + 1`.
     pub samplers: Vec<Sampler>,
     /// The fragment stage's output locations.
@@ -547,7 +549,7 @@ fn translate(
         (Ok(v), Ok(f)) => (v, f),
         (a, b) => return Err(a.err().into_iter().chain(b.err()).flatten().collect()),
     };
-    let initial_values = defaults::merge([(&v, &vertex), (&f, &fragment)])?;
+    let (initial_values, notes) = defaults::merge([(&v, &vertex), (&f, &fragment)])?;
     let (uniform_size, offsets) = block_layout(&fragment);
     let uniforms = offsets
         .into_iter()
@@ -572,6 +574,7 @@ fn translate(
         interface: Interface {
             uniform_size,
             initial_values,
+            notes,
             uniforms,
             samplers,
             outputs,
@@ -758,10 +761,11 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
         std::mem::take(&mut errors)
     })?;
     let (uniform_size, offsets) = block_layout(&module);
-    let initial_values = defaults::merge([(&c, &module)])?;
+    let (initial_values, notes) = defaults::merge([(&c, &module)])?;
     let mut interface = Interface {
         uniform_size,
         initial_values,
+        notes,
         uniforms: offsets
             .into_iter()
             .filter_map(|(member, offset)| {

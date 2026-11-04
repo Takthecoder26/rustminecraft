@@ -873,6 +873,18 @@ pub fn load_post(
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
     );
+    let notes: Vec<_> = post
+        .every_program()
+        .flat_map(|p| {
+            p.program
+                .iter()
+                .map(|p| &p.interface)
+                .chain(p.compute.iter().map(|(_, c)| &c.interface))
+        })
+        .flat_map(|interface| &interface.notes)
+        .map(|e| format!("{}:{}: {}", e.file, e.line, e.message))
+        .collect();
+    post.notes.extend(notes);
     post
 }
 

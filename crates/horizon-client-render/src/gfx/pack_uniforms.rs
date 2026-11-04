@@ -752,6 +752,37 @@ mod tests {
         assert_eq!(out[60..64], [0; 4], "a value past the block is dropped");
     }
 
+    #[test]
+    fn runtime_values_replace_supported_defaults_beside_an_unsupported_one() {
+        let source = |code: &str| horizon_shaders::Preprocessed {
+            code: code.into(),
+            ..Default::default()
+        };
+        let program = horizon_shaders::translate_composite(
+            &source("void main() { gl_Position = vec4(0.0); }"),
+            &source("uniform double wide = 0.5lf; uniform float frameTimeCounter = 0.25; uniform ivec2 fixedValue = ivec2(-7, 9); out vec4 c; void main() { c = vec4(frameTimeCounter); }"),
+            horizon_shaders::Target::Buffers,
+        ).unwrap();
+        let mut bytes = program.interface.initial_values.clone();
+        let offset = |name| {
+            program
+                .interface
+                .uniforms
+                .iter()
+                .find(|u| u.name == name)
+                .unwrap()
+                .offset as usize
+        };
+        let at = offset("frameTimeCounter");
+        Value::f(&[3.5]).write("float", &mut bytes, at);
+        assert_eq!(&bytes[at..at + 4], &3.5f32.to_le_bytes());
+        let at = offset("wide");
+        assert_eq!(&bytes[at..at + 8], &[0; 8]);
+        let at = offset("fixedValue");
+        assert_eq!(&bytes[at..at + 4], &(-7i32).to_le_bytes());
+        assert_eq!(&bytes[at + 4..at + 8], &9i32.to_le_bytes());
+    }
+
     /// Iris's status uniforms as its documentation defines them (shaders.properties, "Status").
     #[test]
     fn status_uniforms_follow_iris() {

@@ -165,3 +165,62 @@ fn compute_programs_receive_initial_contents_and_nonconstant_uniform_initializer
     );
     assert!(translate_composite(&source(VERTEX), &source("uniform float runtime; uniform float value = runtime; out vec4 c; void main(){ c=vec4(value); }"), Target::Buffers).is_err());
 }
+
+#[test]
+fn unsupported_double_defaults_keep_the_program_and_neighbors_with_a_source_note() {
+    let p = program("uniform double wide = 0.5lf;\nuniform vec4 tint = vec4(0.25);");
+    assert_eq!(words(&p, "wide", 2), [0; 2]);
+    assert_eq!(words(&p, "tint", 4), [0.25f32.to_bits(); 4]);
+    assert_eq!(p.interface.notes.len(), 1);
+    let note = &p.interface.notes[0];
+    assert_eq!((&*note.file, note.line), ("original.glsl", 1));
+    assert!(note.message.contains("`wide`"), "{note:?}");
+    let p = translate_compute(&source(
+        "layout(local_size_x=1) in; uniform dvec2 wide = dvec2(0.5lf); uniform uint count = 7u; void main() {}",
+    ))
+    .unwrap();
+    assert_eq!(p.interface.notes.len(), 1);
+    for u in &p.interface.uniforms {
+        let at = u.offset as usize;
+        if u.name == "wide" {
+            assert_eq!(&p.interface.initial_values[at..at + 16], &[0; 16]);
+        } else if u.name == "count" {
+            assert_eq!(&p.interface.initial_values[at..at + 4], &7u32.to_le_bytes());
+        }
+    }
+}
+
+#[test]
+fn post_reports_unsupported_defaults_without_skipping_the_pass() {
+    let root = std::env::temp_dir().join(format!("horizon-default-note-{}", std::process::id()));
+    let shaders = root.join("shaders");
+    std::fs::create_dir_all(&shaders).unwrap();
+    std::fs::write(shaders.join("composite.vsh"), VERTEX).unwrap();
+    std::fs::write(
+        shaders.join("composite.fsh"),
+        "#version 430\nuniform double wide = 0.5lf;\nout vec4 c; void main() { c = vec4(1.0); }",
+    )
+    .unwrap();
+    let pack = horizon_shaders::Pack::open(&root).unwrap();
+    let post = horizon_shaders::load_post(
+        &pack,
+        "",
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(post.programs.len(), 1, "{:?}", post.notes);
+    assert!(
+        post.notes
+            .iter()
+            .any(|n| n.contains("composite.fsh:2:") && n.contains("`wide`")),
+        "{:?}",
+        post.notes
+    );
+    assert!(
+        !post.notes.iter().any(|n| n.contains("skipped")),
+        "{:?}",
+        post.notes
+    );
+}
