@@ -64,6 +64,8 @@ pub(in crate::game) struct ExecState {
     pub returned: Option<Option<i32>>,
     /// Depth of function calls.
     pub function_depth: u32,
+    /// Nesting depth of `execute ... run` (and `return run`) command chains.
+    pub execute_depth: u32,
 }
 
 /// A modifier that brings the sources to `max_command_forks` ends the chain
@@ -318,6 +320,18 @@ impl Game<'_> {
 
     /// ExecuteCommand: `ctx` is the context holding the `execute` literal.
     pub(in crate::game) fn run_execute(&mut self, ctx: &Context) -> R<i32> {
+        // Guard against unbounded `/execute ... run` nesting, which would
+        // overflow the server thread's stack (see issue #9252). Mirror the
+        // function-depth cap of 128.
+        if self.exec.execute_depth >= 128 {
+            return Err(err("command.failed", &[]));
+        }
+        self.exec.execute_depth += 1;
+        let result = self.run_execute_impl(ctx);
+        self.exec.execute_depth = self.exec.execute_depth.saturating_sub(1);
+        result
+    }
+    fn run_execute_impl(&mut self, ctx: &Context) -> R<i32> {
         // BuildContexts: a modifier may not bring the sources to this many.
         let fork_limit = self.ui.rules.int("max_command_forks") as usize;
         let mut sources = vec![self.command_source.unwrap_or_else(|| self.player_source())];
@@ -465,11 +479,16 @@ impl Game<'_> {
     }
     /// `return run <command>`: run it and return its result from the frame.
     fn run_return_run(&mut self, root: &Context) -> R<i32> {
+        if self.exec.execute_depth >= 128 {
+            return Err(err("command.failed", &[]));
+        }
         let Some(command) = root.child.as_deref() else {
             return Err(err("command.unknown.command", &[]));
         };
         let last = command.last_child();
+        self.exec.execute_depth += 1;
         let result = self.run_chain(command, last);
+        self.exec.execute_depth = self.exec.execute_depth.saturating_sub(1);
         // The command's own callbacks do not fire; the function frame gets
         // its result instead.
         match result {
