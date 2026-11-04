@@ -296,7 +296,7 @@ impl RegionTick<'_> {
 /// install call lends immutable tick data safely; it joins all region jobs
 /// before returning predictions or propagating a worker panic.
 pub struct RegionExecutor {
-    pool: Option<rayon::ThreadPool>,
+    pool: Option<std::sync::Arc<rayon::ThreadPool>>,
 }
 impl RegionExecutor {
     pub fn new(workers: usize) -> Result<Self, rayon::ThreadPoolBuildError> {
@@ -307,7 +307,13 @@ impl RegionExecutor {
             .num_threads(workers.clamp(1, 8))
             .thread_name(|index| format!("Horizon region {index}"))
             .build()?;
-        Ok(Self { pool: Some(pool) })
+        Ok(Self {
+            pool: Some(std::sync::Arc::new(pool)),
+        })
+    }
+    /// The workers, for the server's other work that does not depend on order.
+    pub fn pool(&self) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+        self.pool.clone()
     }
     /// Frees a finished round on the pool: its entries hold the mobs that were
     /// replaced, each with its own allocations, and nothing has to wait for
@@ -317,6 +323,35 @@ impl RegionExecutor {
         match &self.pool {
             Some(pool) => pool.spawn(move || predictions.into_par_iter().for_each(drop)),
             None => drop(predictions),
+        }
+    }
+    /// `each` for every pair of `targets` and `sources`, with the scratch each
+    /// worker made for itself. The pairs are independent, so the order is not
+    /// observable.
+    pub fn zip_each<T: Send, U: Sync, S>(
+        &self,
+        targets: &mut [T],
+        sources: &[U],
+        scratch: impl Fn() -> S + Send + Sync,
+        each: impl Fn(&mut S, &mut T, &U) + Send + Sync,
+    ) {
+        use rayon::prelude::*;
+        match &self.pool {
+            Some(pool) => pool.install(|| {
+                targets
+                    .par_iter_mut()
+                    .zip(sources)
+                    .with_min_len(64)
+                    .for_each_init(scratch, |state, (target, source)| {
+                        each(state, target, source)
+                    });
+            }),
+            None => {
+                let mut state = scratch();
+                for (target, source) in targets.iter_mut().zip(sources) {
+                    each(&mut state, target, source);
+                }
+            }
         }
     }
     pub fn predict(

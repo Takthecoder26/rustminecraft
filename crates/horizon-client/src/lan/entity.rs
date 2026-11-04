@@ -16,6 +16,7 @@ use horizon_protocol::{
         SetEntityMotion, SetEquipment, SetPassengers, UpdateAttributes, VecDelta,
     },
 };
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// The attribute instances of `now` that differ from what `sent` held (an
@@ -142,6 +143,16 @@ impl States {
         self.len += 1;
         e.reset(id, uuid, kind);
         e
+    }
+    /// The next `count` entities' states to write over, each with whatever
+    /// it held: to be `EntityState::reset` by the writer.
+    pub fn add_many(&mut self, count: usize) -> &mut [EntityState] {
+        let start = self.len;
+        self.len += count;
+        if self.list.len() < self.len {
+            self.list.resize_with(self.len, EntityState::default);
+        }
+        &mut self.list[start..self.len]
     }
     pub fn push(&mut self, e: EntityState) {
         match self.list.get_mut(self.len) {
@@ -862,18 +873,117 @@ pub struct Entities {
     /// flag per entity.
     moved: Vec<usize>,
     is_moved: Vec<bool>,
-    /// One entity's packets and their bodies, kept between entities.
+    /// One entity's packets, kept between entities.
     packets: Vec<play::Clientbound>,
-    bodies: Vec<Vec<u8>>,
+    /// Whether a client sees each entity this tick.
+    watched: Vec<bool>,
+    /// The workers for what does not depend on the order of entities or of
+    /// clients, on a level with enough entities to make it worth waking them.
+    pub pool: Option<Arc<rayon::ThreadPool>>,
 }
+
+/// From how many entities the pool is worth waking.
+const PARALLEL_ENTITIES: usize = 256;
 
 /// The client sees the entity this tick, and already tracked it.
 const SEES: u8 = 1;
 const TRACKS: u8 = 2;
 
-fn encode_all(packets: &[play::Clientbound], bodies: &mut Vec<Vec<u8>>) {
-    bodies.clear();
-    bodies.extend(packets.iter().map(play::Clientbound::encode));
+/// What one tick sends about one entity, made once for all its clients.
+struct EntitySend {
+    index: u32,
+    id: i32,
+    tracked: Arc<Tracked>,
+    /// Its changes, for the clients that track it.
+    changes: Vec<Vec<u8>>,
+    /// Its introduction, for those that start to: none when nobody does, or
+    /// its type is one the clients don't know.
+    pairing: Option<Vec<Vec<u8>>>,
+    /// Those also get its first changes in the pass that pairs them.
+    synced: bool,
+}
+
+/// What every entity's [`entity_send`] reads.
+struct SendShared<'a> {
+    riding: &'a Riding,
+    synced: &'a [(i32, i32)],
+    pairs: &'a [bool],
+    watched: &'a [bool],
+}
+
+/// Paired as it joined, then its first changes go to everyone tracking it,
+/// those just paired with it included. Arrows wait for the next tick's
+/// send_changes so impact updates (e.g. IN_GROUND) arrive after the client's
+/// first tick (#7461). None: no changes, and nobody starts tracking it.
+fn entity_send(
+    s: &mut ServerEntity,
+    e: &EntityState,
+    index: usize,
+    share: &SendShared<'_>,
+    packets: &mut Vec<play::Clientbound>,
+) -> Option<EntitySend> {
+    packets.clear();
+    let synced = s.added
+        && e.kind != "minecraft:player"
+        && !s.arrow
+        && share
+            .synced
+            .iter()
+            .any(|&(after, through)| e.id > after && e.id <= through);
+    if !s.added || synced {
+        s.send_changes(e, share.riding, packets);
+    }
+    s.added = false;
+    let pairs = share.pairs[index];
+    if packets.is_empty() && !pairs {
+        return None;
+    }
+    let changes = if share.watched[index] {
+        packets.iter().map(play::Clientbound::encode).collect()
+    } else {
+        Vec::new()
+    };
+    let pairing = s.kind.filter(|_| pairs).map(|kind| {
+        packets.clear();
+        s.pairing(e, kind, share.riding, packets);
+        packets.iter().map(play::Clientbound::encode).collect()
+    });
+    Some(EntitySend {
+        index: index as u32,
+        id: e.id,
+        tracked: Arc::clone(&s.tracked),
+        changes,
+        pairing,
+        synced,
+    })
+}
+
+/// One client's share of the entities' sends, in the entities' order.
+fn send_to(v: &mut Viewer<'_>, flags: &[u8], sends: &[EntitySend]) {
+    for send in sends {
+        let f = flags[send.index as usize];
+        if f & TRACKS != 0 {
+            v.out.extend(send.changes.iter().cloned());
+        } else if f & SEES != 0
+            && let Some(pairing) = &send.pairing
+        {
+            v.out.extend(pairing.iter().cloned());
+            if send.synced {
+                v.out.extend(send.changes.iter().cloned());
+            }
+            if v.tracker
+                .seen
+                .insert(send.id, Arc::clone(&send.tracked))
+                .is_none()
+            {
+                v.tracker.events.push(TrackEvent {
+                    start: true,
+                    entity: send.id,
+                    tracked: Arc::clone(&send.tracked),
+                });
+            }
+        }
+    }
 }
 
 impl Entities {
@@ -960,12 +1070,15 @@ impl Entities {
         self.moved.clear();
         self.is_moved.clear();
         self.is_moved.resize(entities.len(), false);
+        // An id twice in the list: its state takes both turns, in order.
+        let mut repeated = false;
         for (index, e) in entities.iter().enumerate() {
             let mut added = false;
             let s = self.states.entry(e.id).or_insert_with(|| {
                 added = true;
                 ServerEntity::new(e, kind(&e.kind), riding)
             });
+            repeated |= s.seen == now;
             s.seen = now;
             s.index = index;
             // ChunkMap.addEntity, ChunkMap.tick's section change, and a
@@ -1149,72 +1262,64 @@ impl Entities {
                 );
             }
         }
-        for (index, e) in entities.iter().enumerate() {
-            let Some(s) = self.states.get_mut(&e.id) else {
-                continue;
-            };
-            self.packets.clear();
-            // Paired as it joined, then its first changes go to everyone
-            // tracking it, those just paired with it included. Arrows wait for the
-            // next tick's send_changes so impact updates (e.g. IN_GROUND) arrive after
-            // the client's first tick (#7461).
-            let synced = s.added
-                && e.kind != "minecraft:player"
-                && !s.arrow
-                && self
-                    .synced
-                    .iter()
-                    .any(|&(after, through)| e.id > after && e.id <= through);
-            if !s.added || synced {
-                s.send_changes(e, riding, &mut self.packets);
+        self.watched.clear();
+        self.watched.resize(entities.len(), false);
+        for flags in &self.flags {
+            for (watched, &f) in self.watched.iter_mut().zip(flags) {
+                *watched |= f != 0;
             }
-            s.added = false;
-            // Nothing to send: no changes, and nobody starts tracking it.
-            if self.packets.is_empty() && !self.pairs[index] {
-                continue;
+        }
+        let share = SendShared {
+            riding,
+            synced: &self.synced,
+            pairs: &self.pairs,
+            watched: &self.watched,
+        };
+        let pool = self
+            .pool
+            .as_deref()
+            .filter(|_| !repeated && entities.len() >= PARALLEL_ENTITIES);
+        if let Some(pool) = pool {
+            let mut live: Vec<Option<&mut ServerEntity>> = std::iter::repeat_with(|| None)
+                .take(entities.len())
+                .collect();
+            for s in self.states.values_mut().filter(|s| s.seen == now) {
+                let index = s.index;
+                live[index] = Some(s);
             }
-            let mut encoded = false;
-            let mut pairing: Option<Vec<Vec<u8>>> = None;
+            let sends = pool.install(|| {
+                let sends: Vec<EntitySend> = live
+                    .par_iter_mut()
+                    .enumerate()
+                    .with_min_len(64)
+                    .map_init(Vec::new, |packets, (index, s)| {
+                        let s = s.as_deref_mut()?;
+                        entity_send(s, entities[index], index, &share, packets)
+                    })
+                    .flatten_iter()
+                    .collect();
+                viewers
+                    .par_iter_mut()
+                    .zip(&self.flags)
+                    .for_each(|(v, flags)| send_to(v, flags, &sends));
+                sends
+            });
+            // Nothing has to wait for each entity's buffers to be freed.
+            pool.spawn(move || drop(sends));
+        } else {
+            let mut packets = std::mem::take(&mut self.packets);
+            let sends: Vec<EntitySend> = entities
+                .iter()
+                .enumerate()
+                .filter_map(|(index, e)| {
+                    let s = self.states.get_mut(&e.id)?;
+                    entity_send(s, e, index, &share, &mut packets)
+                })
+                .collect();
             for (v, flags) in viewers.iter_mut().zip(&self.flags) {
-                let f = flags[index];
-                if f & TRACKS != 0 {
-                    if self.packets.is_empty() {
-                        continue;
-                    }
-                    if !encoded {
-                        encode_all(&self.packets, &mut self.bodies);
-                        encoded = true;
-                    }
-                    v.out.extend(self.bodies.iter().cloned());
-                } else if f & SEES != 0
-                    && let Some(kind) = s.kind
-                {
-                    let bodies = pairing.get_or_insert_with(|| {
-                        let mut packets = Vec::new();
-                        s.pairing(e, kind, riding, &mut packets);
-                        packets.iter().map(play::Clientbound::encode).collect()
-                    });
-                    v.out.extend(bodies.iter().cloned());
-                    if synced && !self.packets.is_empty() {
-                        if !encoded {
-                            encode_all(&self.packets, &mut self.bodies);
-                            encoded = true;
-                        }
-                        v.out.extend(self.bodies.iter().cloned());
-                    }
-                    if v.tracker
-                        .seen
-                        .insert(e.id, Arc::clone(&s.tracked))
-                        .is_none()
-                    {
-                        v.tracker.events.push(TrackEvent {
-                            start: true,
-                            entity: e.id,
-                            tracked: Arc::clone(&s.tracked),
-                        });
-                    }
-                }
+                send_to(v, flags, &sends);
             }
+            self.packets = packets;
         }
         self.states.retain(|_, s| s.seen == now);
     }
@@ -1753,6 +1858,67 @@ mod tests {
 
     fn body(p: play::Clientbound) -> Vec<u8> {
         p.encode()
+    }
+
+    /// The workers change nothing a client receives: byte for byte and in the
+    /// same order, and the same tracking events, through entities joining,
+    /// moving, changing data and leaving range or the level.
+    #[test]
+    fn the_pool_sends_each_client_what_one_thread_does() {
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(3)
+                .build()
+                .unwrap(),
+        );
+        let mut alone = (Entities::default(), Clients::new());
+        let mut shared = (
+            Entities {
+                pool: Some(pool),
+                ..Entities::default()
+            },
+            Clients::new(),
+        );
+        let count = PARALLEL_ENTITIES as i32 + 50;
+        let zombie = |id: i32, tick: i32| {
+            let mut e = state(f64::from(id % 40) + f64::from(tick) * 0.3);
+            e.id = id;
+            e.uuid = id as u128;
+            e.position[2] = f64::from(id / 40) * 3.0 - 20.0;
+            // Some walk out of everyone's range, some have changing data.
+            if id % 7 == 0 {
+                e.position[0] += f64::from(tick) * 40.0;
+            }
+            if id % 5 == 0 {
+                e.meta
+                    .push((9, serializer::FLOAT, Value::Float((tick % 3) as f32)));
+            }
+            e
+        };
+        let mut sent = 0;
+        for tick in 0..12 {
+            // One leaves for good, later ones join as the ticks go.
+            let list: Vec<EntityState> = (10..count + tick * 4)
+                .filter(|&id| id != 20 || tick < 5)
+                .map(|id| zombie(id, tick))
+                .collect();
+            let refs: Vec<&EntityState> = list.iter().collect();
+            for side in [&mut alone, &mut shared] {
+                side.0.synced = vec![(10, count)];
+                side.1.moved = [tick % 4 == 0, tick % 3 == 0];
+                side.1.tick(&mut side.0, &refs);
+            }
+            assert_eq!(alone.1.out, shared.1.out, "tick {tick}");
+            assert_eq!(alone.1.gone, shared.1.gone, "tick {tick}");
+            for (a, b) in alone.1.trackers.iter_mut().zip(&mut shared.1.trackers) {
+                let events = |t: &mut Tracker| -> Vec<(bool, i32)> {
+                    t.events.drain(..).map(|e| (e.start, e.entity)).collect()
+                };
+                assert_eq!(events(a), events(b), "tick {tick}");
+            }
+            sent += alone.1.out[0].len();
+        }
+        assert!(sent > count as usize, "the test sent something: {sent}");
     }
 
     /// ChunkMap checks a pair again only when one side moves: a zombie
