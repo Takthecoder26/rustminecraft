@@ -24,7 +24,7 @@ impl MovingPistonState {
         }
     }
     pub fn interpolated_progress(self, partial: f32) -> f32 {
-        let partial = if partial > 1.0 { 1.0 } else { partial };
+        let partial = partial.clamp(0.0, 1.0);
         self.previous_progress + partial * (self.progress - self.previous_progress)
     }
     pub fn interpolated_offset(self, partial: f32) -> [f32; 3] {
