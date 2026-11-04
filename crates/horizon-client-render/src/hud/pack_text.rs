@@ -1,8 +1,11 @@
 //! A resource pack's `core/text` shader on the GUI's text (`RenderPipelines.GUI_TEXT`, the shader
 //! with `IS_GUI`): servers' HUDs that their pack's vertex shader moves to the screen's corners,
-//! and text effects in its fragment shader. Without one the text draws natively.
+//! and text effects in its fragment shader. Its `core/position_tex_color` on the GUI's blits of
+//! whole textures (`RenderPipelines.GUI_TEXTURED`): container backgrounds a server's vertex
+//! shader grows past the vanilla size. Without one they draw natively.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use horizon_shaders::{CoreProgram, Glue};
@@ -32,6 +35,12 @@ const GLUE: Glue = Glue {
 /// The packs' text shader, when a pack replaces either stage.
 pub(super) fn load(root: &Path, defaults: &Path) -> Option<Arc<CoreProgram>> {
     load_core(root, defaults, "text", &["IS_GUI"], &GLUE)
+}
+
+/// The packs' `core/position_tex_color`, when a pack replaces either stage. Its vertex format is
+/// GUI text's, so the glue is the same.
+pub(super) fn load_blit(root: &Path, defaults: &Path) -> Option<Arc<CoreProgram>> {
+    load_core(root, defaults, "position_tex_color", &[], &GLUE)
 }
 
 /// The packs' core shader `name` (`shaders/core/<name>.vsh` and `.fsh`) over `defaults` (the
@@ -82,18 +91,25 @@ const BLOCK_SIZES: [u64; 4] = [48, 64, 160, 48];
 /// The pipeline and its resources.
 pub(super) struct PackText {
     pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
 }
 
 impl PackText {
+    /// `view` is what every sampler reads; `uv` the offset in [`HudVertex`] of the UV the shader
+    /// reads as `UV0`.
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        atlas: &wgpu::TextureView,
+        view: &wgpu::TextureView,
         program: &CoreProgram,
+        uv: u64,
     ) -> Option<Self> {
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // A pack's shader is untrusted: the backend failing to compile it is an internal error.
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = |label, module: &naga::Module| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -103,6 +119,8 @@ impl PackText {
         let vertex = module("Resource pack text (vertex)", &program.vertex);
         let fragment = module("Resource pack text (fragment)", &program.fragment);
         let visibility = wgpu::ShaderStages::VERTEX_FRAGMENT;
+        // The blocks' sizes are checked here, not at the draw: a pack's own larger block fails
+        // in this scope.
         let mut entries: Vec<wgpu::BindGroupLayoutEntry> = (0..4)
             .map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
@@ -110,7 +128,7 @@ impl PackText {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: wgpu::BufferSize::new(BLOCK_SIZES[binding as usize]),
                 },
                 count: None,
             })
@@ -143,42 +161,31 @@ impl PackText {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // The font textures' nearest filtering; every sampler a pack names reads the atlas.
+        // The font and GUI textures' nearest filtering.
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Resource pack text"),
             ..Default::default()
         });
-        let mut resources: Vec<wgpu::BindGroupEntry> = (0..4)
-            .map(|i| wgpu::BindGroupEntry {
-                binding: i as u32,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform,
-                    offset: BLOCK_OFFSETS[i],
-                    size: wgpu::BufferSize::new(BLOCK_SIZES[i]),
-                }),
-            })
-            .collect();
-        for (_, binding) in horizon_shaders::SAMPLERS {
-            resources.push(wgpu::BindGroupEntry {
-                binding,
-                resource: wgpu::BindingResource::TextureView(atlas),
-            });
-            resources.push(wgpu::BindGroupEntry {
-                binding: binding + 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            });
-        }
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Resource pack text"),
-            layout: &layout,
-            entries: &resources,
-        });
+        let group = bind(device, &layout, &uniform, &sampler, view);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Resource pack text"),
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let attributes = wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Unorm8x4];
+        let attribute = |format, offset, shader_location| wgpu::VertexAttribute {
+            format,
+            offset,
+            shader_location,
+        };
+        let attributes = [
+            attribute(wgpu::VertexFormat::Float32x2, 0, 0),
+            attribute(wgpu::VertexFormat::Float32x2, uv, 1),
+            attribute(
+                wgpu::VertexFormat::Unorm8x4,
+                std::mem::offset_of!(HudVertex, color) as u64,
+                2,
+            ),
+        ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Resource pack text"),
             layout: Some(&pipeline_layout),
@@ -209,12 +216,15 @@ impl PackText {
             multiview_mask: None,
             cache: None,
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
-            log::warn!("the resource pack's text shader is not used: {e}");
+        let internal = pollster::block_on(internal.pop());
+        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+            log::warn!("a resource pack's GUI shader is not used: {e}");
             return None;
         }
         Some(Self {
             pipeline,
+            layout,
+            sampler,
             group,
             uniform,
         })
@@ -235,9 +245,148 @@ impl PackText {
     /// Draw `range` (whole glyph quads) with the pack's shader; the caller sets its own
     /// pipeline and bind group again after.
     pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>) {
+        self.draw_with(pass, &self.group, range);
+    }
+
+    /// [`Self::draw`] with the samplers reading another texture ([`Self::bind`]).
+    fn draw_with(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        group: &wgpu::BindGroup,
+        range: std::ops::Range<u32>,
+    ) {
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.group, &[]);
+        pass.set_bind_group(0, group, &[]);
         pass.draw(range.clone(), range.start..range.start + 1);
+    }
+}
+
+/// The blocks and `view` behind every sampler.
+fn bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    let mut resources: Vec<wgpu::BindGroupEntry> = (0..4)
+        .map(|i| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: uniform,
+                offset: BLOCK_OFFSETS[i],
+                size: wgpu::BufferSize::new(BLOCK_SIZES[i]),
+            }),
+        })
+        .collect();
+    for (_, binding) in horizon_shaders::SAMPLERS {
+        resources.push(wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+        resources.push(wgpu::BindGroupEntry {
+            binding: binding + 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Resource pack GUI shader"),
+        layout,
+        entries: &resources,
+    })
+}
+
+/// The pack's `core/position_tex_color` on the GUI's blits of whole textures
+/// ([`HudBatch::blit`]), each texture bound on its own as vanilla binds it: what the shader reads
+/// of `Sampler0` (its size, marker texels) is that texture's. Textures are read from the
+/// resources the first time a batch blits them.
+pub(super) struct PackBlit {
+    shader: PackText,
+    root: PathBuf,
+    /// None for one that didn't load: its blits draw natively.
+    textures: HashMap<String, Option<(wgpu::Texture, wgpu::BindGroup)>>,
+}
+
+impl PackBlit {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        atlas: &wgpu::TextureView,
+        program: &CoreProgram,
+        root: PathBuf,
+    ) -> Option<Self> {
+        let uv = std::mem::offset_of!(HudVertex, glint_uv) as u64;
+        Some(Self {
+            shader: PackText::new(device, format, atlas, program, uv)?,
+            root,
+            textures: HashMap::new(),
+        })
+    }
+
+    /// The blocks, and the textures `batch` blits for the first time.
+    pub(super) fn prepare(
+        &mut self,
+        device: &wgpu::Device,
+        uploads: &mut crate::gfx::upload::Uploads,
+        encoder: &mut wgpu::CommandEncoder,
+        batch: &HudBatch,
+        size: [u32; 2],
+        scale: f32,
+    ) {
+        self.shader.prepare(uploads, encoder, batch, size, scale);
+        for name in &batch.textures {
+            if self.textures.contains_key(name) {
+                continue;
+            }
+            let (namespace, path) = name.split_once(':').unwrap_or(("minecraft", name));
+            let file = self
+                .root
+                .join(format!("assets/{namespace}/textures/{path}.png"));
+            let texture = match super::decode(&file) {
+                Ok((width, height, rgba)) => {
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Resource pack GUI texture"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        // As the atlas: what the shader reads is the file's bytes.
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    uploads.texture(encoder, texture.as_image_copy(), width, height, &rgba);
+                    let view = texture.create_view(&Default::default());
+                    let s = &self.shader;
+                    let group = bind(device, &s.layout, &s.uniform, &s.sampler, &view);
+                    Some((texture, group))
+                }
+                Err(e) => {
+                    log::warn!("{name} draws without the pack's GUI shader: {e}");
+                    None
+                }
+            };
+            self.textures.insert(name.clone(), texture);
+        }
+    }
+
+    /// Draw `range`, blits of `name`, with the pack's shader; false when it has no texture for
+    /// them, to draw natively.
+    pub(super) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        name: &str,
+        range: std::ops::Range<u32>,
+    ) -> bool {
+        let Some(Some((_, group))) = self.textures.get(name) else {
+            return false;
+        };
+        self.shader.draw_with(pass, group, range);
+        true
     }
 }
 
@@ -276,17 +425,17 @@ fn uniforms(batch: &HudBatch, size: [u32; 2], scale: f32) -> Vec<u8> {
     bytemuck::cast_slice(&data).to_vec()
 }
 
-/// `range` split into runs of GUI text and of the rest, in order.
-pub(super) fn text_runs(
+/// `range` split into runs of one [`HudVertex::core`] each, in order.
+pub(super) fn core_runs(
     vertices: &[HudVertex],
     range: std::ops::Range<u32>,
-) -> Vec<(std::ops::Range<u32>, bool)> {
-    let mut runs: Vec<(std::ops::Range<u32>, bool)> = Vec::new();
+) -> Vec<(std::ops::Range<u32>, u32)> {
+    let mut runs: Vec<(std::ops::Range<u32>, u32)> = Vec::new();
     for i in range {
-        let text = vertices.get(i as usize).is_some_and(|v| v.text != 0);
+        let core = vertices.get(i as usize).map_or(0, |v| v.core);
         match runs.last_mut() {
-            Some((run, t)) if *t == text => run.end = i + 1,
-            _ => runs.push((i..i + 1, text)),
+            Some((run, c)) if *c == core => run.end = i + 1,
+            _ => runs.push((i..i + 1, core)),
         }
     }
     runs
@@ -320,20 +469,85 @@ mod tests {
         assert!((data[8] * data[64] / 2.0 - 4.0).abs() < 1e-4);
     }
 
+    /// A GUI blit shader in `position_tex_color`'s shape, its blocks from `include`.
+    fn blit_program(include: &dyn Fn(&str) -> Option<String>) -> CoreProgram {
+        const VSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            #include <minecraft:projection.glsl>\n\
+            in vec3 Position;\nin vec2 UV0;\nin vec4 Color;\nout vec2 texCoord0;\nout vec4 vertexColor;\n\
+            void main() {\n    gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);\n\
+                texCoord0 = UV0;\n    vertexColor = Color;\n}\n";
+        const FSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            uniform sampler2D Sampler0;\nin vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() {\n    fragColor = texture(Sampler0, texCoord0) * vertexColor * ColorModulator;\n}\n";
+        horizon_shaders::translate_core(VSH, FSH, &[], include, &GLUE)
+            .expect("the shaders translate")
+    }
+
+    /// A pack's own include with a bigger block than vanilla's is not used, and blits draw
+    /// natively, rather than failing at the draw.
     #[test]
-    fn text_splits_from_the_rest() {
-        let vertex = |text| HudVertex {
+    fn a_pack_block_bigger_than_vanillas_falls_back() {
+        let instance = crate::gfx::test_gpu::instance();
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            eprintln!("no GPU: skipping");
+            return;
+        };
+        let (device, _) =
+            pollster::block_on(adapter.request_device(&Default::default())).expect("a device");
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let include = |id: &str| match id {
+            "minecraft:shaders/include/dynamictransforms.glsl" => Some(
+                "layout(std140) uniform DynamicTransforms {\n    mat4 ModelViewMat;\n    \
+                 mat4 TextureMat;\n    vec4 ColorModulator;\n    vec3 ModelOffset;\n};\n"
+                    .to_owned(),
+            ),
+            "minecraft:shaders/include/projection.glsl" => {
+                Some("layout(std140) uniform Projection {\n    mat4 ProjMat;\n};\n".to_owned())
+            }
+            _ => None,
+        };
+        let bigger = |id: &str| {
+            include(id)
+                .map(|text| text.replace("vec3 ModelOffset;", "vec3 ModelOffset;\n    vec4 More;"))
+        };
+        let new = |program: &CoreProgram| {
+            PackText::new(&device, wgpu::TextureFormat::Rgba8Unorm, &view, program, 0)
+        };
+        assert!(new(&blit_program(&include)).is_some());
+        assert!(new(&blit_program(&bigger)).is_none());
+    }
+
+    #[test]
+    fn text_and_blits_split_from_the_rest() {
+        let vertex = |core| HudVertex {
             pos: [0.0; 2],
             uv: [0.0; 2],
             color: 0,
             depth: 0.0,
             glint_uv: [0.0; 2],
-            text,
+            core,
         };
-        let vertices: Vec<HudVertex> = [0, 0, 1, 1, 1, 0].into_iter().map(vertex).collect();
+        let vertices: Vec<HudVertex> = [0, 0, 1, 1, 1, 0, 2, 2, 3]
+            .into_iter()
+            .map(vertex)
+            .collect();
         assert_eq!(
-            text_runs(&vertices, 1..6),
-            [(1..2, false), (2..5, true), (5..6, false)]
+            core_runs(&vertices, 1..9),
+            [(1..2, 0), (2..5, 1), (5..6, 0), (6..8, 2), (8..9, 3)]
         );
     }
 }

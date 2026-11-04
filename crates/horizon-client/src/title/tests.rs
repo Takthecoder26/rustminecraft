@@ -2246,7 +2246,7 @@ mod text_and_icon {
         batch
             .vertices
             .iter()
-            .filter(|v| v.text == 1)
+            .filter(|v| v.core == crate::hud::CORE_TEXT)
             .map(|v| v.pos[0])
             .collect()
     }
@@ -2339,7 +2339,7 @@ fn a_create_world_tab_label_wider_than_its_tab_stays_inside_it() {
     let labels: Vec<f32> = batch
         .vertices
         .iter()
-        .filter(|v| v.text == 1 && v.pos[1] < 24.0)
+        .filter(|v| v.core == crate::hud::CORE_TEXT && v.pos[1] < 24.0)
         .map(|v| v.pos[0])
         .collect();
     assert!(!labels.is_empty());

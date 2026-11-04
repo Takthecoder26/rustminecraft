@@ -412,12 +412,12 @@ impl Game<'_> {
             .as_deref()
             .is_some_and(is_shulker_box)
         {
-            batch.sprite_region(
+            batch.blit(
                 atlas,
                 "gui/container/shulker_box",
                 [ox, oy, 176.0, 167.0],
-                256.0,
-                256.0,
+                [0.0, 0.0],
+                [256.0, 256.0],
             );
             // ShulkerBoxScreen draws the menu's title: the box's custom name
             // (BaseContainerBlockEntity.getDisplayName) or its default name.
@@ -435,21 +435,22 @@ impl Game<'_> {
         }
         let rows = self.chest_rows().unwrap_or(3);
         let top = rows as f32 * 18.0 + 17.0;
-        batch.sprite_region(
+        let texture = "gui/container/generic_54";
+        batch.blit(
             atlas,
-            "gui/container/generic_54",
+            texture,
             [ox, oy, 176.0, top],
-            256.0,
-            256.0,
+            [0.0, 0.0],
+            [256.0, 256.0],
         );
         // The player half of the texture starts at v = 126.
-        if let Some(mut r) = atlas.sprites.get("gui/container/generic_54").copied() {
-            let (du, dv) = ((r.u1 - r.u0) / r.w as f32, (r.v1 - r.v0) / r.h as f32);
-            r.v0 += 126.0 * dv;
-            r.v1 = r.v0 + 96.0 * dv;
-            r.u1 = r.u0 + 176.0 * du;
-            batch.rect_uv(ox, oy + top, 176.0, 96.0, r, u32::MAX);
-        }
+        batch.blit(
+            atlas,
+            texture,
+            [ox, oy + top, 176.0, 96.0],
+            [0.0, 126.0],
+            [256.0, 256.0],
+        );
         let title = self.chest_title(rows);
         super::screen_info::name_container(|| title.plain());
         batch.text_styled(atlas, &title, ox + 8.0, oy + 6.0, grey, false);

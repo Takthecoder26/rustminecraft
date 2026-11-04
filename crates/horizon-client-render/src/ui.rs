@@ -1835,7 +1835,7 @@ mod tests {
             let glyphs = |b: &HudBatch| -> Vec<([u32; 2], u32)> {
                 b.vertices
                     .iter()
-                    .filter(|v| v.text == 1)
+                    .filter(|v| v.core == crate::hud::CORE_TEXT)
                     .map(|v| ([v.pos[0].to_bits(), v.pos[1].to_bits()], v.color))
                     .collect()
             };

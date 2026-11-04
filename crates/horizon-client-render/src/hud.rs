@@ -99,6 +99,10 @@ pub struct HudAtlas {
     /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
     /// none draws the outline natively.
     pub lines_shader: Option<std::sync::Arc<horizon_shaders::CoreProgram>>,
+    /// A resource pack's own `core/position_tex_color` for the GUI's blits of whole textures
+    /// ([`HudBatch::blit`]), translated, and the resources it reads those textures from; none
+    /// draws them natively.
+    pub blit_shader: Option<(std::sync::Arc<horizon_shaders::CoreProgram>, PathBuf)>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
     pub random_textures: horizon_optifine::random_textures::RandomTextures,
     /// Their emissive overlays (`_e`), packed here too.
@@ -816,6 +820,7 @@ impl HudAtlas {
     pub fn build_over_with_image(root: &Path, defaults: &Path, mod_image: bool) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
         atlas.text_shader = pack_text::load(root, defaults);
+        atlas.blit_shader = pack_text::load_blit(root, defaults).map(|s| (s, root.to_owned()));
         atlas.lines_shader = pack_text::load_core(
             root,
             defaults,
@@ -915,6 +920,7 @@ impl HudAtlas {
             glint_armor: (Vec::new(), 1, 1),
             text_shader: None,
             lines_shader: None,
+            blit_shader: None,
             random_textures: Default::default(),
             emissive: Arc::default(),
             blinks: Default::default(),
@@ -978,6 +984,7 @@ impl HudAtlas {
             white,
             text_shader: None,
             lines_shader: None,
+            blit_shader: None,
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
@@ -1428,6 +1435,7 @@ impl HudAtlas {
             glint_armor,
             text_shader: None,
             lines_shader: None,
+            blit_shader: None,
             random_textures,
             emissive,
             blinks,
@@ -1454,12 +1462,18 @@ pub struct HudVertex {
     pub color: u32,
     pub depth: f32,
     /// The `GLINT_TEXTURING` UV into the repeating glint texture, unused
-    /// unless `uv.x >= 2`.
+    /// unless `uv.x >= 2`; for a blit ([`CORE_BLIT`]), the UV in its texture.
     pub glint_uv: [f32; 2],
-    /// 1 for the GUI's text (`RenderPipelines.GUI_TEXT`), which a resource
-    /// pack's text shader draws when it has one.
-    pub text: u32,
+    /// Which of a resource pack's core shaders draws this vertex when the
+    /// pack has it: 0 none, [`CORE_TEXT`] or [`CORE_BLIT`] and up.
+    pub core: u32,
 }
+/// [`HudVertex::core`] of the GUI's text (`RenderPipelines.GUI_TEXT`): the
+/// pack's `core/text`.
+pub const CORE_TEXT: u32 = 1;
+/// [`HudVertex::core`] of a blit of `HudBatch::textures[n]`, plus `n`
+/// (`RenderPipelines.GUI_TEXTURED`): the pack's `core/position_tex_color`.
+pub const CORE_BLIT: u32 = 2;
 /// Sutherland-Hodgman against one half plane, interpolating every attribute.
 fn clip_polygon(poly: &[HudVertex], axis: usize, limit: f32, keep_below: bool) -> Vec<HudVertex> {
     let inside = |v: &HudVertex| {
@@ -1522,6 +1536,8 @@ pub struct HudBatch {
     pub blur_at: u32,
     /// Player object profiles encountered while painting text this frame.
     pub inline_profiles: Vec<serde_json::Value>,
+    /// The textures this frame blits whole ([`HudBatch::blit`]), by atlas name.
+    pub textures: Vec<String>,
 }
 /// How a run of HUD vertices blends and tests depth.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1578,6 +1594,7 @@ impl HudBatch {
             game_time: 0.0,
             blur_at: 0,
             inline_profiles: Vec::new(),
+            textures: Vec::new(),
         }
     }
     /// Draw the vertices added since `start` with the inverting blend.
@@ -1653,7 +1670,7 @@ impl HudBatch {
                 color,
                 depth: 0.0,
                 glint_uv: [0.0, 0.0],
-                text: 0,
+                core: 0,
             });
         }
     }
@@ -1673,7 +1690,7 @@ impl HudBatch {
                 color,
                 depth: 0.0,
                 glint_uv: glint_uv[i],
-                text: 0,
+                core: 0,
             });
         }
     }
@@ -1685,7 +1702,7 @@ impl HudBatch {
                 color,
                 depth: p[i][2],
                 glint_uv: [0.0, 0.0],
-                text: 0,
+                core: 0,
             });
         }
     }
@@ -1813,22 +1830,27 @@ impl HudBatch {
                 continue;
             }
             let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
-            let uv = |x: f32, y: f32| {
+            let lerp = |x: f32, y: f32, uv: fn(&HudVertex) -> [f32; 2]| {
                 let (s, r) = (t(x, x_lo, x_hi), t(y, y_lo, y_hi));
                 std::array::from_fn(|i| {
-                    let top = tl.uv[i] + (tr.uv[i] - tl.uv[i]) * s;
-                    let bottom = bl.uv[i] + (br.uv[i] - bl.uv[i]) * s;
+                    let top = uv(&tl)[i] + (uv(&tr)[i] - uv(&tl)[i]) * s;
+                    let bottom = uv(&bl)[i] + (uv(&br)[i] - uv(&bl)[i]) * s;
                     top + (bottom - top) * r
                 })
             };
+            let corners = [[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]];
             self.quad(
-                [[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]],
-                [uv(cx0, cy0), uv(cx1, cy0), uv(cx1, cy1), uv(cx0, cy1)],
+                corners,
+                corners.map(|[x, y]| lerp(x, y, |v| v.uv)),
                 tl.color,
             );
             let end = self.vertices.len();
-            for v in &mut self.vertices[end - 6..] {
-                v.text = tl.text;
+            for (v, i) in self.vertices[end - 6..].iter_mut().zip([0, 1, 2, 0, 2, 3]) {
+                v.core = tl.core;
+                if tl.core >= CORE_BLIT {
+                    let [x, y] = corners[i];
+                    v.glint_uv = lerp(x, y, |v| v.glint_uv);
+                }
             }
         }
         moved.push(self.vertices.len() as u32);
@@ -1839,6 +1861,45 @@ impl HudBatch {
             }
         }
         self.blends.retain(|(range, _)| !range.is_empty());
+    }
+    /// `GuiGraphics.blit(RenderPipelines.GUI_TEXTURED, texture, x, y, u, v, w, h, tw, th)`: the
+    /// `w x h` texels at `(u, v)` of the texture `name`, `tw x th` in texels, drawn at `(x, y)`.
+    /// A pack's `core/position_tex_color` draws it with the texture bound on its own, as vanilla
+    /// binds it, and the UV in it.
+    pub fn blit(
+        &mut self,
+        atlas: &HudAtlas,
+        name: &str,
+        [x, y, w, h]: [f32; 4],
+        [u, v]: [f32; 2],
+        [tw, th]: [f32; 2],
+    ) {
+        let Some(r) = atlas.sprites.get(name).copied() else {
+            return;
+        };
+        let own = [[u, v], [u + w, v], [u + w, v + h], [u, v + h]].map(|[u, v]| [u / tw, v / th]);
+        let start = self.vertices.len();
+        self.quad(
+            [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+            own.map(|[u, v]| [r.u0 + (r.u1 - r.u0) * u, r.v0 + (r.v1 - r.v0) * v]),
+            u32::MAX,
+        );
+        // A GUI sprite is in vanilla's GUI atlas (`blitSprite`), not a texture of its own.
+        let path = name.split_once(':').map_or(name, |(_, path)| path);
+        if path.starts_with("gui/sprites/") {
+            return;
+        }
+        let index = match self.textures.iter().position(|t| t == name) {
+            Some(index) => index,
+            None => {
+                self.textures.push(name.to_owned());
+                self.textures.len() - 1
+            }
+        };
+        for (vertex, i) in self.vertices[start..].iter_mut().zip([0, 1, 2, 0, 2, 3]) {
+            vertex.glint_uv = own[i];
+            vertex.core = CORE_BLIT + index as u32;
+        }
     }
     /// `blit` of the top-left `w x h` texels of a `tw x th` texture.
     pub fn sprite_region(
@@ -1889,7 +1950,7 @@ impl HudBatch {
                 color: c[i],
                 depth: 0.0,
                 glint_uv: [0.0, 0.0],
-                text: 0,
+                core: 0,
             });
         }
     }
@@ -2144,7 +2205,7 @@ impl HudBatch {
                 lift(self, start, base + 0.01);
                 if !world {
                     for v in &mut self.vertices[glyph..] {
-                        v.text = 1;
+                        v.core = CORE_TEXT;
                     }
                 }
             }
@@ -2289,6 +2350,8 @@ pub struct HudRenderer {
     atlas_view: wgpu::TextureView,
     /// The resource pack's text shader, when it has one that works.
     pack_text: Option<pack_text::PackText>,
+    /// Its `core/position_tex_color` for the GUI's blits, likewise.
+    pack_blit: Option<pack_text::PackBlit>,
     /// Target pixels per window pixel: above 1 for a screenshot drawn larger than the
     /// window (`Renderer::screenshot_quality`).
     pub zoom: f32,
@@ -2539,6 +2602,7 @@ impl HudRenderer {
             format,
             atlas_view: view.clone(),
             pack_text: None,
+            pack_blit: None,
             zoom: 1.0,
         })
     }
@@ -2561,7 +2625,19 @@ impl HudRenderer {
         shader: Option<&horizon_shaders::CoreProgram>,
     ) {
         self.pack_text = shader.and_then(|shader| {
-            pack_text::PackText::new(device, self.format, &self.atlas_view, shader)
+            let uv = std::mem::offset_of!(HudVertex, uv) as u64;
+            pack_text::PackText::new(device, self.format, &self.atlas_view, shader, uv)
+        });
+    }
+    /// Draw the GUI's blits of whole textures with `shader` (`HudAtlas::blit_shader`), or
+    /// natively.
+    pub fn set_blit_shader(
+        &mut self,
+        device: &wgpu::Device,
+        shader: Option<&(Arc<horizon_shaders::CoreProgram>, PathBuf)>,
+    ) {
+        self.pack_blit = shader.and_then(|(shader, root)| {
+            pack_text::PackBlit::new(device, self.format, &self.atlas_view, shader, root.clone())
         });
     }
     pub fn animate_sprites(
@@ -2696,6 +2772,16 @@ impl HudRenderer {
         if let Some(pack_text) = &self.pack_text {
             pack_text.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
         }
+        if let Some(pack_blit) = &mut self.pack_blit {
+            pack_blit.prepare(
+                device,
+                uploads,
+                encoder,
+                batch,
+                size,
+                batch.scale * self.zoom,
+            );
+        }
     }
     /// Draw the batch `prepare` staged.
     pub fn draw(
@@ -2796,21 +2882,34 @@ impl HudRenderer {
                         continue;
                     }
                 };
-                match &self.pack_text {
-                    Some(pack_text) if *blend == Blend::Alpha => {
-                        for (part, text) in pack_text::text_runs(&batch.vertices, range.clone()) {
-                            if text {
-                                pack_text.draw(&mut pass, part);
-                                pass.set_bind_group(0, &self.group, &[]);
-                            } else {
-                                pass.set_pipeline(pipeline);
-                                pass.draw(part, 0..1);
+                if *blend != Blend::Alpha || (self.pack_text.is_none() && self.pack_blit.is_none())
+                {
+                    pass.set_pipeline(pipeline);
+                    pass.draw(range.clone(), 0..1);
+                    continue;
+                }
+                for (part, core) in pack_text::core_runs(&batch.vertices, range.clone()) {
+                    let drawn = match core {
+                        0 => false,
+                        CORE_TEXT => self.pack_text.as_ref().is_some_and(|text| {
+                            text.draw(&mut pass, part.clone());
+                            true
+                        }),
+                        blit => {
+                            let name = batch.textures.get((blit - CORE_BLIT) as usize);
+                            match (&self.pack_blit, name) {
+                                (Some(pack_blit), Some(name)) => {
+                                    pack_blit.draw(&mut pass, name, part.clone())
+                                }
+                                _ => false,
                             }
                         }
-                    }
-                    _ => {
+                    };
+                    if drawn {
+                        pass.set_bind_group(0, &self.group, &[]);
+                    } else {
                         pass.set_pipeline(pipeline);
-                        pass.draw(range.clone(), 0..1);
+                        pass.draw(part, 0..1);
                     }
                 }
             }
@@ -4118,6 +4217,75 @@ texture=wide",
             assert_eq!(actual, expected, "blur at {split}");
         }
     }
+    /// A pack's `core/position_tex_color` reads a blit's UV in its own texture, as vanilla's
+    /// `blit` gives it; GUI sprites are in vanilla's GUI atlas and stay native.
+    #[test]
+    fn blits_carry_the_uv_in_their_own_texture() {
+        let mut atlas = HudAtlas::build(Path::new("/nonexistent/horizon-test-assets")).unwrap();
+        let rect = Rect {
+            u0: 0.5,
+            v0: 0.25,
+            u1: 0.75,
+            v1: 0.5,
+            w: 256,
+            h: 256,
+        };
+        atlas.sprites.insert("gui/container/inventory".into(), rect);
+        atlas
+            .sprites
+            .insert("gui/sprites/container/slot".into(), rect);
+        let mut batch = HudBatch::new([1280, 720]);
+        let texture = "gui/container/inventory";
+        batch.blit(
+            &atlas,
+            texture,
+            [10.0, 20.0, 176.0, 166.0],
+            [0.0, 0.0],
+            [256.0, 256.0],
+        );
+        let sprite = "gui/sprites/container/slot";
+        batch.blit(
+            &atlas,
+            sprite,
+            [0.0, 0.0, 18.0, 18.0],
+            [0.0, 0.0],
+            [256.0, 256.0],
+        );
+        batch.blit(
+            &atlas,
+            texture,
+            [10.0, 186.0, 176.0, 96.0],
+            [0.0, 126.0],
+            [256.0, 256.0],
+        );
+        assert_eq!(batch.textures, [texture]);
+        // The first quad's bottom right corner: atlas UV for the native draw, its own for the pack.
+        let corner = batch.vertices[2];
+        assert_eq!(corner.pos, [186.0, 186.0]);
+        assert_eq!(
+            corner.uv,
+            [0.5 + 0.25 * 176.0 / 256.0, 0.25 + 0.25 * 166.0 / 256.0]
+        );
+        assert_eq!(corner.glint_uv, [176.0 / 256.0, 166.0 / 256.0]);
+        assert_eq!(corner.core, CORE_BLIT);
+        assert!(batch.vertices[6..12].iter().all(|v| v.core == 0));
+        assert_eq!(batch.vertices[12].glint_uv, [0.0, 126.0 / 256.0]);
+        assert_eq!(batch.vertices[12].core, CORE_BLIT);
+
+        // Clipped, a blit keeps the part of its own UV left.
+        let mut batch = HudBatch::new([1280, 720]);
+        batch.blit(
+            &atlas,
+            texture,
+            [0.0, 0.0, 128.0, 128.0],
+            [0.0, 0.0],
+            [128.0, 128.0],
+        );
+        batch.clip_since(0, 0.0, 0.0, 64.0, 128.0);
+        assert_eq!(batch.vertices[2].pos, [64.0, 128.0]);
+        assert_eq!(batch.vertices[2].glint_uv, [0.5, 1.0]);
+        assert_eq!(batch.vertices[2].core, CORE_BLIT);
+    }
     #[test]
     fn container_origins_use_java_integer_division() {
         // Odd scaled dimensions, odd image sizes and an oversized panel.
@@ -4134,6 +4302,7 @@ texture=wide",
                 game_time: 0.0,
                 blur_at: 0,
                 inline_profiles: Vec::new(),
+                textures: Vec::new(),
             };
             for (image_width, image_height) in [(195, 136), (176, 166), (176, 222)] {
                 assert_eq!(

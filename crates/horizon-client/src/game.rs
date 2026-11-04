@@ -9416,13 +9416,9 @@ impl Game<'_> {
                         h: f32,
                         dx: f32,
                         dy: f32| {
-                if let Some(mut r) = atlas.sprites.get(name).copied() {
-                    let (du, dv) = ((r.u1 - r.u0) / r.w as f32, (r.v1 - r.v0) / r.h as f32);
-                    r.u0 += sx * du;
-                    r.v0 += sy * dv;
-                    r.u1 = r.u0 + w * du;
-                    r.v1 = r.v0 + h * dv;
-                    batch.rect_uv(dx, dy, w, h, r, u32::MAX);
+                if let Some(r) = atlas.sprites.get(name) {
+                    let size = [r.w as f32, r.h as f32];
+                    batch.blit(atlas, name, [dx, dy, w, h], [sx, sy], size);
                 }
             };
             let grey = rgba(64, 64, 64, 255);
@@ -20911,6 +20907,9 @@ fn build_renderer(
     renderer
         .hud
         .set_text_shader(&renderer.device, atlas.text_shader.as_deref());
+    renderer
+        .hud
+        .set_blit_shader(&renderer.device, atlas.blit_shader.as_ref());
     pack.item_renderer
         .prepare_glint_atlas(renderer.device.limits().max_texture_dimension_2d, filtering)?;
     renderer.set_lines_shader(atlas.lines_shader.as_deref());
