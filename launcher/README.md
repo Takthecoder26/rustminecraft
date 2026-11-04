@@ -15,7 +15,10 @@ The opening, then Play ([clip](docs/opening.webm)):
 
 - **Versions**: lists the published builds of horizon-rust/horizon (the current Nightly, the last
   week's, then the releases from before), installs the build for this platform into its own
-  folder, and removes it again.
+  folder, and removes it again. **Import a game build…** takes a `horizon-client` you have (one
+  built on your fork's Actions, or the zip holding it) and installs it as `imported-<date>-<sha>`:
+  a copy of the selected release or Nightly's folder, game files included, with that program as the
+  game. Imported builds are listed apart as unsigned, and no update replaces them.
 - **Play**: prepares resources as `PLAY.txt` describes (your launcher's 26.3 install, the
   26.3 server jar from that version's own json, and Java 25) and copies its sounds from your
   launcher's asset store (`horizon-prepare sounds`; a launcher install without them only
@@ -39,10 +42,13 @@ The opening, then Play ([clip](docs/opening.webm)):
   starts the game. With no install on the computer the Play page offers the download alone and the
   Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: **Mods** and **Shader packs** search Horizon's own registry (a Java instance's mods
-  come from Modrinth), **Resource packs** searches Modrinth, each marked Works, Partly or Doesn't
-  run in Horizon; Modrinth's data packs aren't usable yet and have no tab. Install puts a file in the game folder only after its checksum matches, and a
-  modpack (the sidebar's +) goes to the Modpacks page; installed packs show their source and checksum, with Update,
+- **Mods**: tabs for Mods, Modpacks, Resource packs, Shader packs and Data packs. Mods, Modpacks
+  and Resource packs search Horizon's own registry or Modrinth (CurseForge support is coming soon);
+  Shader packs search the registry, Data packs Modrinth (into the world picked there). A Java
+  instance's files come from Modrinth for its version and loader; on a Horizon instance, Modrinth's
+  Java mods are listed too, each marked Works, Partly or Doesn't run in Horizon. Install puts a file in
+  the game folder only after its SHA-512 matches, and a
+  modpack goes to the Modpacks page; installed packs show their source and checksum, with Update,
   **Update all** and Remove ([docs/mod-browser.md](../docs/mod-browser.md)).
 - **Modpacks**: import a Java modpack (a Modrinth `.mrpack`, a CurseForge zip, or a Prism,
   MultiMC or CurseForge instance folder) and see its coverage report: per mod, ported, partial,
@@ -96,7 +102,7 @@ The opening, then Play ([clip](docs/opening.webm)):
   from the window or `horizon-launcher play` adds to it (`instance list` shows it too). Each
   instance plays the launcher's version, which follows updates, unless the Play page's version
   picker keeps it on another installed one (to keep an old world on the version it was made
-  with); picking the version marked "follows updates" lets it follow again.
+  with); picking the version marked "auto-update" lets it follow again.
 - **Export**: Home's Instance row has **Export…**: the selected instance (or a port) as a `.mrpack`
   (Modrinth's modpack format: resource packs the browser installed from Modrinth are listed by
   their download, the rest is in `overrides/`) or a `.zip` of the game folder's layout, with the
@@ -150,12 +156,14 @@ The opening, then Play ([clip](docs/opening.webm)):
   [NAME]`, `account select <name>` (an account or an offline name), `account forget-offline
   <name>`.
 - **Accent and Home background**: on top of Dark, Light or System, Settings > Launcher picks an
-  accent (Horizon's violet, blue, teal, green, amber, red or pink) and a picture of the player's
-  own behind Home (PNG, JPEG or WebP, cropped to fill; **Landscape** brings Horizon's back). An
-  accent turns the violet tokens to its hue, then darkens or lightens them just enough to keep
-  white on the Play button at 4.5:1 and the accent at 3:1 on every background (a test holds every
-  accent in both looks to it). The picture is copied into the data folder.
-  `horizon-launcher settings accent NAME`, `settings background PATH|default`.
+  accent (Horizon's violet, blue, teal, green, amber, red or pink, any hue, or any colour typed as
+  hex in the dark look) and a picture of the player's own behind Home (PNG, JPEG or WebP, cropped
+  to fill; **Landscape** brings Horizon's back). The dark look wears the colour as is, as the
+  mockup does; in the light look an accent turns the violet tokens to its hue, then darkens or
+  lightens them just enough to keep white on the Play button at 4.5:1 and the accent at 3:1 on
+  every background (a test holds every accent in both looks to it). The picture is copied into the
+  data folder. `horizon-launcher settings accent NAME|#rrggbb|DEGREES`,
+  `settings background PATH|default`.
 - **Language**: English, French, Russian, German, Simplified Chinese, Spanish, Ukrainian and Polish.
   The window follows the system's language unless the player picks one in Settings > Launcher
   (each named in itself); a string a table lacks shows in English. The tables are
@@ -185,9 +193,9 @@ The opening, then Play ([clip](docs/opening.webm)):
   `datapacks/` under its row: what is there (and which the game has turned off), **Add data pack…**,
   and **Remove** (to the trash); a data pack `.zip` dropped on a world goes into it. The game turns
   a new one on when the world opens. From the command line: `horizon-launcher worlds
-  datapack-list|datapack-add|datapack-remove <world> …`. `horizon-launcher mods search --kind datapack`
-  finds them on Modrinth and `mods install <pack> --world <world>` installs one, saying what of it
-  runs in Horizon.
+  datapack-list|datapack-add|datapack-remove <world> …`. The Mods page's **Data packs**
+  tab finds them on Modrinth and installs one into the world picked there (`mods search --kind
+  datapack`, `mods install <pack> --world <world>`), saying what of it runs in Horizon.
 - **Packs**: Home lists the selected instance's resource packs and shader packs, each with a switch.
   The choice is the game's own: `resourcePacks` in options.txt (a pack turned on goes on top, as
   the game's Resource Packs screen does) and `pickedShaderPack` in `horizon-graphics.txt` (one shader
@@ -229,7 +237,8 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
 - **Updates**: Horizon ships only the Nightly (since 2026-10-28, docs/release-flow.md). The
   launcher installs the current one (the `nightly` pre-release, checksums signed for the Nightly
   channel) as `nightly-<date>-<commit>` and selects it when the player was on a Nightly, on the
-  newest release or on nothing; a version picked by hand or pinned by an instance stays. Older
+  newest release or on nothing; a version picked by hand or pinned by an instance stays, and so
+  does an imported build. Older
   Nightlies are removed once nothing plays them. Worlds are never touched: they live in the game's
   folder, not in a version's. The last week's Nightlies (`nightly-<date>`), the `vX.Y.Z`
   releases and the old Alpha pre-releases stay on the Versions page to install by hand, never as
@@ -308,6 +317,16 @@ labelled `feature`) with `horizon-launcher-linux-x86_64.tar.gz`,
 `horizon-launcher-macos-x64.zip` (Intel Macs) and `horizon-launcher-windows-x64.zip`, never marked latest. The version is built in from the tag
 (`HORIZON_LAUNCHER_VERSION`); `Cargo.toml`'s version is only what local builds report.
 
+Windows also publishes `horizon-launcher-setup.exe`: the launcher's own binary under another name, which opens
+a per-user setup instead of the window (no administrator). It copies itself to
+`%LOCALAPPDATA%\Programs\Horizon Launcher\horizon-launcher.exe`, makes the Start menu shortcut (and the
+desktop one if asked) and an entry in *Apps & features*, then starts the copy. `horizon-launcher-setup.exe
+setup --quiet [--dir <folder>] [--desktop-shortcut]` does the same without a window, and
+`horizon-launcher.exe uninstall` (or `... uninstall --quiet [--remove-data]`) takes it all away again: the
+shortcuts, the registry entries and the install folder. The game's folders are never touched, and the
+launcher's data folder only with `--remove-data`. An installed launcher keeps updating itself, so the
+uninstaller at that path is always the newest one.
+
 ## Command line
 
 Generate shell completions without opening the window:
@@ -333,6 +352,7 @@ and don't set `%ERRORLEVEL%` / `$LASTEXITCODE`. Scripts that need the exit code 
     horizon-launcher versions [--installed]       releases on GitHub, or what is installed (* = selected)
     horizon-launcher install <tag|latest>
     horizon-launcher remove <tag>
+    horizon-launcher import-build <path> [--version <tag>] --trust-unsigned   a game program you have, as its own version
     horizon-launcher prepare [--minecraft <dir>] [--version <tag>]
     horizon-launcher play [--version <tag>] [--instance <name>] [--arg <ARG>]...   start the client; --arg passes an extra argument through (repeatable)
     horizon-launcher server [--dir <dir>] [--version <tag>] [--accept-eula]

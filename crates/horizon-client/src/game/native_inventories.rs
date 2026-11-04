@@ -1,4 +1,4 @@
-//! Another player's inventories for server mods (API @API:native_inventories@):
+//! Another player's inventories for server mods (API 132):
 //! what an operator's `/invsee` or `/endersee` needs. A player online is read
 //! and changed live; a player who isn't on the server is read from, and
 //! written to, their file (`players/data/<uuid>.dat`, as the server saves
@@ -154,7 +154,7 @@ enum Side {
     File(Box<Level>),
 }
 
-/// Another player's inventories, for server mods. API @API:native_inventories@.
+/// Another player's inventories, for server mods. API 132.
 #[allow(dead_code)]
 impl Game<'_> {
     /// The player `uuid`'s inventory `kind`: the live one when they are on
@@ -225,6 +225,9 @@ impl Game<'_> {
         if from_uuid == to_uuid && from_kind == to_kind {
             return Err("the same inventory".into());
         }
+        // A just-disconnected player can already be absent from the hub.
+        // Drain before reading or replacing their offline file.
+        let _ = self.finish_player_autosaves(true);
         let a = self.native_inventory_side(from_uuid)?;
         let b = if from_uuid == to_uuid {
             None
@@ -306,7 +309,7 @@ impl Game<'_> {
     /// map is never sent again by the game), so send it again after the
     /// player joins. Use ids far from the world's own (they count up from 0).
     /// False for a player not here, or `colors` not 16384 long.
-    /// API @API:native_inventories@.
+    /// API 132.
     pub(super) fn native_send_map(&mut self, uuid: u128, map_id: i32, colors: &[u8]) -> bool {
         use horizon_protocol::packets::play::{Clientbound, MapItemData, MapPatch};
         if colors.len() != 128 * 128 {

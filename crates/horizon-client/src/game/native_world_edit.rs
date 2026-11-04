@@ -3,9 +3,8 @@
 use super::Game;
 
 /// Which of a column's heights (`Heightmap.Types`) a run's `y` counts from.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NativeHeightmap {
+pub enum NativeHeightmap {
     WorldSurface,
     MotionBlocking,
     MotionBlockingNoLeaves,
@@ -14,22 +13,22 @@ pub(crate) enum NativeHeightmap {
 /// A run: `height` blocks up a column from `y` (from the column's `surface` height when one is
 /// given), set to palette entry `block`, only where filter `only` matches when one is given.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct NativeBlockRun {
-    pub(crate) x: i32,
-    pub(crate) z: i32,
-    pub(crate) y: i32,
-    pub(crate) height: u32,
-    pub(crate) surface: Option<NativeHeightmap>,
-    pub(crate) block: u32,
-    pub(crate) only: Option<u32>,
+pub struct NativeBlockRun {
+    pub x: i32,
+    pub z: i32,
+    pub y: i32,
+    pub height: u32,
+    pub surface: Option<NativeHeightmap>,
+    pub block: u32,
+    pub only: Option<u32>,
 }
 /// A bulk edit: block states and block predicates as commands write them (without NBT), and the runs naming them
 /// by index.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct NativeBlockEdit {
-    pub(crate) palette: Vec<String>,
-    pub(crate) filters: Vec<String>,
-    pub(crate) runs: Vec<NativeBlockRun>,
+pub struct NativeBlockEdit {
+    pub palette: Vec<String>,
+    pub filters: Vec<String>,
+    pub runs: Vec<NativeBlockRun>,
 }
 
 #[allow(dead_code)]
@@ -41,7 +40,7 @@ impl Game<'_> {
     /// Runs in chunks not loaded, and the parts of runs outside the column, are left out. The blocks changed, or
     /// why the edit was left out, with nothing changed: another dimension, a client of a server, a palette entry
     /// or filter that doesn't read or carries NBT (refused), a run naming a palette entry or filter past the end,
-    /// or more than 65536 filters. API @API:native_edit_blocks@.
+    /// or more than 65536 filters. API 126.
     pub(super) fn native_edit_blocks(
         &mut self,
         dimension: &str,

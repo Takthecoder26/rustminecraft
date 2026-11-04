@@ -10,7 +10,7 @@ use horizon_client::{
         chunks::ChunkEncoder,
         data::SyncData,
         entity::EntityState,
-        hub::{HostEvent, HostState, Hub, HubConfig, TickCtx},
+        hub::{HostEvent, Hub, HubConfig, TickCtx},
     },
     world::World,
 };
@@ -172,30 +172,8 @@ struct Server {
 }
 impl Server {
     fn tick(&mut self, entities: &[EntityState]) {
-        let host = HostState {
-            uuid: 42,
-            name: "Host".into(),
-            entity_id: 1,
-            position: [0.5, -59.0, 0.5],
-            yaw: 0.0,
-            pitch: 0.0,
-            head_yaw: 0.0,
-            on_ground: true,
-            game_mode: 1,
-            sneaking: false,
-            sprinting: false,
-            equipment: Default::default(),
-            health: 20.0,
-            shoulders: [None; 2],
-            attributes: Vec::new(),
-            bed: None,
-            living_flags: 0,
-            stuck: (0, 0),
-            body: Default::default(),
-        };
         let mut ctx = TickCtx {
             world: &mut self.world,
-            host: Some(&host),
             entities,
             next_entity: &mut self.next_entity,
             spawn: [8.5, f64::from(MIN_Y + 5), 8.5],
@@ -234,9 +212,16 @@ fn server(resources: &Path) -> Server {
 }
 
 fn server_with(resources: &Path, net: NetConfig) -> Server {
-    let sync = Arc::new(
-        SyncData::load(resources, &horizon_world::loot::PackOverlay::NONE).expect("sync data"),
-    );
+    server_sync(
+        Arc::new(
+            SyncData::load(resources, &horizon_world::loot::PackOverlay::NONE).expect("sync data"),
+        ),
+        net,
+    )
+}
+
+/// A server over already-built sync data (a test's packs layered in).
+fn server_sync(sync: Arc<SyncData>, net: NetConfig) -> Server {
     let lan = Lan::start_with(sync.clone(), net).unwrap();
     let biomes: Vec<String> = sync
         .dynamic
@@ -262,8 +247,7 @@ fn server_with(resources: &Path, net: NetConfig) -> Server {
             hardcore: false,
             view_distance: 3,
             simulation_distance: 3,
-            dedicated: false,
-            integrated: false,
+            integrated: true,
             dimension: "minecraft:overworld".into(),
             seed: 1234,
             max_players: 8,
@@ -434,6 +418,174 @@ fn recipe_settings_packets_update_only_the_players_book_and_survive_save() {
             .is_err()
         );
     }
+}
+
+/// A server whose pack carries recipes with NeoForge's ingredient shapes:
+/// every guest that joins gets the shapes' items, not empty slots — the
+/// book lists the shaped recipe's compound, the furnace's and the
+/// stonecutter's input sets carry it — and no guest is disconnected over
+/// them (#6368).
+#[test]
+fn neoforge_shapes_items_reach_two_guests() {
+    let Some(resources) = resources() else {
+        return;
+    };
+    let compound = r#"{"type":"neoforge:compound",
+        "children":["minecraft:raw_copper","minecraft:redstone"]}"#;
+    let packs = vec![
+        (
+            "advancement/minecraft:recipes/compound_book".to_owned(),
+            vec![
+                br#"{"criteria":{"tick":{"trigger":"minecraft:tick"}},
+                "rewards":{"recipes":["minecraft:compound_book"]}}"#
+                    .to_vec(),
+            ],
+        ),
+        (
+            "recipe/minecraft:compound_book".to_owned(),
+            vec![
+                format!(
+                    r#"{{"type":"minecraft:crafting_shaped","pattern":["X"],
+                "key":{{"X":{compound}}},
+                "result":{{"id":"minecraft:copper_ingot"}}}}"#
+                )
+                .into_bytes(),
+            ],
+        ),
+        (
+            "recipe/minecraft:compound_smelting".to_owned(),
+            vec![
+                format!(
+                    r#"{{"type":"minecraft:smelting","ingredient":{compound},
+                "result":{{"id":"minecraft:copper_ingot"}}}}"#
+                )
+                .into_bytes(),
+            ],
+        ),
+        (
+            "recipe/minecraft:compound_stonecutting".to_owned(),
+            vec![
+                format!(
+                    r#"{{"type":"minecraft:stonecutting","ingredient":{compound},
+                "result":{{"id":"minecraft:copper_ingot"}}}}"#
+                )
+                .into_bytes(),
+            ],
+        ),
+    ];
+    let sync = Arc::new(
+        SyncData::load(
+            &resources,
+            &horizon_world::loot::PackOverlay { files: &packs },
+        )
+        .expect("sync data"),
+    );
+    let (raw_copper, redstone) = (
+        sync.id("minecraft:item", "minecraft:raw_copper").unwrap(),
+        sync.id("minecraft:item", "minecraft:redstone").unwrap(),
+    );
+    let mut s = server_sync(sync, NetConfig::lan(0, "Test - World".into(), 8));
+    let port = s.hub.lan.port;
+    // Guest one joins first and stays while guest two joins and reads its
+    // own join packets, then guest one reads its own.
+    let mut one = run(&mut s, move || connect(port, "CompoundOne", true));
+    let expected = (raw_copper, redstone);
+    let _two_stays = run(&mut s, move || {
+        let mut two = connect(port, "CompoundTwo", true)?;
+        read_join_recipes(&mut two, expected, "guest two")?;
+        Ok(two)
+    });
+    assert_eq!(s.hub.guests.len(), 2, "both guests stay connected");
+    run(&mut s, move || {
+        read_join_recipes(&mut one, expected, "guest one")
+    });
+}
+
+/// Reads a fresh guest's packets until the recipe update and the book add
+/// arrived, checking the compound's items in each: the furnace's input
+/// set, a stonecutting entry's input, and the book entry's requirements.
+fn read_join_recipes(bot: &mut Bot, expected: (i32, i32), who: &str) -> Result<(), String> {
+    let (raw_copper, redstone) = expected;
+    let mut sets_ok = false;
+    let mut book_ok = false;
+    for _ in 0..400 {
+        let packet = bot.recv_play().map_err(|e| format!("{who}: {e}"))?;
+        match packet {
+            C::Unknown(id, payload)
+                if id == horizon_protocol::ids::play::clientbound::UPDATE_RECIPES =>
+            {
+                let mut r = horizon_protocol::buf::Reader::new(&payload);
+                let mut furnace_input = None;
+                let mut stonecutting = Vec::new();
+                for _ in 0..r.varint().map_err(|e| e.to_string())? {
+                    let key = r.string(64).map_err(|e| e.to_string())?;
+                    let ids: Vec<i32> = (0..r.varint().map_err(|e| e.to_string())?)
+                        .map(|_| r.varint().unwrap_or(-1))
+                        .collect();
+                    if key == "minecraft:furnace_input" {
+                        furnace_input = Some(ids);
+                    }
+                }
+                let furnace_input = furnace_input.expect("furnace_input set");
+                assert!(
+                    furnace_input.contains(&raw_copper) && furnace_input.contains(&redstone),
+                    "{who}: furnace_input holds the compound: first ids {:?}",
+                    &furnace_input[..furnace_input.len().min(8)]
+                );
+                for _ in 0..r.varint().map_err(|e| e.to_string())? {
+                    if let horizon_protocol::packets::recipes::HolderSet::Items(ids) =
+                        horizon_protocol::packets::recipes::HolderSet::read(&mut r)
+                            .map_err(|e| e.to_string())?
+                    {
+                        stonecutting.push(ids);
+                    }
+                    // The result's ItemStackSlotDisplay: its type, the item,
+                    // the count and the two empty component lists.
+                    for _ in 0..5 {
+                        r.varint().map_err(|e| e.to_string())?;
+                    }
+                }
+                assert!(
+                    stonecutting
+                        .iter()
+                        .any(|ids| ids.contains(&raw_copper) && ids.contains(&redstone)),
+                    "{who}: a stonecutting input holds the compound"
+                );
+                sets_ok = true;
+            }
+            C::RecipeBookAdd(add) => {
+                // sendInitialRecipeBook's own add arrives first, empty
+                // until the first tick rewards its recipes.
+                if add.entries.is_empty() {
+                    continue;
+                }
+                let compound = add.entries.iter().any(|e| {
+                    e.requirements.as_deref().unwrap_or(&[]).iter().any(|set| {
+                        matches!(set,
+                            horizon_protocol::packets::recipes::HolderSet::Items(ids)
+                            if ids.contains(&raw_copper) && ids.contains(&redstone))
+                    })
+                });
+                assert!(
+                    compound,
+                    "{who}: the book lists the compound recipe ({} entries: {:?})",
+                    add.entries.len(),
+                    add.entries
+                        .iter()
+                        .map(|e| e.requirements.clone())
+                        .collect::<Vec<_>>()
+                );
+                book_ok = true;
+            }
+            _ => {}
+        }
+        if sets_ok && book_ok {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "{who}: recipes {sets_ok} book {book_ok} never both arrived"
+    ))
 }
 
 #[test]
@@ -743,6 +895,29 @@ fn status_and_join() {
     // ServerStatus.CODEC writes a plain literal MOTD as a bare string.
     assert_eq!(v["description"], "Test - World");
 
+    // `DedicatedServer.setRepliesToStatus`: disabling it closes a fresh status handshake.
+    s.hub.lan.shared.set_enable_status(false);
+    let closed = run(&mut s, move || {
+        let mut c = Connection::connect("127.0.0.1", port, Duration::from_secs(5))
+            .map_err(|e| e.to_string())?;
+        c.send(
+            &handshake::Serverbound::Intention(handshake::Intention {
+                protocol: PROTOCOL_VERSION,
+                host: "127.0.0.1".into(),
+                port,
+                intent: handshake::STATUS,
+            })
+            .encode(),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(c.recv().is_err())
+    });
+    assert!(
+        closed,
+        "status handshake should close when replies are disabled"
+    );
+    s.hub.lan.shared.set_enable_status(true);
+
     // Join, receive the world, place a block, see another player arrive.
     let report = run(&mut s, move || {
         let mut bot = connect(port, "Steve", true)?;
@@ -776,7 +951,7 @@ fn status_and_join() {
                 // forceGameTimeSynchronization sends no clocks and may come first.
                 C::SetTime(t) if !t.clocks.is_empty() => time = true,
                 C::PlayerInfoUpdate(u) => {
-                    info |= u.entries.iter().any(|e| e.name.as_deref() == Some("Host"));
+                    info |= u.entries.iter().any(|e| e.name.as_deref() == Some("Steve"));
                 }
                 C::Commands(_) => commands = true,
                 C::LevelChunkWithLight(l) => {
@@ -855,16 +1030,20 @@ fn guests_see_each_other_and_the_world_entities() {
         head_yaw: 0.0,
         on_ground: true,
         velocity: [0.0; 3],
+        minecart_steps: None,
         data: 0,
         meta: Vec::new(),
         defaults: Vec::new(),
         equipment: Vec::new(),
         attributes: Vec::new(),
         precise: false,
+        vertical_collision: false,
+        horizontal_collision: false,
         needs_sync: false,
         leash: None,
         spectator: false,
         watching: false,
+        hidden: None,
     };
     let first = thread::spawn(move || {
         let mut bot = connect(port, "Alex", false)?;
@@ -1280,7 +1459,7 @@ fn the_prediction_records_each_client_tick_and_the_server_ticks_it_had_seen() {
 /// with no `BlockEntityData` for one whose mod gives no tag.
 #[test]
 fn a_synced_mod_block_entity_reaches_the_chunks_players_once_a_tick() {
-    use horizon_client::containers::{BlockEntity, ModBlockEntity};
+    use horizon_client::containers::{BlockEntity, ModBlockEntity, ModBlockEntityFields};
     use horizon_world::nbt::{Compound, JavaString, Tag};
     let Some(resources) = resources() else {
         return;
@@ -1309,10 +1488,10 @@ fn a_synced_mod_block_entity_reaches_the_chunks_players_once_a_tick() {
         s.world
             .set(pos.0, pos.1, pos.2, BlockStateId(MACHINE))
             .unwrap();
-        let mut machine = ModBlockEntity {
+        let mut machine = ModBlockEntity::new(ModBlockEntityFields {
             id: "test:machine".into(),
-            ..ModBlockEntity::default()
-        };
+            ..Default::default()
+        });
         if let Some(on) = on {
             machine.nbt.insert("on".into(), Tag::Byte(on));
         }
@@ -1411,7 +1590,6 @@ fn a_respawned_guest_is_immune_until_its_client_loads_the_world() {
     let at = [8.5, f64::from(MIN_Y + 5), 8.5];
     let ctx = TickCtx {
         world: &mut s.world,
-        host: None,
         entities: &[],
         next_entity: &mut s.next_entity,
         spawn: at,
