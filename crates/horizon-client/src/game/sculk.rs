@@ -69,6 +69,132 @@ struct Steps {
     on_ground: bool,
     in_water: bool,
 }
+impl Steps {
+    /// An entity's first entry: nothing has moved it yet.
+    fn first(at: [f64; 3], on_ground: bool, in_water: bool) -> Self {
+        Self {
+            move_dist: 0.0,
+            next_step: 1.0,
+            last: at,
+            on_ground,
+            in_water,
+        }
+    }
+}
+/// `Entity.checkFallDamage`: touching down after falling.
+fn touches_down(on_ground: bool, was_on_ground: bool, dy: f64, in_water: bool) -> bool {
+    on_ground && (!was_on_ground || dy < -1.0e-6) && dy < 0.0 && !in_water
+}
+/// `Entity.move`'s distance for `moveDist`: a climber counts its height too.
+fn travelled(dx: f64, dy: f64, dz: f64, climbable: bool) -> f32 {
+    if climbable {
+        ((dx * dx + dy * dy + dz * dz).sqrt() * f64::from(0.6f32)) as f32
+    } else {
+        ((dx * dx + dz * dz).sqrt() * f64::from(0.6f32)) as f32
+    }
+}
+/// Whether a sculk state table holds `state`.
+fn table_holds(table: &[bool], state: BlockStateId) -> bool {
+    table.get(state.0 as usize).copied().unwrap_or(false)
+}
+/// A living mob as the sculk walk reads it, taken before the walk.
+#[derive(Clone, Copy)]
+struct MobMove {
+    id: u32,
+    at: [f64; 3],
+    on_ground: bool,
+    in_water: bool,
+    species: Species,
+    damaged: Option<i64>,
+    vehicle: Option<u32>,
+    age: u32,
+    resting: bool,
+}
+impl MobMove {
+    fn of(m: &Mob) -> Self {
+        Self {
+            id: m.id,
+            at: [m.position.x, m.position.y, m.position.z],
+            on_ground: m.on_ground,
+            in_water: m.fluids.in_water,
+            species: m.species(),
+            damaged: m.last_damage.map(|(_, t)| t),
+            vehicle: m.extra.mount,
+            age: m.age,
+            resting: m.species() == Species::Bat && horizon_client::mobs::bat::resting(m),
+        }
+    }
+}
+/// What classifying a mob reads: nothing of `Game` itself, so workers can
+/// share it.
+#[derive(Clone, Copy)]
+struct QuietView<'a> {
+    world: &'a horizon_client::world::World,
+    facts: &'a horizon_client::blocks::BlockFacts,
+    tables: &'a Tables,
+    steps: &'a FxHashMap<Who, Steps>,
+    mounts: &'a FxHashMap<Who, (u32, [f64; 3])>,
+    damaged: &'a FxHashMap<u32, i64>,
+}
+impl QuietView<'_> {
+    /// A mob's new `Steps` when all its turn in the walk would do is store
+    /// them: no redstone ore underfoot, no vehicle or mounts entry, no
+    /// hit_ground, splash, step, swim or flap, and unchanged damage. None
+    /// leaves it to the walk's own code. Each answer holds only until an event
+    /// writes a block.
+    fn quiet_steps(&self, m: &MobMove) -> Option<Steps> {
+        let who = Who::Mob(m.id);
+        // A shulker keeps no steps; a flap is decided by the walk.
+        if m.vehicle.is_some()
+            || self.mounts.contains_key(&who)
+            || m.species == Species::Shulker
+            || flaps(m.species, m.resting, m.on_ground, m.age)
+            || m.damaged
+                .is_some_and(|t| self.damaged.get(&m.id) != Some(&t))
+        {
+            return None;
+        }
+        let previous = self
+            .steps
+            .get(&who)
+            .copied()
+            .unwrap_or_else(|| Steps::first(m.at, m.on_ground, m.in_water));
+        let (dx, dy, dz) = (
+            m.at[0] - previous.last[0],
+            m.at[1] - previous.last[1],
+            m.at[2] - previous.last[2],
+        );
+        if touches_down(m.on_ground, previous.on_ground, dy, m.in_water)
+            || (m.in_water && !previous.in_water)
+        {
+            return None;
+        }
+        // getOnPosLegacy: what `step_on_redstone_ore` and the footstep read.
+        let state = self.world.block(
+            m.at[0].floor() as i32,
+            (m.at[1] - 0.2).floor() as i32,
+            m.at[2].floor() as i32,
+        );
+        if m.on_ground && table_holds(&self.tables.redstone_ore, state) {
+            return None;
+        }
+        let climbable = table_holds(&self.tables.climbable, state);
+        let move_dist = previous.move_dist + travelled(dx, dy, dz, climbable);
+        if move_dist > previous.next_step
+            && !self.facts.is_air(state)
+            && (m.on_ground || climbable || m.in_water)
+        {
+            return None;
+        }
+        Some(Steps {
+            move_dist,
+            next_step: previous.next_step,
+            last: m.at,
+            on_ground: m.on_ground,
+            in_water: m.in_water,
+        })
+    }
+}
 #[derive(Default)]
 pub(super) struct PlayerEvents {
     steps: Option<Steps>,
@@ -411,7 +537,7 @@ impl Game<'_> {
             .unwrap_or(0)
     }
     fn state_is(&self, table: &[bool], state: BlockStateId) -> bool {
-        table.get(state.0 as usize).copied().unwrap_or(false)
+        table_holds(table, state)
     }
     fn entity_for_kind(kind: u8) -> Option<SculkEntity> {
         Some(SculkEntity::new(match kind {
@@ -1825,74 +1951,61 @@ impl Game<'_> {
         Ok(!block_item)
     }
 
-    fn tick_mob_sculk_events(&mut self) {
-        let snapshot: Vec<(
-            u32,
-            [f64; 3],
-            bool,
-            bool,
-            Species,
-            Option<i64>,
-            Option<u32>,
-            u32,
-            bool,
-        )> = self
-            .mob_slots(|m| m.alive())
-            .into_iter()
-            .map(|slot| {
-                let m = &self.simulation.mobs[slot];
-                (
-                    m.id,
-                    [m.position.x, m.position.y, m.position.z],
-                    m.on_ground,
-                    m.fluids.in_water,
-                    m.species(),
-                    m.last_damage.map(|(_, t)| t),
-                    m.extra.mount,
-                    m.age,
-                    m.species() == Species::Bat && horizon_client::mobs::bat::resting(m),
-                )
+    /// Every living mob in list order, and on the workers its `Steps` when
+    /// it is quiet (`QuietView::quiet_steps`). Without workers none is
+    /// classified, nor before the walk has built the tables: until then
+    /// `post_game_event` tells nobody, and which event comes first decides that.
+    fn mob_moves(&self) -> Vec<(MobMove, Option<Steps>)> {
+        let mobs = &self.simulation.mobs;
+        let regions = self.simulation.regions.regions().len();
+        let executor = self
+            .sculk
+            .tables
+            .built
+            .then(|| self.simulation_server.executor(regions, mobs.len()))
+            .flatten();
+        let Some(executor) = executor else {
+            return self
+                .mob_slots(|m| m.alive())
+                .into_iter()
+                .map(|slot| (MobMove::of(&mobs[slot]), None))
+                .collect();
+        };
+        let view = QuietView {
+            world: &self.simulation.world,
+            facts: self.res.facts(),
+            tables: &self.sculk.tables,
+            steps: &self.sculk.steps,
+            mounts: &self.sculk.mounts,
+            damaged: &self.sculk.damaged,
+        };
+        executor
+            .map(mobs, |_, m| {
+                m.alive().then(|| {
+                    let mob = MobMove::of(m);
+                    (mob, view.quiet_steps(&mob))
+                })
             })
-            .collect();
-        for (id, at, on_ground, in_water, species, damaged, vehicle, age, resting) in snapshot {
-            if on_ground {
-                self.step_on_redstone_ore(at, false, false);
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+    /// What can make a classification stale: a block written, or a chunk
+    /// come or gone.
+    fn block_stamp(&self) -> (u64, u64) {
+        let world = &self.simulation.world;
+        (world.revision, world.chunks.membership_revision())
+    }
+    fn tick_mob_sculk_events(&mut self) {
+        let classified_at = self.block_stamp();
+        let mut classified = true;
+        for (mob, quiet) in self.mob_moves() {
+            if classified && let Some(steps) = quiet {
+                self.sculk.steps.insert(Who::Mob(mob.id), steps);
+                continue;
             }
-            // A mob first seen already riding raised its event when it spawned.
-            let seen = vehicle.is_some() && self.sculk.steps.contains_key(&Who::Mob(id));
-            self.mount_events(Who::Mob(id), vehicle, seen);
-            let emits = !matches!(species, Species::Shulker);
-            if emits {
-                let warden = species == Species::Warden;
-                self.entity_motion_events(
-                    Who::Mob(id),
-                    at,
-                    on_ground,
-                    in_water,
-                    false,
-                    false,
-                    warden,
-                );
-                // Entity.processFlappingMovement: what flaps this move flaps
-                // over air only (the mob's own `MobEvent::GameEvent` is not
-                // read here).
-                if flaps(species, resting, on_ground, age) {
-                    let below = self.simulation.world.block(
-                        at[0].floor() as i32,
-                        (at[1] - 1.0e-5).floor() as i32,
-                        at[2].floor() as i32,
-                    );
-                    if self.res.facts().is_air(below) {
-                        self.post_entity_event("minecraft:flap", Who::Mob(id));
-                    }
-                }
-            }
-            if let Some(t) = damaged {
-                let seen = self.sculk.damaged.insert(id, t);
-                if seen != Some(t) {
-                    self.post_entity_event("minecraft:entity_damage", Who::Mob(id));
-                }
-            }
+            self.mob_sculk_events(mob);
+            classified = classified && self.block_stamp() == classified_at;
         }
         let alive: FxHashSet<u32> = self.simulation.mobs.iter().map(|m| m.id).collect();
         self.sculk.damaged.retain(|id, _| alive.contains(id));
@@ -1904,6 +2017,50 @@ impl Game<'_> {
             Who::Player => true,
             Who::Mob(id) => alive.contains(id),
         });
+    }
+    /// One mob's turn in the walk.
+    fn mob_sculk_events(&mut self, mob: MobMove) {
+        let MobMove {
+            id,
+            at,
+            on_ground,
+            in_water,
+            species,
+            damaged,
+            vehicle,
+            age,
+            resting,
+        } = mob;
+        if on_ground {
+            self.step_on_redstone_ore(at, false, false);
+        }
+        // A mob first seen already riding raised its event when it spawned.
+        let seen = vehicle.is_some() && self.sculk.steps.contains_key(&Who::Mob(id));
+        self.mount_events(Who::Mob(id), vehicle, seen);
+        let emits = !matches!(species, Species::Shulker);
+        if emits {
+            let warden = species == Species::Warden;
+            self.entity_motion_events(Who::Mob(id), at, on_ground, in_water, false, false, warden);
+            // Entity.processFlappingMovement: what flaps this move flaps
+            // over air only (the mob's own `MobEvent::GameEvent` is not
+            // read here).
+            if flaps(species, resting, on_ground, age) {
+                let below = self.simulation.world.block(
+                    at[0].floor() as i32,
+                    (at[1] - 1.0e-5).floor() as i32,
+                    at[2].floor() as i32,
+                );
+                if self.res.facts().is_air(below) {
+                    self.post_entity_event("minecraft:flap", Who::Mob(id));
+                }
+            }
+        }
+        if let Some(t) = damaged {
+            let seen = self.sculk.damaged.insert(id, t);
+            if seen != Some(t) {
+                self.post_entity_event("minecraft:entity_damage", Who::Mob(id));
+            }
+        }
     }
     /// Where the vehicle `id` stands: a mob, boat, minecart or cushion.
     fn vehicle_position(&mut self, id: u32) -> Option<[f64; 3]> {
@@ -1975,13 +2132,7 @@ impl Game<'_> {
         warden: bool,
     ) {
         self.sculk_prepare();
-        let entry = self.sculk.steps.entry(who).or_insert(Steps {
-            move_dist: 0.0,
-            next_step: 1.0,
-            last: at,
-            on_ground,
-            in_water,
-        });
+        let entry = (self.sculk.steps.entry(who)).or_insert(Steps::first(at, on_ground, in_water));
         let previous = *entry;
         entry.last = at;
         entry.on_ground = on_ground;
@@ -1991,8 +2142,7 @@ impl Game<'_> {
             at[1] - previous.last[1],
             at[2] - previous.last[2],
         );
-        // Entity.checkFallDamage: touching down after falling.
-        if on_ground && (!previous.on_ground || dy < -1.0e-6) && dy < 0.0 && !in_water {
+        if touches_down(on_ground, previous.on_ground, dy, in_water) {
             self.post_entity_event("minecraft:hit_ground", who);
         }
         // Entity.updateInWaterStateAndDoFluidPushing: entering water splashes.
@@ -2003,7 +2153,6 @@ impl Game<'_> {
         if flying || discrete {
             return;
         }
-        let horizontal = ((dx * dx + dz * dz).sqrt() * f64::from(0.6f32)) as f32;
         let block = (
             at[0].floor() as i32,
             (at[1] - 0.2).floor() as i32,
@@ -2012,11 +2161,7 @@ impl Game<'_> {
         let state = self.simulation.world.block(block.0, block.1, block.2);
         let air = self.res.facts().is_air(state);
         let climbable = self.state_is(&self.sculk.tables.climbable, state);
-        let travelled = if climbable {
-            ((dx * dx + dy * dy + dz * dz).sqrt() * f64::from(0.6f32)) as f32
-        } else {
-            horizontal
-        };
+        let travelled = travelled(dx, dy, dz, climbable);
         let Some(entry) = self.sculk.steps.get_mut(&who) else {
             return;
         };
@@ -2197,6 +2342,340 @@ mod tests {
         game.simulation.mobs[0].removed = true;
         game.simulation.mobs[0].health = 0.0;
         assert_eq!(post(&mut game), [2], "the dead hear nothing");
+    }
+
+    /// One tick of a scripted mob.
+    #[derive(Clone, Copy)]
+    struct Pose {
+        at: [f64; 3],
+        ground: bool,
+        water: bool,
+        vehicle: Option<u32>,
+        hurt: Option<i64>,
+        age: u32,
+    }
+    fn pose(x: f64, y: f64, z: f64, ground: bool) -> Pose {
+        Pose {
+            at: [x, y, z],
+            ground,
+            water: false,
+            vehicle: None,
+            hurt: None,
+            age: 1,
+        }
+    }
+    struct Scripted {
+        id: u32,
+        kind: &'static str,
+        make: fn(&mut Mob),
+        poses: [Pose; 4],
+    }
+    fn scripted(id: u32, kind: &'static str, poses: [Pose; 4]) -> Scripted {
+        Scripted {
+            id,
+            kind,
+            make: |_| {},
+            poses,
+        }
+    }
+    /// A fresh level holding `blocks` and the script's mobs.
+    fn stage(
+        game: &mut Game<'_>,
+        workers: usize,
+        blocks: &[((i32, i32, i32), BlockStateId)],
+        script: &[Scripted],
+    ) {
+        game.simulation_server.force_workers(workers);
+        let air = game.res.facts().air;
+        game.simulation.world = horizon_client::world::World::new(air, 0);
+        let chunk = horizon_client::chunk::Chunk::empty(0, 0);
+        game.simulation
+            .world
+            .chunks
+            .insert((0, 0), std::sync::Arc::new(chunk));
+        for &((x, y, z), state) in blocks {
+            game.simulation.world.set(x, y, z, state).unwrap();
+        }
+        let revision = game.simulation.world.chunks.membership_revision();
+        game.simulation
+            .regions
+            .rebuild(revision, std::iter::once((0, 0)));
+        game.simulation.mobs = Default::default();
+        for s in script {
+            let kind = game.res.mob_types().get(s.kind).cloned().unwrap();
+            let at = horizon_core::geometry::Vec3::new(0.0, 100.0, 0.0);
+            let mut m = Mob::new(s.id, kind, at, 0.0);
+            (s.make)(&mut m);
+            game.simulation.mobs.push(m);
+        }
+        game.sculk.steps.clear();
+        game.sculk.mounts.clear();
+        game.sculk.damaged.clear();
+        let regions = game.simulation.regions.regions().len();
+        let has_executor = game
+            .simulation_server
+            .executor(regions, script.len())
+            .is_some();
+        assert_eq!(has_executor, workers > 0);
+    }
+    /// Puts every mob where the script has it this tick.
+    fn pose_mobs(game: &mut Game<'_>, script: &[Scripted], tick: usize) {
+        for s in script {
+            let p = s.poses[tick];
+            let m = (game.simulation.mobs.iter_mut())
+                .find(|m| m.id == s.id)
+                .unwrap();
+            m.position = horizon_core::geometry::Vec3::new(p.at[0], p.at[1], p.at[2]);
+            m.on_ground = p.ground;
+            m.fluids.in_water = p.water;
+            m.extra.mount = p.vehicle;
+            m.age = p.age;
+            m.last_damage = p.hurt.map(|t| (horizon_client::mobs::Damage::fall(), t));
+        }
+    }
+    fn steps_text(game: &Game<'_>) -> Vec<String> {
+        let mut steps: Vec<String> = (game.sculk.steps.iter())
+            .map(|(who, s)| format!("{who:?} {s:?}"))
+            .collect();
+        steps.sort();
+        steps
+    }
+    /// The events and every tick's `Steps` of the script, on `workers`.
+    fn run_script(
+        game: &mut Game<'_>,
+        workers: usize,
+        blocks: &[((i32, i32, i32), BlockStateId)],
+        script: &[Scripted],
+    ) -> (Vec<String>, Vec<Vec<String>>) {
+        stage(game, workers, blocks, script);
+        super::super::dispense_fixture::start_recording();
+        let mut steps = Vec::new();
+        for tick in 0..4 {
+            pose_mobs(game, script, tick);
+            game.tick_mob_sculk_events();
+            steps.push(steps_text(game));
+        }
+        (super::super::dispense_fixture::stop_recording(), steps)
+    }
+
+    /// What workers call quiet stores what the walk's own code stores, and
+    /// the rest raises the same events in the same order, whatever the mob
+    /// is doing.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn pool_and_serial_raise_the_same_events_and_keep_the_same_steps() {
+        use crate::game::{Audio, Options, Progress, Settings, load_resources};
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.sculk_prepare();
+        let registry = game.pack.assets.registry;
+        let state = |name: &str| registry.default_state(name).unwrap();
+        let (stone, ladder, water, ore) = (
+            state("minecraft:stone"),
+            state("minecraft:ladder"),
+            state("minecraft:water"),
+            state("minecraft:redstone_ore"),
+        );
+
+        let mut blocks = Vec::new();
+        // Rows of floor; 4, 13 and 14 hang over air.
+        for z in [0, 1, 2, 5, 7, 8, 9, 10, 11, 12, 15] {
+            blocks.extend((0..16).map(|x| ((x, 99, z), stone)));
+        }
+        blocks.extend((100..108).map(|y| ((2, y, 3), ladder)));
+        blocks.extend((0..16).map(|x| ((x, 100, 6), water)));
+        blocks.push(((8, 99, 8), ore));
+        blocks.push(((1, 99, 15), ore));
+
+        let walk = |z: f64, ground: bool, y: f64, xs: [f64; 4]| xs.map(|x| pose(x, y, z, ground));
+        let still = |z: f64| walk(z, true, 100.0, [1.5; 4]);
+        let far = [1.5, 3.5, 5.5, 7.5];
+        let mut water_row = walk(6.5, false, 100.2, [1.5, 1.5, 3.5, 5.5]);
+        for p in &mut water_row[1..] {
+            p.water = true;
+        }
+        let mut riding = still(9.5);
+        riding[1].vehicle = Some(2);
+        riding[2].vehicle = Some(2);
+        let mut first_seen_riding = still(10.5);
+        first_seen_riding[0].vehicle = Some(2);
+        first_seen_riding[1].vehicle = Some(2);
+        let mut hurt = still(11.5);
+        hurt[1].hurt = Some(50);
+        hurt[2].hurt = Some(50);
+        hurt[3].hurt = Some(60);
+        let mut bee = still(13.5).map(|p| Pose { ground: false, ..p });
+        for (tick, p) in bee.iter_mut().enumerate() {
+            p.age = tick as u32;
+        }
+        let mut bat = still(14.5).map(|p| Pose { ground: false, ..p });
+        for (p, age) in bat.iter_mut().zip([10, 11, 20, 21]) {
+            p.age = age;
+        }
+        let mut landing = still(7.5);
+        landing[0] = pose(1.5, 103.0, 7.5, false);
+        let script = [
+            // Walks too little to step; then one that steps.
+            scripted(
+                1,
+                "minecraft:zombie",
+                walk(1.5, true, 100.0, [1.5, 1.6, 1.7, 1.8]),
+            ),
+            scripted(2, "minecraft:zombie", walk(2.5, true, 100.0, far)),
+            // Climbing: its height counts and the ladder takes the step.
+            scripted(
+                3,
+                "minecraft:zombie",
+                [
+                    pose(2.5, 100.5, 3.5, false),
+                    pose(2.5, 102.5, 3.5, false),
+                    pose(2.5, 104.5, 3.5, false),
+                    pose(2.5, 106.5, 3.5, false),
+                ],
+            ),
+            // A step due, with air below and with a block below off the ground.
+            scripted(4, "minecraft:zombie", walk(4.5, false, 100.0, far)),
+            scripted(5, "minecraft:zombie", walk(5.5, false, 100.1, far)),
+            scripted(6, "minecraft:zombie", water_row),
+            scripted(7, "minecraft:zombie", landing),
+            // Onto the ore on the third tick: the write comes mid-pass.
+            scripted(
+                8,
+                "minecraft:zombie",
+                walk(8.5, true, 100.0, [1.5, 1.5, 8.5, 8.5]),
+            ),
+            scripted(9, "minecraft:zombie", riding),
+            scripted(10, "minecraft:zombie", first_seen_riding),
+            scripted(11, "minecraft:zombie", hurt),
+            scripted(12, "minecraft:shulker", still(12.5)),
+            scripted(13, "minecraft:bee", bee),
+            scripted(14, "minecraft:bat", bat),
+            Scripted {
+                id: 15,
+                kind: "minecraft:zombie",
+                make: |m| m.health = 0.0,
+                poses: walk(15.5, true, 100.0, [1.5; 4]),
+            },
+            scripted(16, "minecraft:zombie", still(0.5)),
+            // Awake, where 14 has rested since it spawned.
+            Scripted {
+                id: 17,
+                kind: "minecraft:bat",
+                make: |m| horizon_client::mobs::bat::set_resting(m, false),
+                poses: bat,
+            },
+        ];
+
+        let serial = run_script(&mut game, 0, &blocks, &script);
+        // By hand: what the script above must raise.
+        let count = |event: &str| (serial.0.iter()).filter(|l| l.ends_with(event)).count();
+        assert_eq!(
+            count(" minecraft:step"),
+            7,
+            "2, 3 and the ore: {:#?}",
+            serial.0
+        );
+        assert_eq!(count(" minecraft:splash"), 1);
+        assert_eq!(count(" minecraft:swim"), 2);
+        assert_eq!(count(" minecraft:hit_ground"), 1);
+        assert_eq!(count(" minecraft:entity_mount"), 1);
+        assert_eq!(count(" minecraft:entity_dismount"), 2);
+        assert_eq!(count(" minecraft:entity_damage"), 2);
+        assert_eq!(count(" minecraft:flap"), 4, "the bee and the awake bat");
+        let lit = game.simulation.world.block(8, 99, 8);
+        assert_ne!(lit, ore, "the mob on the ore lit it");
+        assert_eq!(
+            game.simulation.world.block(1, 99, 15),
+            ore,
+            "the dead don't"
+        );
+        assert!(
+            !serial.1[3].iter().any(|s| s.contains("Mob(12)")),
+            "no shulker steps"
+        );
+        assert!(
+            !serial.1[3].iter().any(|s| s.contains("Mob(15)")),
+            "nor the dead"
+        );
+
+        for workers in [1, 4] {
+            let pool = run_script(&mut game, workers, &blocks, &script);
+            assert_eq!(pool.0, serial.0, "events on {workers} workers");
+            assert_eq!(pool.1, serial.1, "steps on {workers} workers");
+        }
+
+        // A block changed mid-pass. Lighting the ore makes it climbable here,
+        // so the mob hanging over it, called quiet before the write, now steps.
+        let lit_ore = (0..registry.len() as u32)
+            .map(BlockStateId)
+            .find(|&id| {
+                &*game.res.facts().get(id).name == "minecraft:redstone_ore"
+                    && registry
+                        .state(id)
+                        .is_some_and(|s| s.properties.get("lit").is_some_and(|v| v == "true"))
+            })
+            .unwrap();
+        game.sculk.tables.climbable[lit_ore.0 as usize] = true;
+        let mut blocks: Vec<_> = (0..16).map(|x| ((x, 99, 2), stone)).collect();
+        blocks.push(((4, 99, 2), ore));
+        let lights = [(1.5, 100.0, true), (4.5, 100.0, true)];
+        let hangs = [(2.5, 100.1, false), (4.5, 100.1, false)];
+        let row = |ticks: [(f64, f64, bool); 2]| {
+            let [a, b] = ticks.map(|(x, y, ground)| pose(x, y, 2.5, ground));
+            [a, b, b, b]
+        };
+        let script = [
+            scripted(1, "minecraft:zombie", row(lights)),
+            scripted(2, "minecraft:zombie", row(hangs)),
+            scripted(3, "minecraft:zombie", still(2.5)),
+        ];
+        let serial = run_script(&mut game, 0, &blocks, &script);
+        let steps = (serial.0.iter()).filter(|l| l.as_str() == "G 4,100,2 minecraft:step");
+        assert_eq!(
+            steps.count(),
+            2,
+            "both, on the second tick: {:#?}",
+            serial.0
+        );
+        for workers in [1, 4] {
+            let pool = run_script(&mut game, workers, &blocks, &script);
+            assert_eq!(pool.0, serial.0, "events on {workers} workers");
+            assert_eq!(pool.1, serial.1, "steps on {workers} workers");
+            // The classification this guards against, on that tick.
+            stage(&mut game, workers, &blocks, &script);
+            pose_mobs(&mut game, &script, 0);
+            game.tick_mob_sculk_events();
+            pose_mobs(&mut game, &script, 1);
+            let moves = game.mob_moves();
+            assert!(moves[0].1.is_none(), "the mob on the ore");
+            assert!(moves[1].1.is_some(), "called quiet before the write");
+        }
+        game.sculk.tables.climbable[lit_ore.0 as usize] = false;
     }
 
     /// Retaining keeps the insertion order and the membership in step.

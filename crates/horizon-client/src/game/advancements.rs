@@ -452,6 +452,11 @@ impl Game<'_> {
     }
     /// The player as predicates see it, with what it looks at when `looking`.
     fn player_entity_looking(&self, looking: bool) -> EntityView {
+        self.player_entity_with(looking, true)
+    }
+    /// The player, with what it looks at when `looking`, and with the
+    /// passengers of its vehicle and of what it looks at when `passengers`.
+    fn player_entity_with(&self, looking: bool, passengers: bool) -> EntityView {
         let Some(p) = self.player.as_ref() else {
             return EntityView::default();
         };
@@ -466,13 +471,13 @@ impl Game<'_> {
                 .mobs
                 .iter()
                 .find(|m| m.id == id)
-                .map(|m| Box::new(self.mob_entity(m)))
+                .map(|m| Box::new(self.mob_entity_with(m, passengers)))
                 .or_else(|| {
                     self.simulation
                         .boats
                         .iter()
                         .find(|b| b.id == id)
-                        .map(|b| Box::new(self.boat_entity(b)))
+                        .map(|b| Box::new(self.boat_entity(b, passengers)))
                 })
         });
         EntityView {
@@ -503,7 +508,7 @@ impl Game<'_> {
             // Vanilla looks for it inside PlayerPredicate.matches whatever the
             // trigger; skipped for a tick or location whose criteria can't ask.
             looking_at: looking
-                .then(|| self.looking_at_entity().map(Box::new))
+                .then(|| self.looking_at_entity(passengers).map(Box::new))
                 .flatten(),
             ..Default::default()
         }
@@ -518,23 +523,32 @@ impl Game<'_> {
             ..Default::default()
         })
     }
-    /// A boat as the predicates see it: its type, and its passengers (the
-    /// mobs seated on it, then the player riding it).
-    pub(super) fn boat_entity(&self, b: &super::boats::Boat) -> EntityView {
+    /// A boat as the predicates see it: its type, and when `passengers` its
+    /// passengers (the mobs seated on it, then the player riding it).
+    fn boat_entity(&self, b: &super::boats::Boat, passengers: bool) -> EntityView {
         EntityView {
             kind: b.entity_type(),
             position: [b.position.x, b.position.y, b.position.z],
             on_ground: b.on_ground,
-            passengers: self
-                .simulation
-                .mobs
-                .iter()
-                .filter(|m| m.extra.mount == Some(b.id))
-                .map(|m| self.mob_entity(m))
-                .chain(self.rider_entity(b.id))
-                .collect(),
+            passengers: if passengers {
+                self.passengers_of(b.id)
+            } else {
+                Vec::new()
+            },
             ..Default::default()
         }
+    }
+    /// `Entity.getPassengers` of the vehicle `id`: the mobs seated on it in
+    /// list order, each with its own riders, then the player. A walk over
+    /// every mob.
+    fn passengers_of(&self, id: u32) -> Vec<EntityView> {
+        self.simulation
+            .mobs
+            .iter()
+            .filter(|m| m.extra.mount == Some(id))
+            .map(|m| self.mob_entity(m))
+            .chain(self.rider_entity(id))
+            .collect()
     }
     /// A dropped item as the predicates see it.
     pub(super) fn item_entity_view(&self, e: &horizon_client::entities::ItemEntity) -> EntityView {
@@ -547,6 +561,26 @@ impl Game<'_> {
         }
     }
     pub(super) fn mob_entity(&self, m: &horizon_client::mobs::Mob) -> EntityView {
+        self.mob_entity_with(m, true)
+    }
+    /// The mob that hit the player, for `entity_hurt_player`'s criteria: no
+    /// walk over every mob for its passengers unless one of them may ask.
+    pub(super) fn hurt_player_source(&mut self, id: u32) -> Option<EntityView> {
+        let passengers = self.hurt_player_passengers();
+        let m = self.simulation.mob_index.get(&self.simulation.mobs, id)?;
+        Some(self.mob_entity_with(m, passengers))
+    }
+    /// Whether a criterion of `entity_hurt_player` may read passengers. The
+    /// tree loads first: an empty one would answer no for the criteria
+    /// `trigger` is about to test.
+    fn hurt_player_passengers(&mut self) -> bool {
+        self.load_advancements();
+        self.adv
+            .tree
+            .may_read_passengers("minecraft:entity_hurt_player")
+    }
+    /// [`Self::mob_entity`], its passengers only when `passengers`.
+    fn mob_entity_with(&self, m: &horizon_client::mobs::Mob, passengers: bool) -> EntityView {
         // mainhand, offhand, head, chest, legs, feet.
         let slot = |i: &Option<std::sync::Arc<str>>| {
             i.as_ref().map(|id| item_view(&ItemStack::new(id, 1)))
@@ -575,14 +609,11 @@ impl Game<'_> {
                 .map(|(id, value)| (id.to_owned(), value))
                 .into_iter()
                 .collect(),
-            passengers: self
-                .simulation
-                .mobs
-                .iter()
-                .filter(|r| r.extra.mount == Some(m.id))
-                .map(|r| self.mob_entity(r))
-                .chain(self.rider_entity(m.id))
-                .collect(),
+            passengers: if passengers {
+                self.passengers_of(m.id)
+            } else {
+                Vec::new()
+            },
             ..Default::default()
         }
     }
@@ -1258,7 +1289,7 @@ impl Game<'_> {
     /// The entity a 100 block ray from the eyes meets first, if no block is
     /// in the way (`ProjectileUtil.getEntityHitResult` over every entity but
     /// the player that is not a spectator, then `hasLineOfSight`).
-    fn looking_at_entity(&self) -> Option<EntityView> {
+    fn looking_at_entity(&self, passengers: bool) -> Option<EntityView> {
         use super::commands::Target;
         use super::entity::{Entity as _, entity_lists_of, for_each_entity};
         use horizon_core::geometry::Aabb;
@@ -1305,9 +1336,13 @@ impl Game<'_> {
             return None;
         }
         Some(match t {
-            Target::Mob(id) => self.mob_entity(self.simulation.mobs.iter().find(|m| m.id == id)?),
+            Target::Mob(id) => {
+                let m = self.simulation.mobs.iter().find(|m| m.id == id)?;
+                self.mob_entity_with(m, passengers)
+            }
             Target::Boat(id) => {
-                self.boat_entity(self.simulation.boats.iter().find(|b| b.id == id)?)
+                let b = self.simulation.boats.iter().find(|b| b.id == id)?;
+                self.boat_entity(b, passengers)
             }
             other => self.entity_view_of(other),
         })
@@ -1362,7 +1397,9 @@ impl Game<'_> {
     }
     /// `EntityHurtPlayerTrigger`: the player and the damage it took.
     pub(super) fn trigger_entity_hurt_player(&mut self, damage: &adv::DamageView) {
-        let me = self.player_entity_for("minecraft:entity_hurt_player");
+        let passengers = self.hurt_player_passengers();
+        let looking = self.adv.tree.may_look("minecraft:entity_hurt_player");
+        let me = self.player_entity_with(looking, passengers);
         let damage = damage.clone();
         self.trigger("minecraft:entity_hurt_player", move |c, w| {
             let pctx = adv::Entities {
@@ -2231,6 +2268,256 @@ mod tests {
         assert!(tree.may_look("minecraft:using_item"));
         assert!(tree.may_look("minecraft:location"));
         assert!(!tree.may_look("minecraft:tick"));
+    }
+
+    fn criterion(trigger: &str, conditions: serde_json::Value) -> adv::Criterion {
+        adv::Criterion {
+            name: format!("c{}", conditions.to_string().len()),
+            trigger: trigger.into(),
+            conditions: horizon_world::lazy_json::LazyJson::new(&conditions),
+        }
+    }
+    fn advancement(id: &str, criteria: Vec<adv::Criterion>) -> adv::Advancement {
+        adv::Advancement {
+            id: id.into(),
+            parent: None,
+            display: None,
+            criteria,
+            requirements: Vec::new(),
+            rewards: Default::default(),
+        }
+    }
+
+    #[test]
+    fn passenger_triggers_are_the_ones_that_ask_at_any_depth() {
+        let rider = serde_json::json!({"minecraft:entity_type": "minecraft:zombie"});
+        let cases = [
+            (
+                "source",
+                serde_json::json!({"damage": {"source_entity":
+                {"minecraft:passenger": rider}}}),
+                true,
+            ),
+            (
+                "short",
+                serde_json::json!({"damage": {"source_entity":
+                {"passenger": rider}}}),
+                true,
+            ),
+            (
+                "type_source",
+                serde_json::json!({"damage": {"type": {"source_entity":
+                {"minecraft:passenger": rider}}}}),
+                true,
+            ),
+            (
+                "type_direct",
+                serde_json::json!({"damage": {"type": {"direct_entity":
+                {"minecraft:passenger": rider}}}}),
+                true,
+            ),
+            (
+                "vehicle",
+                serde_json::json!({"player": {"type": "minecraft:entity_properties",
+                "entity": "this", "predicate": {"minecraft:vehicle":
+                {"minecraft:passenger": rider}}}}),
+                true,
+            ),
+            (
+                "looked_at",
+                serde_json::json!({"player": {"type": "minecraft:entity_properties",
+                "entity": "this", "predicate": {"minecraft:type_specific/player":
+                {"looking_at": {"passenger": rider}}}}}),
+                true,
+            ),
+            (
+                "reference",
+                serde_json::json!({"player": [{"condition": "minecraft:reference",
+                "name": "pack:rides"}]}),
+                true,
+            ),
+            (
+                "plain",
+                serde_json::json!({"damage": {"source_entity":
+                {"minecraft:entity_type": "minecraft:zombie"}}}),
+                false,
+            ),
+            // A word in a value that merely starts the same names no key.
+            (
+                "value",
+                serde_json::json!({"damage": {"source_entity":
+                {"minecraft:entity_type": "pack:passengers"}}}),
+                false,
+            ),
+        ];
+        for (trigger, conditions, expected) in cases {
+            let mut tree = Tree::default();
+            tree.list
+                .push(advancement("pack:a", vec![criterion(trigger, conditions)]));
+            tree.index_passengers();
+            assert_eq!(tree.may_read_passengers(trigger), expected, "{trigger}");
+        }
+    }
+
+    /// A criterion that reads riders, and riders of riders, sees them in list
+    /// order through the hurt path; one that cannot costs no walk and passes
+    /// as it did.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn entity_hurt_player_reads_riders_only_when_a_criterion_can() {
+        use crate::game::{Audio, Options, PlayerMotion, Progress, Settings, load_resources};
+        use horizon_client::mobs::Mob;
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        let at = horizon_core::geometry::Vec3::new(0.5, 100.0, 0.5);
+        game.player = Some(PlayerMotion::new(game.motion, at).unwrap());
+        let mob = |game: &Game<'_>, id: u32, kind: &str, mount: Option<u32>| {
+            let kind = game.res.mob_types().get(kind).cloned().unwrap();
+            let mut m = Mob::new(id, kind, at, 0.0);
+            m.extra.mount = mount;
+            m
+        };
+        // Listed so that neither ids nor mount order give the list's order:
+        // 5 is ridden by 9 then 2, and 9 is ridden by 7.
+        let list = [
+            (7, "minecraft:chicken", Some(9)),
+            (9, "minecraft:zombie", Some(5)),
+            (5, "minecraft:spider", None),
+            (2, "minecraft:skeleton", Some(5)),
+        ];
+        for (id, kind, mount) in list {
+            let m = mob(&game, id, kind, mount);
+            game.simulation.mobs.push(m);
+        }
+
+        let hit = |source: Option<EntityView>| adv::DamageView {
+            kind: "minecraft:mob_attack".into(),
+            direct: source.clone(),
+            source,
+            is_direct: true,
+            original: 1.0,
+            actual: 1.0,
+            blocked: false,
+        };
+        let spider = serde_json::json!({"minecraft:entity_type": "minecraft:spider"});
+        let chicken = serde_json::json!({"minecraft:entity_type": "minecraft:chicken"});
+        let on_rider = serde_json::json!({"minecraft:passenger":
+            {"minecraft:entity_type": "minecraft:zombie",
+             "minecraft:passenger": chicken}});
+        let trigger = "minecraft:entity_hurt_player";
+        let open =
+            |game: &Game<'_>, id: &str| !game.adv.progress.done(game.adv.tree.get(id).unwrap());
+        let install = |game: &mut Game<'_>, advancements: Vec<adv::Advancement>| {
+            let mut tree = Tree::default();
+            for (index, a) in advancements.into_iter().enumerate() {
+                for (ci, c) in a.criteria.iter().enumerate() {
+                    tree.by_trigger
+                        .entry(c.trigger.clone())
+                        .or_default()
+                        .push((index, ci));
+                }
+                tree.by_id.insert(a.id.clone(), index);
+                tree.list.push(a);
+            }
+            tree.index_looking_at();
+            tree.index_passengers();
+            game.adv.tree = Arc::new(tree);
+            game.adv.loaded = true;
+            game.adv.progress = Default::default();
+        };
+        let criteria = |c: serde_json::Value| {
+            let c = criterion(trigger, serde_json::json!({"damage": c}));
+            let name = c.name.clone();
+            let mut a = advancement("pack:x", vec![c]);
+            a.requirements = vec![vec![name]];
+            a
+        };
+        let named = |id: &str, mut a: adv::Advancement| {
+            a.id = id.into();
+            a
+        };
+
+        // Riders asked for: through the source and the direct entity, nested.
+        install(
+            &mut game,
+            vec![
+                named(
+                    "pack:source",
+                    criteria(serde_json::json!({"source_entity": on_rider})),
+                ),
+                named(
+                    "pack:direct",
+                    criteria(serde_json::json!({"type": {"direct_entity": on_rider}})),
+                ),
+                named(
+                    "pack:none",
+                    criteria(serde_json::json!({"source_entity":
+                {"minecraft:passenger": spider}})),
+                ),
+            ],
+        );
+        let source = game.hurt_player_source(5).unwrap();
+        let kinds: Vec<&str> = source.passengers.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["minecraft:zombie", "minecraft:skeleton"],
+            "list order"
+        );
+        let inner: Vec<&str> = source.passengers[0]
+            .passengers
+            .iter()
+            .map(|p| p.kind.as_str())
+            .collect();
+        assert_eq!(inner, ["minecraft:chicken"], "riders of riders");
+        game.trigger_entity_hurt_player(&hit(Some(source)));
+        assert!(!open(&game, "pack:source") && !open(&game, "pack:direct"));
+        assert!(open(&game, "pack:none"), "no spider rides the spider");
+
+        // No criterion can ask: the same mob, no riders in its view, and a
+        // criterion on the rest of it still passes.
+        install(
+            &mut game,
+            vec![named(
+                "pack:plain",
+                criteria(serde_json::json!({
+            "source_entity": spider})),
+            )],
+        );
+        let source = game.hurt_player_source(5).unwrap();
+        assert!(source.passengers.is_empty());
+        assert_eq!(source.kind, "minecraft:spider");
+        game.trigger_entity_hurt_player(&hit(Some(source)));
+        assert!(!open(&game, "pack:plain"));
+
+        // Other callers keep the whole view.
+        let whole = game.mob_entity(&game.simulation.mobs[2]);
+        assert_eq!(whole.passengers.len(), 2);
+        assert_eq!(whole.passengers[0].passengers.len(), 1);
     }
 
     #[test]

@@ -198,6 +198,18 @@ impl ServerCoordination {
             })
             .as_ref()
     }
+    /// Makes `executor` answer with `workers` workers, or None for 0, for a
+    /// test comparing the pool with the serial path.
+    #[cfg(test)]
+    pub fn force_workers(&mut self, workers: usize) {
+        self.execution = if workers == 0 {
+            Execution::Legacy
+        } else {
+            Execution::Parallel
+        };
+        self.workers = workers.max(1);
+        self.executor = Default::default();
+    }
     /// Hands this tick's replaced mobs to the workers to free.
     pub fn retire_predictions(&mut self) {
         if self.retiring.is_empty() {

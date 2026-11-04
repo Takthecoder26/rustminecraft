@@ -3940,8 +3940,7 @@ impl Game<'_> {
         if outcome.hurt || outcome.sound {
             let source = attacker
                 .or(owner)
-                .and_then(|id| self.simulation.mob_index.get(&self.simulation.mobs, id))
-                .map(|m| self.mob_entity(m));
+                .and_then(|id| self.hurt_player_source(id));
             self.trigger_entity_hurt_player(&horizon_client::advancements::DamageView {
                 kind: damage_type.to_owned(),
                 // Arrows and the like name no direct entity here; a
