@@ -4,6 +4,7 @@
 //! (`SculkShriekerBlockEntity`, `SpawnUtil`), catalysts feeding the sculk
 //! spreader from deaths, and the darkness wardens and shriekers cast.
 use super::{Game, Result};
+use horizon_client::join_seq::ListStamp;
 use horizon_client::{
     containers::BlockEntity,
     effects::{EffectInstance, PlayerEffects},
@@ -97,6 +98,10 @@ pub(super) struct SculkState {
     pub actor: Option<Who>,
     ticks: u32,
     pub tracker_loaded: bool,
+    /// Where the wardens and allays are in the mob list, and the list they
+    /// were read from: see `listener_slots`.
+    listeners: Vec<u32>,
+    listeners_of: Option<ListStamp>,
 }
 
 impl SculkState {
@@ -547,8 +552,9 @@ impl Game<'_> {
         }
     }
     /// `GameEvent.Context.of(mob, state)`.
-    pub(super) fn mob_context(&self, id: u32, state: Option<BlockStateId>) -> Context {
-        self.context_of_mob(self.simulation.mobs.iter().find(|m| m.id == id), id, state)
+    pub(super) fn mob_context(&mut self, id: u32, state: Option<BlockStateId>) -> Context {
+        let mob = self.simulation.mob_index.get(&self.simulation.mobs, id);
+        self.context_of_mob(mob, id, state)
     }
     fn context_of_mob(&self, mob: Option<&Mob>, id: u32, state: Option<BlockStateId>) -> Context {
         Context {
@@ -563,7 +569,7 @@ impl Game<'_> {
             player: mob.is_some_and(|m| m.rider.is_some()),
         }
     }
-    pub(super) fn who_context(&self, who: Option<Who>, state: Option<BlockStateId>) -> Context {
+    pub(super) fn who_context(&mut self, who: Option<Who>, state: Option<BlockStateId>) -> Context {
         match who {
             Some(Who::Player) => self.player_context(state),
             Some(Who::Mob(id)) => self.mob_context(id, state),
@@ -596,18 +602,43 @@ impl Game<'_> {
         for key in near {
             self.sculk_listen(key, event, pos, &ctx);
         }
-        for i in 0..self.simulation.mobs.len() {
-            if self.simulation.mobs[i].species() == Species::Warden
-                && self.simulation.mobs[i].alive()
-            {
+        let stamp = self.simulation.mobs.stamp();
+        let slots = self.listener_slots(stamp);
+        for &i in &slots {
+            let i = i as usize;
+            let Some(mob) = self.simulation.mobs.get(i) else {
+                continue;
+            };
+            let (species, alive) = (mob.species(), mob.alive());
+            if species == Species::Warden && alive {
                 self.warden_listen(i, event, pos, &ctx);
             }
-            if self.simulation.mobs[i].species() == Species::Allay
-                && self.simulation.mobs[i].alive()
-            {
+            if species == Species::Allay && alive {
                 self.allay_listen(i, event, pos, &ctx);
             }
         }
+        self.sculk.listeners = slots;
+        self.sculk.listeners_of = Some(stamp);
+    }
+    /// The slots of the mobs that hear game events, in list order. An event
+    /// asks for them every time it is posted, hundreds of times a tick on a
+    /// busy server, and a walk over the list misses the cache once per mob, so
+    /// one walk serves until the list is next written to.
+    fn listener_slots(&mut self, stamp: ListStamp) -> Vec<u32> {
+        let mut slots = std::mem::take(&mut self.sculk.listeners);
+        // Taken: an event posted by a listener walks the list itself.
+        if self.sculk.listeners_of.take() != Some(stamp) {
+            slots.clear();
+            slots.extend(
+                self.simulation
+                    .mobs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| matches!(m.species(), Species::Warden | Species::Allay))
+                    .map(|(i, _)| i as u32),
+            );
+        }
+        slots
     }
     /// A game event at a block (`Level.gameEvent(source, event, pos)`).
     pub(super) fn post_block_game_event(
@@ -625,9 +656,8 @@ impl Game<'_> {
     pub(super) fn mob_damage_event(&mut self, id: u32) {
         if let Some(t) = self
             .simulation
-            .mobs
-            .iter()
-            .find(|m| m.id == id)
+            .mob_index
+            .get(&self.simulation.mobs, id)
             .and_then(|m| m.last_damage.map(|(_, t)| t))
         {
             self.sculk.damaged.insert(id, t);
@@ -643,9 +673,8 @@ impl Game<'_> {
                 .map(|p| [p.position.x, p.position.y, p.position.z]),
             Who::Mob(id) => self
                 .simulation
-                .mobs
-                .iter()
-                .find(|m| m.id == id)
+                .mob_index
+                .get(&self.simulation.mobs, id)
                 .map(|m| [m.position.x, m.position.y, m.position.z]),
         };
         if let Some(at) = at {
@@ -1874,8 +1903,8 @@ impl Game<'_> {
         });
     }
     /// Where the vehicle `id` stands: a mob, boat, minecart or cushion.
-    fn vehicle_position(&self, id: u32) -> Option<[f64; 3]> {
-        let p = if let Some(m) = self.simulation.mobs.iter().find(|m| m.id == id) {
+    fn vehicle_position(&mut self, id: u32) -> Option<[f64; 3]> {
+        let p = if let Some(m) = self.simulation.mob_index.get(&self.simulation.mobs, id) {
             m.position
         } else if let Some(b) = self.simulation.boats.iter().find(|b| b.id == id) {
             b.position
@@ -2066,6 +2095,105 @@ fn flaps(species: Species, resting: bool, on_ground: bool, age: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wardens that hear an event are those in the list when it is
+    /// posted, however the list changed since the last one.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn wardens_hear_events_however_the_list_changed_between_them() {
+        use crate::game::{Audio, Options, Progress, Settings, load_resources};
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.sculk_prepare();
+        let warden = game
+            .res
+            .mob_types()
+            .get("minecraft:warden")
+            .cloned()
+            .unwrap();
+        let zombie = game
+            .res
+            .mob_types()
+            .get("minecraft:zombie")
+            .cloned()
+            .unwrap();
+        let at = |x| horizon_core::geometry::Vec3::new(x, 100.0, 0.0);
+        let post = |game: &mut Game<'_>| {
+            game.post_game_event("minecraft:explode", [0.5, 100.5, 0.5], Context::default());
+            let later = game.simulation.world.game_time + 1;
+            let heard = |m: &mut Mob| {
+                let warden = m.extra.warden.as_mut()?;
+                let heard = warden.vibration.selector.chosen_candidate(later);
+                warden.vibration = Default::default();
+                heard
+            };
+            let mut ids: Vec<u32> = game
+                .simulation
+                .mobs
+                .iter_mut()
+                .filter_map(|m| heard(m).map(|_| m.id))
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(post(&mut game), [0u32; 0], "nobody to hear it");
+        assert_eq!(post(&mut game), [0u32; 0]);
+
+        game.simulation
+            .mobs
+            .push(Mob::new(1, zombie.clone(), at(1.0), 0.0));
+        game.simulation
+            .mobs
+            .push(Mob::new(2, warden.clone(), at(2.0), 0.0));
+        assert_eq!(post(&mut game), [2], "one that joined since");
+        assert_eq!(post(&mut game), [2], "and again with nothing changed");
+
+        game.simulation
+            .mobs
+            .insert(0, Mob::new(3, warden.clone(), at(3.0), 0.0));
+        assert_eq!(post(&mut game), [2, 3], "the slots moved");
+
+        let level = std::mem::take(&mut game.simulation.mobs);
+        assert_eq!(post(&mut game), [0u32; 0], "another level's list");
+        game.simulation.mobs = level;
+        assert_eq!(post(&mut game), [2, 3], "this level's again");
+
+        game.simulation.mobs.retain(|m| m.id != 3);
+        assert_eq!(post(&mut game), [2], "one that left");
+
+        // A write that keeps every slot and makes the zombie's a listener.
+        game.simulation.mobs[0] = Mob::new(1, warden, at(1.0), 0.0);
+        assert_eq!(post(&mut game), [1, 2], "one replaced in its slot");
+
+        game.simulation.mobs[0].removed = true;
+        game.simulation.mobs[0].health = 0.0;
+        assert_eq!(post(&mut game), [2], "the dead hear nothing");
+    }
 
     /// Retaining keeps the insertion order and the membership in step.
     #[test]

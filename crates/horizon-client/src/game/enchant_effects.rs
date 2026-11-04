@@ -461,9 +461,9 @@ impl Game<'_> {
     pub(super) fn thorns(&mut self, attacker: u32) {
         let Some(index) = self
             .simulation
-            .mobs
-            .iter()
-            .position(|m| m.id == attacker && m.alive())
+            .mob_index
+            .find(&self.simulation.mobs, attacker)
+            .filter(|&i| self.simulation.mobs[i].alive())
         else {
             return;
         };
