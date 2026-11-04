@@ -971,6 +971,7 @@ impl Game<'_> {
     /// The entity phase of `tick_creatures`: every mob's tick, deaths, and the
     /// projectiles and effects that follow from them.
     pub(super) fn tick_creature_entities(&mut self) -> Result<()> {
+        let mut laps = horizon_client::spans::laps();
         // LivingEntity.die runs when the killing blow lands: mobs killed
         // since the last tick (by the player, explosions...) die first.
         let killed: Vec<Mob> = self
@@ -1002,6 +1003,7 @@ impl Game<'_> {
                 i += 1;
             }
         }
+        laps.lap("mob_pre");
         let uuid = self.level.player_uuid;
         // Freeze ownership before lending immutable inputs to snapshot workers.
         // Topology is cached by chunk-map membership, never by world edits.
@@ -1022,6 +1024,7 @@ impl Game<'_> {
                     seen(m, uuid)
                 });
         let species_index = horizon_client::mobs::snapshot::SpeciesIndex::new(&snapshot);
+        laps.lap("mob_snapshot");
         let mut events = Vec::new();
         let mut mobs = std::mem::take(&mut self.simulation.mobs);
         let section_base = self.simulation.section_order.reserve(&mobs);
@@ -1100,137 +1103,148 @@ impl Game<'_> {
             }
             // One region owns each mutable prediction. Resource/world reads
             // remain borrowed until the worker barrier; callbacks stay serial.
-            let mut region_round = if horizon_client::mod_api::mods().is_empty()
+            laps.lap("mob_base");
+            let region_executor = if horizon_client::mod_api::mods().is_empty()
                 && !round.listening()
                 && index.len() == mobs.len()
             {
                 self.simulation_server
                     .executor(self.simulation.regions.regions().len(), mobs.len())
-                    .map(|executor| {
-                        use horizon_client::mobs::region_tick::{
-                            MobContext, RegionInput, RegionTick, TickResources, TickRound,
-                        };
-                        let contexts: Vec<_> = mobs
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, mob)| MobContext {
-                                bound_player: bindings.get(&mob.id).copied(),
-                                nearest_player: nearest
-                                    .nearest(mob.position.x, mob.position.y, mob.position.z)
-                                    .map(|player| player.position),
-                                section_order: section_base.wrapping_add(slot as u64),
-                                difficulty: self.local_difficulty([
-                                    mob.position.x,
-                                    mob.position.y,
-                                    mob.position.z,
-                                ]),
-                            })
-                            .collect();
-                        let regions = self.simulation.regions.regions();
-                        let mut owners = vec![regions.len(); mobs.len()];
-                        let inputs: Vec<_> = regions
-                            .iter()
-                            .enumerate()
-                            .map(|(owner, region)| {
-                                for &slot in &region.entities {
-                                    owners[slot] = owner;
-                                }
-                                let entities = region
-                                    .entities
-                                    .iter()
-                                    .copied()
-                                    .filter(|&slot| {
-                                        let m = &mobs[slot];
-                                        let (x, z) = (
-                                            m.position.x.floor() as i32,
-                                            m.position.z.floor() as i32,
-                                        );
-                                        self.simulation.world.loaded(x, z)
-                                            && ticking(x, z)
-                                            && !round.canceled(m.id)
-                                    })
-                                    .take_while(|&slot| {
-                                        !horizon_client::mobs::raider::is_raider(
-                                            mobs[slot].species(),
-                                        ) && mobs[slot].extra.raider.is_none()
-                                    })
-                                    .map(|slot| (slot, &mobs[slot]))
-                                    .collect();
-                                RegionInput {
-                                    owner,
-                                    mobs: entities,
-                                }
-                            })
-                            .filter(|input| !input.mobs.is_empty())
-                            .collect();
-                        let resources = TickResources::new(&base);
-                        let tick = RegionTick {
-                            resources: &resources,
-                            snapshot: &snapshot,
-                            grid: &grid,
-                            species: &species_index,
-                            index: &index,
-                            contexts: &contexts,
-                            players: &player_directory,
-                            path_changes: &path_changes,
-                            random: &scratch,
-                            player_uuid: uuid,
-                            tnt_explodes: self.ui.rules.bool("tnt_explodes"),
-                        };
-                        TickRound::new(owners, executor.predict(inputs, &tick), section_base)
-                    })
             } else {
                 None
             };
+            let mut region_round = region_executor.map(|executor| {
+                use horizon_client::mobs::region_tick::{
+                    MobContext, RegionInput, RegionTick, TickResources, TickRound,
+                };
+                let contexts: Vec<_> = mobs
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, mob)| MobContext {
+                        bound_player: bindings.get(&mob.id).copied(),
+                        nearest_player: nearest
+                            .nearest(mob.position.x, mob.position.y, mob.position.z)
+                            .map(|player| player.position),
+                        section_order: section_base.wrapping_add(slot as u64),
+                        difficulty: self.local_difficulty([
+                            mob.position.x,
+                            mob.position.y,
+                            mob.position.z,
+                        ]),
+                    })
+                    .collect();
+                let regions = self.simulation.regions.regions();
+                let mut owners = vec![regions.len(); mobs.len()];
+                let inputs: Vec<_> = regions
+                    .iter()
+                    .enumerate()
+                    .map(|(owner, region)| {
+                        for &slot in &region.entities {
+                            owners[slot] = owner;
+                        }
+                        let entities = region
+                            .entities
+                            .iter()
+                            .copied()
+                            .filter(|&slot| {
+                                let m = &mobs[slot];
+                                let (x, z) =
+                                    (m.position.x.floor() as i32, m.position.z.floor() as i32);
+                                self.simulation.world.loaded(x, z)
+                                    && ticking(x, z)
+                                    && !round.canceled(m.id)
+                            })
+                            .take_while(|&slot| {
+                                !horizon_client::mobs::raider::is_raider(mobs[slot].species())
+                                    && mobs[slot].extra.raider.is_none()
+                            })
+                            .map(|slot| (slot, &mobs[slot]))
+                            .collect();
+                        RegionInput {
+                            owner,
+                            mobs: entities,
+                        }
+                    })
+                    .filter(|input| !input.mobs.is_empty())
+                    .collect();
+                let resources = TickResources::new(&base);
+                let tick = RegionTick {
+                    resources: &resources,
+                    snapshot: &snapshot,
+                    grid: &grid,
+                    species: &species_index,
+                    index: &index,
+                    contexts: &contexts,
+                    players: &player_directory,
+                    path_changes: &path_changes,
+                    random: &scratch,
+                    player_uuid: uuid,
+                    tnt_explodes: self.ui.rules.bool("tnt_explodes"),
+                };
+                laps.lap("mob_inputs");
+                let predicted = executor.predict(inputs, &tick);
+                laps.lap("mob_predict");
+                TickRound::new(owners, predicted, section_base)
+            });
+            // What a mob reads of the level, and the guest it sees (which binds
+            // it). A prediction that commits read all this on its worker, so
+            // the walk builds it only for the mobs that run here.
+            macro_rules! mob_view {
+                ($m:expr) => {{
+                    let m: &Mob = $m;
+                    let mut w = MobWorld {
+                        others: horizon_client::mobs::snapshot::SeenView::from(&snapshot)
+                            .with_species(&species_index),
+                        others_grid: Some(&grid),
+                        others_index: Some(&index),
+                        ..base.clone()
+                    };
+                    w.controlling_player_movement = player_directory.controlling_movement(m);
+                    // getCurrentDifficultyAt(blockPosition()): the mob's own chunk,
+                    // not the local player's (a server thread has no player).
+                    w.difficulty =
+                        self.local_difficulty([m.position.x, m.position.y, m.position.z]);
+                    w.nearest_player = nearest
+                        .nearest(m.position.x, m.position.y, m.position.z)
+                        .map(|p| p.position);
+                    let seen_guest = if guests.is_empty() {
+                        None
+                    } else {
+                        let bound = bindings.get(&m.id).copied();
+                        let owner = self
+                            .simulation
+                            .regions
+                            .owner(chunk_at(m.position))
+                            .and_then(|id| player_regions.get(&id).copied())
+                            .unwrap_or(usize::MAX);
+                        let conn = player_directory.player_for(owner, m, bound);
+                        match conn {
+                            Some(conn) => {
+                                bindings.insert(m.id, conn);
+                                w.player = player_directory.guest(conn).cloned();
+                            }
+                            None => {
+                                bindings.remove(&m.id);
+                            }
+                        }
+                        conn
+                    };
+                    (w, seen_guest)
+                }};
+            }
             for i in 0..mobs.len() {
-                let mut w = MobWorld {
-                    others: horizon_client::mobs::snapshot::SeenView::from(&snapshot)
-                        .with_species(&species_index),
-                    others_grid: Some(&grid),
-                    others_index: Some(&index),
-                    ..base.clone()
-                };
                 let m = &mut mobs[i];
-                w.controlling_player_movement = player_directory.controlling_movement(m);
-                // getCurrentDifficultyAt(blockPosition()): the mob's own chunk,
-                // not the local player's (a server thread has no player).
-                w.difficulty = self.local_difficulty([m.position.x, m.position.y, m.position.z]);
-                w.nearest_player = nearest
-                    .nearest(m.position.x, m.position.y, m.position.z)
-                    .map(|p| p.position);
-                let seen_guest = if guests.is_empty() {
-                    None
-                } else {
-                    let bound = bindings.get(&m.id).copied();
-                    let owner = self
-                        .simulation
-                        .regions
-                        .owner(chunk_at(m.position))
-                        .and_then(|id| player_regions.get(&id).copied())
-                        .unwrap_or(usize::MAX);
-                    let conn = player_directory.player_for(owner, m, bound);
-                    match conn {
-                        Some(conn) => {
-                            bindings.insert(m.id, conn);
-                            w.player = player_directory.guest(conn).cloned();
-                        }
-                        None => {
-                            bindings.remove(&m.id);
-                        }
-                    }
-                    conn
-                };
-                if !w
-                    .world
-                    .loaded(m.position.x.floor() as i32, m.position.z.floor() as i32)
-                {
+                let (x, z) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
+                if !base.world.loaded(x, z) {
+                    mob_view!(m);
                     keep.push(!m.hostile() || m.persistent);
                     continue;
                 }
                 // ServerLevel.tick: every loaded entity checks despawning, but
                 // only those in entity-ticking chunks (within the simulation
                 // distance) tick.
-                if !ticking(m.position.x.floor() as i32, m.position.z.floor() as i32) {
+                if !ticking(x, z) {
+                    let (w, _) = mob_view!(m);
                     let kept = horizon_client::mobs::ai::despawn_check(m, &w);
                     if !kept {
                         died.remove(&m.id);
@@ -1244,22 +1258,45 @@ impl Game<'_> {
                 }
                 // A mod canceled its tick: it stays as it is.
                 if round.canceled(m.id) {
+                    mob_view!(m);
                     keep.push(true);
                     continue;
                 }
                 horizon_client::mobs::apply_mob_pushes(m, &mut pushes);
                 horizon_client::mobs::blocks_changed(m, &path_changes);
                 let from = events.len();
-                let kept = match region_round.as_mut() {
-                    Some(transaction) => {
-                        transaction.tick(i, m, &w, &grid, &mut scratch, &mut events)
+                let committed = region_round.as_mut().and_then(|transaction| {
+                    transaction.commit(i, m, &grid, &mut scratch, &mut events)
+                });
+                let (kept, seen_guest) = match committed {
+                    Some((kept, conn)) => {
+                        if !guests.is_empty() {
+                            match conn {
+                                Some(conn) => {
+                                    bindings.insert(m.id, conn);
+                                }
+                                None => {
+                                    bindings.remove(&m.id);
+                                }
+                            }
+                        }
+                        (kept, conn)
                     }
-                    None => m.tick_with_order(
-                        &w,
-                        &mut scratch,
-                        &mut events,
-                        section_base.wrapping_add(i as u64),
-                    ),
+                    None => {
+                        let (w, seen_guest) = mob_view!(m);
+                        let kept = match region_round.as_mut() {
+                            Some(transaction) => {
+                                transaction.replay(i, m, &w, &mut scratch, &mut events)
+                            }
+                            None => m.tick_with_order(
+                                &w,
+                                &mut scratch,
+                                &mut events,
+                                section_base.wrapping_add(i as u64),
+                            ),
+                        };
+                        (kept, seen_guest)
+                    }
                 };
                 if let Some(transaction) = region_round.as_mut() {
                     transaction.events(i, &events[from..], &index);
@@ -1321,6 +1358,10 @@ impl Game<'_> {
                     transaction.immediate_brain_write(i, &immediate, &index);
                 }
             }
+            if let (Some(transaction), Some(executor)) = (region_round.as_mut(), region_executor) {
+                executor.retire(transaction.take_predictions());
+            }
+            laps.lap("mob_walk");
             let mut flags = keep.into_iter();
             mobs.retain(|_| flags.next().unwrap_or(true));
             for m in &mut mobs {
@@ -1359,6 +1400,7 @@ impl Game<'_> {
             self.lan_entity_event(id as i32, 60, at);
             self.death_poof(at, width, height);
         }
+        laps.lap("mob_retain");
         self.sync_riders();
         self.tick_skeleton_traps();
         self.tick_apparition();
@@ -1379,10 +1421,14 @@ impl Game<'_> {
             let bounds = m.bounds();
             self.effects_on_death(&names, bounds, false, Some(m.id), Some(&mut m.random));
         }
+        laps.lap("mob_after");
         self.handle_mob_events(events)?;
+        laps.lap("mob_events");
         self.lan_guest_mob_events(guest_events);
+        laps.lap("mob_guest_events");
         self.ordered_before(super::ordered_tick::Batch::Projectiles)?;
         self.tick_projectiles()?;
+        laps.lap("mob_projectiles");
         self.tick_fangs();
         self.tick_allays();
         self.tick_pandas();
@@ -1400,6 +1446,7 @@ impl Game<'_> {
             queued.append(&mut m.outbox);
         }
         self.handle_mob_events(queued)?;
+        laps.lap("mob_rest");
         Ok(())
     }
     /// `LivingEntity.makePoofParticles` (entity event 60) about a mob's box.

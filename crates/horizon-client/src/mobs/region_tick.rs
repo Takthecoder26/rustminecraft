@@ -154,6 +154,9 @@ pub struct TickPrediction {
     pub slot: usize,
     pub owner: usize,
     pub mob: Mob,
+    /// The guest this mob saw (`None`: the host or nobody), so a commit need
+    /// not choose again.
+    pub conn: Option<u32>,
     pub kept: bool,
     pub events: Vec<MobEvent>,
     pub reads: snapshot::ReadSet,
@@ -213,7 +216,7 @@ impl RegionTick<'_> {
             let mut events = Vec::new();
             let random_before = random.clone();
             random.clear_usage();
-            let kept = {
+            let (kept, conn) = {
                 let context = &self.contexts[slot];
                 let mut world = self.resources.view(
                     snapshot::SeenView::observed(self.snapshot, &overlay, &reads)
@@ -230,7 +233,9 @@ impl RegionTick<'_> {
                 world.controlling_player_movement = self.players.controlling_movement(&mob);
                 world.nearest_player = context.nearest_player;
                 world.difficulty = context.difficulty;
-                mob.tick_with_order(&world, &mut random, &mut events, context.section_order)
+                let kept =
+                    mob.tick_with_order(&world, &mut random, &mut events, context.section_order);
+                (kept, conn)
             };
             // Preserve push order while keeping the original events intact for
             // the coordinator's authoritative global-order application.
@@ -272,6 +277,7 @@ impl RegionTick<'_> {
                 slot,
                 owner: input.owner,
                 mob,
+                conn,
                 kept,
                 events,
                 reads: reads.into_inner(),
@@ -302,6 +308,16 @@ impl RegionExecutor {
             .thread_name(|index| format!("Horizon region {index}"))
             .build()?;
         Ok(Self { pool: Some(pool) })
+    }
+    /// Frees a finished round on the pool: its entries hold the mobs that were
+    /// replaced, each with its own allocations, and nothing has to wait for
+    /// them. Runs detached, so it may overlap the coordinator's next phases.
+    pub fn retire(&self, predictions: Vec<Vec<TickPrediction>>) {
+        use rayon::prelude::*;
+        match &self.pool {
+            Some(pool) => pool.spawn(move || predictions.into_par_iter().for_each(drop)),
+            None => drop(predictions),
+        }
     }
     pub fn predict(
         &self,
@@ -343,7 +359,12 @@ pub struct RegionStats {
 /// another prediction this tick. Conflicts replay against the live snapshot
 /// and RNG, before any dependent entity or event is published.
 pub struct TickRound {
-    predictions: Vec<Option<TickPrediction>>,
+    /// Each job's results, ascending by slot. They stay where the workers put
+    /// them: a mob is thousands of bytes, and only a commit needs to touch it.
+    predictions: Vec<Vec<TickPrediction>>,
+    /// The list in `predictions` of each owner, and how far the walk has read it.
+    queues: Vec<Option<usize>>,
+    cursors: Vec<usize>,
     owners: Vec<usize>,
     failed: Vec<bool>,
     changes: snapshot::SnapshotChanges,
@@ -361,20 +382,24 @@ impl TickRound {
             .filter(|predictions| !predictions.is_empty())
             .count();
         let regions = owners.iter().copied().max().map_or(0, |owner| owner + 1);
-        let mut slots: Vec<_> = (0..owners.len()).map(|_| None).collect();
+        let mut queues = vec![None; regions];
         let mut predicted = 0;
-        for prediction in predictions.into_iter().flatten() {
-            let slot = prediction.slot;
-            assert_eq!(owners[slot], prediction.owner, "prediction owner");
-            assert!(slots[slot].is_none(), "one prediction per entity");
-            slots[slot] = Some(prediction);
-            predicted += 1;
+        for (queue, list) in predictions.iter().enumerate() {
+            predicted += list.len();
+            if let Some(first) = list.first() {
+                debug_assert!(list.iter().all(|p| owners[p.slot] == first.owner));
+                debug_assert!(list.windows(2).all(|p| p[0].slot < p[1].slot));
+                assert!(queues[first.owner].is_none(), "one list per owner");
+                queues[first.owner] = Some(queue);
+            }
         }
         Self {
+            queues,
+            cursors: vec![0; regions],
             changes: snapshot::SnapshotChanges::new(owners.clone()),
             owners,
             failed: vec![false; regions],
-            predictions: slots,
+            predictions,
             section_base,
             stats: RegionStats {
                 regions: active_regions,
@@ -383,29 +408,39 @@ impl TickRound {
             },
         }
     }
-    pub fn tick(
+    /// Publishes this slot's prediction if it is still valid, returning what
+    /// the tick returned and the guest the mob saw. `None`: nothing changed,
+    /// and the caller builds the mob's view and [`Self::replay`]s it.
+    pub fn commit(
         &mut self,
         slot: usize,
         mob: &mut Mob,
-        world: &MobWorld<'_>,
         grid: &seen_grid::SeenGrid,
         random: &mut LegacyRandom,
         events: &mut Vec<MobEvent>,
-    ) -> bool {
+    ) -> Option<(bool, Option<u32>)> {
         let owner = self.owners[slot];
-        if let Some(prediction) = self.predictions[slot].take()
-            && !self.failed[owner]
+        if !self.failed[owner]
+            && let Some(queue) = self.queues[owner]
         {
+            let list = &mut self.predictions[queue];
+            let mut cursor = self.cursors[owner];
+            while list.get(cursor).is_some_and(|p| p.slot < slot) {
+                cursor += 1;
+            }
+            self.cursors[owner] = cursor;
+            let prediction = list.get_mut(cursor).filter(|p| p.slot == slot)?;
             let rng_valid = prediction.rng_valid(random);
             let read_conflict = self.changes.conflict(&prediction.reads, owner, grid);
             if rng_valid && read_conflict.is_none() {
-                *mob = prediction.mob;
+                // The replaced mob stays in the list for [`RegionExecutor::retire`].
+                std::mem::swap(mob, &mut prediction.mob);
                 if prediction.random_after.was_used() {
-                    *random = prediction.random_after;
+                    *random = prediction.random_after.clone();
                 }
-                events.extend(prediction.events);
+                events.append(&mut prediction.events);
                 self.stats.committed += 1;
-                return prediction.kept;
+                return Some((prediction.kept, prediction.conn));
             }
             self.stats.rng_conflicts += usize::from(!rng_valid);
             if let Some(conflict) = read_conflict {
@@ -419,7 +454,19 @@ impl TickRound {
                 }
             }
         }
-        self.failed[owner] = true;
+        None
+    }
+    /// Runs a mob whose prediction did not commit against the live level. The
+    /// rest of its owner's prefix observed the prediction, so it is void too.
+    pub fn replay(
+        &mut self,
+        slot: usize,
+        mob: &mut Mob,
+        world: &MobWorld<'_>,
+        random: &mut LegacyRandom,
+        events: &mut Vec<MobEvent>,
+    ) -> bool {
+        self.failed[self.owners[slot]] = true;
         self.stats.replayed += 1;
         mob.tick_with_order(
             world,
@@ -427,6 +474,10 @@ impl TickRound {
             events,
             self.section_base.wrapping_add(slot as u64),
         )
+    }
+    /// The round's predictions, for [`RegionExecutor::retire`] once the walk ends.
+    pub fn take_predictions(&mut self) -> Vec<Vec<TickPrediction>> {
+        std::mem::take(&mut self.predictions)
     }
     pub fn snapshot_changed(&mut self, slot: usize, before: &Seen, after: &Seen) {
         self.changes.touch(slot, before.bounds, after.bounds);
@@ -596,7 +647,10 @@ mod tests {
             apply_mob_pushes(mob, &mut pushes);
             let from = events.len();
             let kept = match round.as_mut() {
-                Some(round) => round.tick(slot, mob, &world, &grid, random, &mut events),
+                Some(round) => match round.commit(slot, mob, &grid, random, &mut events) {
+                    Some((kept, _)) => kept,
+                    None => round.replay(slot, mob, &world, random, &mut events),
+                },
                 None => mob.tick_with_order(
                     &world,
                     random,
@@ -626,6 +680,9 @@ mod tests {
         }
         let mut keep = keep.into_iter();
         mobs.retain(|_| keep.next().unwrap());
+        if let (Some(round), Some(executor)) = (round.as_mut(), executor) {
+            executor.retire(round.take_predictions());
+        }
         (
             events,
             round.map_or_else(Default::default, |round| round.stats),
