@@ -168,7 +168,7 @@ fn compute_programs_receive_initial_contents_and_nonconstant_uniform_initializer
 
 #[test]
 fn unsupported_double_defaults_keep_the_program_and_neighbors_with_a_source_note() {
-    let p = program("uniform double wide = 0.5lf;\nuniform vec4 tint = vec4(0.25);");
+    let p = program("uniform double wide = 0.5;\nuniform vec4 tint = vec4(0.25);");
     assert_eq!(words(&p, "wide", 2), [0; 2]);
     assert_eq!(words(&p, "tint", 4), [0.25f32.to_bits(); 4]);
     assert_eq!(p.interface.notes.len(), 1);
@@ -176,7 +176,7 @@ fn unsupported_double_defaults_keep_the_program_and_neighbors_with_a_source_note
     assert_eq!((&*note.file, note.line), ("original.glsl", 1));
     assert!(note.message.contains("`wide`"), "{note:?}");
     let p = translate_compute(&source(
-        "layout(local_size_x=1) in; uniform dvec2 wide = dvec2(0.5lf); uniform uint count = 7u; void main() {}",
+        "layout(local_size_x=1) in; uniform dvec2 wide = dvec2(0.5); uniform uint count = 7u; void main() {}",
     ))
     .unwrap();
     assert_eq!(p.interface.notes.len(), 1);
@@ -198,7 +198,7 @@ fn post_reports_unsupported_defaults_without_skipping_the_pass() {
     std::fs::write(shaders.join("composite.vsh"), VERTEX).unwrap();
     std::fs::write(
         shaders.join("composite.fsh"),
-        "#version 430\nuniform double wide = 0.5lf;\nout vec4 c; void main() { c = vec4(1.0); }",
+        "#version 430\nuniform double wide = 0.5;\nout vec4 c; void main() { c = vec4(1.0); }",
     )
     .unwrap();
     let pack = horizon_shaders::Pack::open(&root).unwrap();

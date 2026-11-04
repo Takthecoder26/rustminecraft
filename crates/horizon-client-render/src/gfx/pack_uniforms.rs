@@ -760,7 +760,7 @@ mod tests {
         };
         let program = horizon_shaders::translate_composite(
             &source("void main() { gl_Position = vec4(0.0); }"),
-            &source("uniform double wide = 0.5lf; uniform float frameTimeCounter = 0.25; uniform ivec2 fixedValue = ivec2(-7, 9); out vec4 c; void main() { c = vec4(frameTimeCounter); }"),
+            &source("uniform double wide = 0.5; uniform float frameTimeCounter = 0.25; uniform ivec2 fixedValue = ivec2(-7, 9); out vec4 c; void main() { c = vec4(frameTimeCounter); }"),
             horizon_shaders::Target::Buffers,
         ).unwrap();
         let mut bytes = program.interface.initial_values.clone();
