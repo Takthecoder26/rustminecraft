@@ -9,6 +9,20 @@ use super::{conv::is_layered_target, lock, Command as C, PrivateCapabilities};
 
 const DEBUG_ID: u32 = 0;
 
+/// Tracks the draw framebuffer during one command-buffer replay.
+///
+/// Render passes leave the framebuffer selected for the next pass, so binding
+/// the same object again is redundant. `reset_state` restores the default
+/// framebuffer at each command-buffer boundary, while presentation restores it
+/// before the swap. External framebuffers are tracked separately because their
+/// binding changes both the draw and read targets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DrawFramebuffer {
+    Default,
+    Owned,
+    External,
+}
+
 fn extract_marker<'a>(data: &'a [u8], range: &core::ops::Range<u32>) -> &'a str {
     core::str::from_utf8(&data[range.start as usize..range.end as usize]).unwrap()
 }
@@ -195,6 +209,7 @@ impl super::Queue {
         command: &C,
         #[cfg_attr(target_arch = "wasm32", allow(unused))] data_bytes: &[u8],
         queries: &[glow::Query],
+        framebuffer: &mut DrawFramebuffer,
     ) {
         match *command {
             C::Draw {
@@ -1115,10 +1130,29 @@ impl super::Queue {
                 }
             }
             C::ResetFramebuffer { is_default } => {
-                if is_default {
-                    unsafe { gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None) };
+                let desired = if is_default {
+                    DrawFramebuffer::Default
                 } else {
-                    unsafe { gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.draw_fbo)) };
+                    DrawFramebuffer::Owned
+                };
+                if *framebuffer != desired {
+                    match desired {
+                        DrawFramebuffer::Default => {
+                            unsafe { gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None) };
+                        }
+                        DrawFramebuffer::Owned => {
+                            unsafe {
+                                gl.bind_framebuffer(
+                                    glow::DRAW_FRAMEBUFFER,
+                                    Some(self.draw_fbo),
+                                )
+                            };
+                        }
+                        DrawFramebuffer::External => unreachable!(),
+                    }
+                    *framebuffer = desired;
+                }
+                if !is_default {
                     unsafe {
                         gl.framebuffer_texture_2d(
                             glow::DRAW_FRAMEBUFFER,
@@ -1164,6 +1198,14 @@ impl super::Queue {
                         sample_count,
                     )
                 };
+                #[cfg(webgl)]
+                if matches!(&view.inner, super::TextureInner::ExternalFramebuffer { .. }) {
+                    *framebuffer = DrawFramebuffer::External;
+                }
+                #[cfg(native)]
+                if matches!(&view.inner, super::TextureInner::ExternalNativeFramebuffer { .. }) {
+                    *framebuffer = DrawFramebuffer::External;
+                }
             }
             C::ResolveAttachment {
                 attachment,
@@ -1199,6 +1241,7 @@ impl super::Queue {
                 };
                 unsafe { gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None) };
                 unsafe { gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.draw_fbo)) };
+                *framebuffer = DrawFramebuffer::Owned;
             }
             C::InvalidateAttachments(ref list) => {
                 if self
@@ -1924,6 +1967,7 @@ impl crate::Queue for super::Queue {
             // this at the beginning of the loop in case something outside of wgpu modified
             // this state prior to commit.
             unsafe { self.reset_state(gl) };
+            let mut framebuffer = DrawFramebuffer::Default;
             if let Some(ref label) = cmd_buf.label {
                 if self
                     .shared
@@ -1941,7 +1985,15 @@ impl crate::Queue for super::Queue {
             }
 
             for command in cmd_buf.commands.iter() {
-                unsafe { self.process(gl, command, &cmd_buf.data_bytes, &cmd_buf.queries) };
+                unsafe {
+                    self.process(
+                        gl,
+                        command,
+                        &cmd_buf.data_bytes,
+                        &cmd_buf.queries,
+                        &mut framebuffer,
+                    )
+                };
             }
 
             if cmd_buf.label.is_some()
