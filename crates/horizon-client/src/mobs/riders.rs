@@ -144,6 +144,12 @@ fn top_passenger(mobs: &[Mob], vehicle: u32, counter: i32) -> u32 {
         _ => vehicle,
     }
 }
+/// `Entity.canRide`: whether a mob of this kind may ride a vehicle at all. A
+/// warden and the wither never do (`Warden` and `WitherBoss` override it to
+/// return false).
+pub fn can_ride(species: Species) -> bool {
+    !matches!(species, Species::Warden | Species::Wither)
+}
 /// `Piglin.startRiding` over `Entity.startRiding` for two mobs: a baby piglin
 /// that boards a hoglin sits on the top of up to three piglins stacked on it.
 /// Not the vehicle it is on already, nor one it carries itself, and only
@@ -158,6 +164,9 @@ pub fn start_riding(mobs: &mut [Mob], rider: u32, vehicle: u32) -> bool {
     let Some(r) = mobs.iter().find(|m| m.id == rider) else {
         return false;
     };
+    if !can_ride(r.species()) {
+        return false;
+    }
     let on_hoglin = mobs
         .iter()
         .any(|m| m.id == vehicle && m.species() == Species::Hoglin);
@@ -409,6 +418,24 @@ mod tests {
     fn archers_keep_their_distance_and_brawlers_close_in() {
         assert!(ranged(Species::Skeleton) && ranged(Species::Pillager));
         assert!(!ranged(Species::Zombie) && !ranged(Species::Vindicator));
+    }
+    fn of(species: Species, id: u32) -> Mob {
+        let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        kind.species = species;
+        Mob::new(id, std::sync::Arc::new(kind), Vec3::ZERO, 0.0)
+    }
+    /// `Entity.startRiding` asks `canRide` first: a warden and the wither never
+    /// board, while a cow does.
+    #[test]
+    fn a_warden_and_the_wither_never_start_riding() {
+        assert!(!can_ride(Species::Warden) && !can_ride(Species::Wither));
+        assert!(can_ride(Species::Cow));
+        let mut mobs = [of(Species::Warden, 1), of(Species::Cow, 2)];
+        assert!(!start_riding(&mut mobs, 1, 2));
+        assert!(mobs[0].extra.mount.is_none());
+        let mut mobs = [of(Species::Cow, 3), of(Species::Cow, 4)];
+        assert!(start_riding(&mut mobs, 3, 4));
+        assert_eq!(mobs[0].extra.mount, Some(4));
     }
     /// `Spider.getVehicleAttachmentPoint` and
     /// `CaveSpider.getVehicleAttachmentPoint`: a vehicle no wider than the

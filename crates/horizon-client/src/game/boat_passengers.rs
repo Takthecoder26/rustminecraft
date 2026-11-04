@@ -22,6 +22,26 @@ const PLAYER_RIDING_OFFSET: f64 = 0.6;
 fn carries(m: &Mob) -> bool {
     m.rider.is_some() || m.extra.rider.is_some()
 }
+
+/// `AbstractBoat.push` with `Entity.startRiding`'s `canRide`: a mob boards a
+/// moving, empty boat under its width limit, unless the boat tag or
+/// `can_ride` refuses it.
+fn boards_boat(
+    species: Species,
+    width: f32,
+    mounted: bool,
+    pick_up: bool,
+    count: usize,
+    max: usize,
+    tagged: bool,
+) -> bool {
+    pick_up
+        && count < max
+        && !mounted
+        && width < super::boats::WIDTH as f32
+        && riders::can_ride(species)
+        && !tagged
+}
 /// `isPushable`, as `pushableBy` and `canVehicleCollide` ask it:
 /// `Mob::pushable` plus the shulkers it leaves out (they take no push, but
 /// count), less a ridden horse (`AbstractHorse.isPushable`).
@@ -238,14 +258,17 @@ impl Game<'_> {
             };
             if touched {
                 let m = &self.mobs[j];
-                let boards = pick_up
-                    && count < max
-                    && m.extra.mount.is_none()
-                    && m.width() < super::boats::WIDTH as f32
-                    && !self
-                        .res
+                let boards = boards_boat(
+                    m.species(),
+                    m.width(),
+                    m.extra.mount.is_some(),
+                    pick_up,
+                    count,
+                    max,
+                    self.res
                         .mob_data()
-                        .entity_has("minecraft:cannot_be_pushed_onto_boats", &m.kind.id);
+                        .entity_has("minecraft:cannot_be_pushed_onto_boats", &m.kind.id),
+                );
                 if boards {
                     // startRiding fails quietly (no push) while the mob's
                     // boarding cooldown runs (Entity.canRide) or the boat
@@ -455,5 +478,21 @@ mod tests {
         assert!(!boat_pushes(boat, at(64.1), false));
         assert!(boat_pushes(boat, at(64.5), true));
         assert!(!boat_pushes(boat, at(64.5625), true));
+    }
+
+    /// `AbstractBoat.push` asks `Entity.canRide` before `startRiding`: a warden
+    /// or the wither never boards, whatever its width, and neither does a mob
+    /// in `cannot_be_pushed_onto_boats`, one too wide, or an occupied boat.
+    #[test]
+    fn a_warden_never_boards_a_boat() {
+        let board = |species, width| boards_boat(species, width, false, true, 0, 2, false);
+        assert!(board(Species::Cow, 0.9));
+        assert!(!board(Species::Warden, 0.9));
+        assert!(!board(Species::Wither, 0.9));
+        assert!(!board(Species::Cow, super::super::boats::WIDTH as f32));
+        assert!(!boards_boat(Species::Cow, 0.9, true, true, 0, 2, false));
+        assert!(!boards_boat(Species::Cow, 0.9, false, true, 2, 2, false));
+        assert!(!boards_boat(Species::Cow, 0.9, false, false, 0, 2, false));
+        assert!(!boards_boat(Species::Cow, 0.9, false, true, 0, 2, true));
     }
 }
