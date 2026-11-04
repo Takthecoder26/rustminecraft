@@ -8,7 +8,7 @@
 //! - vanilla's uniform blocks get the bindings of [`BLOCKS`], and each of [`SAMPLERS`] is split
 //!   into a texture and a sampler object, combined again where the sampler is named;
 //! - the vertex inputs become globals the caller's [`Glue`] fills before the pack's `main`
-//!   (renamed `hz_main`) runs, and `gl_VertexID` reads the glue's expression;
+//!   (renamed `hz_main`) runs, and `gl_VertexID` (or `gl_VertexIndex`) reads the glue's expression;
 //! - varyings get locations by name across the stages, the fragment output location 0.
 
 use std::collections::HashSet;
@@ -43,7 +43,7 @@ pub struct Glue<'a> {
     pub setup: &'a str,
     /// Statements after it, on `gl_Position`.
     pub finish: &'a str,
-    /// The expression `gl_VertexID` reads.
+    /// The expression `gl_VertexID` and `gl_VertexIndex` read.
     pub vertex_id: &'a str,
 }
 
@@ -64,8 +64,8 @@ pub fn translate_core(
     glue: &Glue,
 ) -> Result<CoreProgram, String> {
     const CORE: &str = "minecraft:shaders/core/";
-    let vertex_text = strip_comments(&expand(vertex, CORE, include)?);
-    let fragment_text = strip_comments(&expand(fragment, CORE, include)?);
+    let vertex_text = split_sampler_params(&strip_comments(&expand(vertex, CORE, include)?));
+    let fragment_text = split_sampler_params(&strip_comments(&expand(fragment, CORE, include)?));
     let mut names = Names::default();
     let vertex_code = rewrite(&vertex_text, ShaderStage::Vertex, glue, &mut names)
         .map_err(|e| format!("vertex shader: {e}"))?;
@@ -191,6 +191,174 @@ fn strip_comments(text: &str) -> String {
 
 fn is_ident(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The index of the bracket closing the one at `open`.
+fn closing(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth <= 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A parameter or argument list split at its top-level commas.
+fn split_list(list: &str) -> Vec<&str> {
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, c) in list.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&list[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&list[start..]);
+    parts
+}
+
+/// The identifier ending at `end` (exclusive), after any spaces.
+fn ident_before(text: &str, end: usize) -> &str {
+    let end = text[..end].trim_end().len();
+    let start = text[..end]
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !is_ident(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    &text[start..end]
+}
+
+/// Functions with `sampler2D` parameters (`vec4 fetch(sampler2D s, ivec2 at)`), which naga
+/// can't take: each such parameter becomes a `texture2D` and a `sampler`, as the uniforms do,
+/// its name combines them again in the body, and calls pass a sampler's two halves.
+fn split_sampler_params(text: &str) -> String {
+    // The global samplers, by where they are declared.
+    let mut globals: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(decl) = declaration(line)
+            && decl.storage == "uniform"
+            && decl.ty == "sampler2D"
+        {
+            globals.push((offset, decl.name));
+        }
+        offset += line.len();
+    }
+    let combined = |name: &str| format!("sampler2D(hz_tex_{name}, hz_smp_{name})");
+    // Each function's parameter list and body rewritten, at the top level.
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut functions: HashSet<&str> = HashSet::new();
+    let mut samplers: HashSet<&str> = globals.iter().map(|(_, name)| *name).collect();
+    let (mut depth, mut at) = (0i32, 0);
+    while let Some(c) = text[at..].chars().next() {
+        let line_start = at == 0 || text.as_bytes()[at - 1] == b'\n';
+        if line_start && text[at..].trim_start_matches([' ', '\t']).starts_with('#') {
+            at += text[at..].find('\n').map_or(text.len() - at, |n| n + 1);
+            continue;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            '(' if depth == 0 => {
+                let name = ident_before(text, at);
+                let Some(close) = closing(text, at) else {
+                    break;
+                };
+                let params = split_list(&text[at + 1..close]);
+                let sampler_params: Vec<&str> = params
+                    .iter()
+                    .filter_map(|p| {
+                        let words: Vec<&str> = p.split_whitespace().collect();
+                        (words.len() >= 2 && words[words.len() - 2] == "sampler2D")
+                            .then(|| words[words.len() - 1])
+                    })
+                    .collect();
+                if !name.is_empty() && !sampler_params.is_empty() {
+                    functions.insert(name);
+                    samplers.extend(&sampler_params);
+                    let list: Vec<String> = params
+                        .iter()
+                        .map(|p| {
+                            let words: Vec<&str> = p.split_whitespace().collect();
+                            match words.len() >= 2 && words[words.len() - 2] == "sampler2D" {
+                                true => {
+                                    let name = words[words.len() - 1];
+                                    format!("texture2D hz_tex_{name}, sampler hz_smp_{name}")
+                                }
+                                false => p.to_string(),
+                            }
+                        })
+                        .collect();
+                    edits.push((at + 1..close, list.join(",")));
+                    let after = close
+                        + 1
+                        + (text[close + 1..].len() - text[close + 1..].trim_start().len());
+                    if text[after..].starts_with('{')
+                        && let Some(end) = closing(text, after)
+                    {
+                        // A global sampler of that name declared above already reads the
+                        // parameter's halves, which hide its own.
+                        let own: Vec<&str> = sampler_params
+                            .iter()
+                            .copied()
+                            .filter(|p| !globals.iter().any(|(o, g)| g == p && *o < after))
+                            .collect();
+                        let open: String = own
+                            .iter()
+                            .map(|p| format!("\n#define {p} {}\n", combined(p)))
+                            .collect();
+                        let shut: String = own.iter().map(|p| format!("\n#undef {p}\n")).collect();
+                        edits.push((after + 1..after + 1, open));
+                        edits.push((end..end, shut));
+                    }
+                }
+                at = close;
+            }
+            _ => {}
+        }
+        at += c.len_utf8();
+    }
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, with) in edits {
+        out.push_str(&text[last..range.start]);
+        out.push_str(&with);
+        last = range.end;
+    }
+    out.push_str(&text[last..]);
+    // Calls, the innermost first: a sampler argument passes both halves.
+    let mut end = out.len();
+    while let Some(open) = out[..end].rfind('(') {
+        end = open;
+        if !functions.contains(ident_before(&out, open)) {
+            continue;
+        }
+        let Some(close) = closing(&out, open) else {
+            continue;
+        };
+        let args: Vec<String> = split_list(&out[open + 1..close])
+            .into_iter()
+            .map(|a| match samplers.contains(a.trim()) {
+                true => format!("hz_tex_{0}, hz_smp_{0}", a.trim()),
+                false => a.to_string(),
+            })
+            .collect();
+        out.replace_range(open + 1..close, &args.join(","));
+    }
+    out
 }
 
 /// `text` with each whole identifier `from` written as `to`.
@@ -329,6 +497,19 @@ fn rewrite(
     names: &mut Names,
 ) -> Result<String, String> {
     let vertex = stage == ShaderStage::Vertex;
+    // GL's `gl_VertexID` and Vulkan GLSL's `gl_VertexIndex` (26.3 packs read either) are the
+    // glue's vertex, in the pack's code only: the glue's own helpers read the real one.
+    let text = match vertex {
+        true => {
+            let id = format!("({})", glue.vertex_id);
+            replace_ident(
+                &replace_ident(text, "gl_VertexID", &id),
+                "gl_VertexIndex",
+                &id,
+            )
+        }
+        false => text.to_owned(),
+    };
     let mut out = String::from("#version 450 core\n");
     if vertex {
         out.push_str(glue.prelude);
@@ -462,11 +643,7 @@ fn rewrite(
     if !vertex {
         return Ok(out);
     }
-    let mut code = replace_ident(
-        &rename_main(&out),
-        "gl_VertexID",
-        &format!("({})", glue.vertex_id),
-    );
+    let mut code = rename_main(&out);
     write!(
         code,
         "void main() {{\n{}\nhz_main();\n{}\n}}\n",
@@ -708,6 +885,27 @@ mod tests {
             error.contains("minecraft:shaders/include/nothing.glsl not found"),
             "{error}"
         );
+    }
+
+    /// GLSL a pack's helpers use: functions that take a `sampler2D` (one named after the uniform
+    /// declared below it, one passing its sampler on), an unsized `const` array and Vulkan GLSL's
+    /// `gl_VertexIndex` in a global's initializer beside GL's `gl_VertexID`.
+    #[test]
+    fn helpers_taking_samplers_translate() {
+        let vsh = "#version 450\n\
+            const float[] weights = float[3](0.25, 0.5, 0.25);\n\
+            vec4 texel_at(sampler2D Sampler0, ivec2 at) {\n    return texelFetch(Sampler0, at, 0);\n}\n\
+            vec4 blurred(in sampler2D source, vec2 uv) {\n\
+                vec2 step = 1.0 / vec2(textureSize(source, 0));\n    vec4 sum = vec4(0.0);\n\
+                for (int i = 0; i < 3; i++) {\n        sum += weights[i] * texture(source, uv + step * float(i - 1));\n    }\n\
+                return sum + texel_at(source, ivec2(0));\n}\n\
+            #include <minecraft:projection.glsl>\n\
+            uniform sampler2D Sampler0;\n\
+            in vec3 Position;\nin vec2 UV0;\nout vec4 vertexColor;\nint corner = gl_VertexIndex % 4;\n\
+            void main() {\n    vertexColor = blurred(Sampler0, UV0) * float(corner + gl_VertexID);\n\
+                gl_Position = ProjMat * vec4(Position, 1.0);\n}\n";
+        let fsh = "#version 450\nin vec4 vertexColor;\nout vec4 fragColor;\nvoid main() { fragColor = vertexColor; }\n";
+        translate_core(vsh, fsh, &[], &include, &GLUE).unwrap();
     }
 
     #[test]
