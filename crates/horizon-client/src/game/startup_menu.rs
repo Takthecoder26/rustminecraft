@@ -621,7 +621,13 @@ impl Loading {
                 | Event::ExportRepro
                 | Event::ListMusicTracks
                 | Event::PlayMusicTrack(..)
-                | Event::Volume(..) => {}
+                | Event::Volume(..)
+                | Event::OpenStudioReplay(..) => {}
+                Event::OpenStudioFolder => {
+                    let dir = std::path::PathBuf::from("recordings");
+                    let _ = std::fs::create_dir_all(&dir);
+                    packs::open_folder(&dir);
+                }
             }
         }
     }

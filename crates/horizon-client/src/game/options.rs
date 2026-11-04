@@ -424,6 +424,19 @@ impl Game<'_> {
                     self.confirm_trusted_link(ACCESSIBILITY_HELP_LINK, Screen::Options)
                 }
                 Event::Narrator => self.narrator_status_changed(),
+                Event::OpenStudioReplay(path) => {
+                    let path_str = path.to_string_lossy().to_string();
+                    let _ = self.open_studio_replay(&path_str);
+                    self.studio_freecam.active = true;
+                    self.studio_timeline.visible = true;
+                    self.screen = Screen::Playing;
+                    self.dragging = false;
+                }
+                Event::OpenStudioFolder => {
+                    let dir = std::path::PathBuf::from("recordings");
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
             }
         }
         Ok(())
