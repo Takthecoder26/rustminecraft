@@ -151,7 +151,9 @@ zombie,cow,villager` runs one.
   or keep decision panics and names the first difference. It catches what the
   read tracking can't see: a new thread-local, a global counter, or a `MobWorld`
   override only one of the two paths sets. CI runs the server harnesses this way
-  (`tools/ci/region-verify.sh`).
+  (`tools/ci/region-verify.sh`). A long jump's angle shuffle, unseeded as in
+  vanilla, is the one draw it repeats on purpose: this mode seeds it from the mob
+  and its target (`mobs/frog.rs`).
 - `HORIZON_PARALLEL_COMMIT=0`: every round takes the serial walk, with no
   classification. Any other value, or none, leaves clean rounds on the workers
   ([below](#parallel-commit)). `verify` runs a clean round on both paths and
@@ -479,15 +481,16 @@ results and on two more runs; the first attempt's log was overwritten, so why it
 failed is not known. `mob_ai`'s probe has its own mob loop, so it does not reach
 the clean path.
 
-**`tools/ci/region-verify.sh` fails on `dedicated_server`, with or without
-parallel commit.** The panic is "the commit and its replay differ" in a long
-jump's `chosen`. `optimal_jump_vector` follows vanilla's `Collections.shuffle`
-with no seeded random, so a commit and its replay can pick different angles for
-the same frog or goat. It failed 3 of 3 runs with `HORIZON_PARALLEL_COMMIT=0`. With
-the shuffle temporarily pinned, a local change that was not committed, all four
-verify harnesses passed, so this draw is the only cause there. It has not been
-fixed. The script's other tests pass when run on their own. It has not been run
-on the commit before this merge, so when it began to fail is not known.
+**`tools/ci/region-verify.sh` failed on `dedicated_server`, with or without
+parallel commit, until the commit after this one.** The panic was "the commit and
+its replay differ" in a long jump's `chosen`. `optimal_jump_vector` follows
+vanilla's `Collections.shuffle` with no seeded random, so a commit and its replay
+could pick different angles for the same frog or goat. It failed 3 of 3 runs with
+`HORIZON_PARALLEL_COMMIT=0`. In verify mode the shuffle is now seeded from the
+mob's id and its target, which a commit and its replay share; every other mode
+keeps the unseeded one, so play does not change. The script then passed, and
+`dedicated_server` passed three more verify runs. It was not run on the commit
+before this merge, so when it began to fail is not known.
 
 **Not run.** No control run of this binary, no second run, and no workload with
 mixed species, moving players or mobs outside the entity-ticking area. `lan_e2e`

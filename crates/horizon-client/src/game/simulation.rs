@@ -177,6 +177,9 @@ impl Default for ServerCoordination {
             Ok("verify") => Execution::Verify,
             _ => Execution::Auto,
         };
+        if execution == Execution::Verify {
+            horizon_client::mobs::frog::repeat_jump_shuffles();
+        }
         Self {
             levels: Default::default(),
             next_entity: 0,
@@ -274,6 +277,7 @@ impl ServerCoordination {
         self.parallel_commit = parallel;
         self.walk_log = Some(Vec::new());
         if verify {
+            horizon_client::mobs::frog::repeat_jump_shuffles();
             self.execution = Execution::Verify;
         }
     }
