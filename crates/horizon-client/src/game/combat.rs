@@ -807,3 +807,82 @@ mod stuck_tests {
         assert_eq!((s.arrows, s.stingers), (0, 0));
     }
 }
+
+#[cfg(test)]
+mod guest_hit_tests {
+    use super::*;
+    use crate::game::{Audio, Options, PlayerMotion, Progress, Settings, load_resources};
+    use horizon_client::mobs::{Mob, MobEvent};
+    use horizon_core::geometry::Vec3;
+
+    /// A bystander stands exactly under the mob that bites, listed first: the
+    /// search by position ignores height and would have named the bystander.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn an_effect_hit_on_a_guest_credits_the_mob_that_swung() {
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 100.0, 0.5)).unwrap());
+        for (id, kind, y) in [
+            (4, "minecraft:zombie", 90.0),
+            (5, "minecraft:cave_spider", 100.0),
+        ] {
+            let kind = game.res.mob_types().get(kind).cloned().unwrap();
+            game.simulation
+                .mobs
+                .push(Mob::new(id, kind, Vec3::new(1.5, y, 0.5), 0.0));
+        }
+        let from = [1.5, 100.0, 0.5];
+        let hits = [
+            MobEvent::AttackPlayerWithEffect {
+                amount: 2.0,
+                from,
+                effect: "minecraft:poison",
+                ticks: 140,
+                amplifier: 0,
+            },
+            MobEvent::StingPlayer {
+                amount: 2.0,
+                from,
+                poison_ticks: 200,
+            },
+        ];
+        for hit in hits {
+            game.combat.pending.clear();
+            game.guest_mob_event(5, hit);
+            let noted: Vec<u32> = game
+                .combat
+                .pending
+                .iter()
+                .map(|(_, (id, _), _)| *id)
+                .collect();
+            assert_eq!(noted, [5]);
+            assert_eq!(game.combat.melee_mob, None, "the hit used it up");
+        }
+    }
+}
