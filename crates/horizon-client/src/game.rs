@@ -219,6 +219,7 @@ mod native_inventories;
 mod native_item_container;
 mod native_item_energy;
 mod native_item_fluids;
+mod native_level_effects;
 mod native_level_refs;
 mod native_lifecycle;
 mod native_living_refs;
