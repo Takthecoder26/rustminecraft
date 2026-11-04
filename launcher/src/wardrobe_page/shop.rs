@@ -1163,10 +1163,9 @@ impl Launcher {
         let Some(session) = w.session.clone().filter(|s| s.live()) else {
             return;
         };
-        let (uuid, saved) = (w.uuid.clone(), w.saved.clone());
+        let uuid = w.uuid.clone();
         cx.spawn(async move |this, cx| {
             let started = Instant::now();
-            let mut saved = saved;
             while started.elapsed() < CHECKOUT_WAIT && session.live() {
                 cx.background_executor().timer(CHECKOUT_POLL).await;
                 let waiting = this
@@ -1184,17 +1183,21 @@ impl Launcher {
                 if me.claim.claimed != Some(true) {
                     continue;
                 }
-                saved.me = Some(me);
-                let _ = saved.save(&dir(), &uuid);
-                let trip = Trip {
-                    saved,
-                    items: HashMap::new(),
-                    session: None,
-                    result: Ok(()),
-                };
                 let _ = this.update(cx, |this, cx| {
                     this.shop.checkout = None;
+                    let Some(Ok(saved)) =
+                        claim_landed(this.wardrobe.as_ref(), &uuid, Ok(me), &dir())
+                    else {
+                        cx.notify();
+                        return;
+                    };
                     this.shop.claimed_now = true;
+                    let trip = Trip {
+                        saved,
+                        items: HashMap::new(),
+                        session: None,
+                        result: Ok(()),
+                    };
                     let done = tr("Founder set claimed. It's in your wardrobe.").into();
                     this.wardrobe_back(trip, Some(done));
                     cx.notify();
