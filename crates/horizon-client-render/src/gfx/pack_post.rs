@@ -2121,6 +2121,8 @@ impl PackPost {
             post.particles,
             post.damaged_block,
             post.beacon_beam,
+            post.block_translucent,
+            post.particles_translucent,
         ];
         let late = [
             false,
@@ -2129,6 +2131,8 @@ impl PackPost {
             post.particles_late,
             false,
             true,
+            post.translucent_late,
+            post.particles_translucent_late,
         ];
         let shadow_only = (post.shadow_only_player, post.shadow_only_lit_blocks);
         let shadow_programs = [post.shadow_entities, post.shadow_block];
@@ -3170,7 +3174,8 @@ impl PackPost {
             return;
         };
         let geometry = &entities.geometry;
-        for (program, pass) in entities.passes.iter_mut().enumerate() {
+        for program in super::pack_entities::DRAW_ORDER {
+            let pass = &mut entities.passes[program];
             let Some(pass) = pass.as_mut().filter(|_| entities.late[program] == late) else {
                 continue;
             };
@@ -3284,7 +3289,9 @@ impl PackPost {
                 continue;
             };
             let mut draws = (geometry.draws.iter())
-                .filter(|d| d.shadow && d.program == program)
+                .filter(|d| {
+                    d.shadow && super::pack_entities::shadow_owner(d.program) == Some(program)
+                })
                 .peekable();
             if draws.peek().is_none() {
                 continue;
@@ -3296,7 +3303,11 @@ impl PackPost {
                 encoder,
                 pass,
                 size,
-                (geometry.draws.iter()).any(|d| d.shadow && d.program == program && d.portal),
+                (geometry.draws.iter()).any(|d| {
+                    d.shadow
+                        && super::pack_entities::shadow_owner(d.program) == Some(program)
+                        && d.portal
+                }),
             );
             let mut on_portal = false;
             let mut rp = self.begin(encoder, pass);
@@ -5159,3 +5170,7 @@ mod const_offset_tests;
 
 #[cfg(test)]
 mod integer_colortex0_tests;
+
+#[cfg(test)]
+#[path = "pack_post/tests/material_routes.rs"]
+mod material_routes_test;

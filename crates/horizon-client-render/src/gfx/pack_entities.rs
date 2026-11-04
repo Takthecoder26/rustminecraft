@@ -1,6 +1,6 @@
 //! Entities, block entities, translucent entity parts and particles drawn by a shader pack's
-//! `gbuffers_entities`, `gbuffers_block`, `gbuffers_entities_translucent` and
-//! `gbuffers_particles` (spec 2.3, 5.3, 5.4): the runs of `Frame::entities` the game marked (`EntitySpan`), each its
+//! `gbuffers_entities`, `gbuffers_block`, `gbuffers_particles` and their translucent
+//! variants: the runs of `Frame::entities` the game marked (`EntitySpan`), each its
 //! own draw with its `entityId` or `blockEntityId` and `entityColor` in a per-draw slot of
 //! `HzDraw` (set 2). Horizon draws whatever the pack does not.
 
@@ -216,9 +216,9 @@ pub struct Casters {
 impl Casters {
     /// Whether the shadow pass draws `span`'s run, of kind `program`.
     pub fn cast(&self, span: &EntitySpan, program: usize) -> bool {
-        match program {
-            ENTITY => self.entities && (!self.only_player || span.player),
-            BLOCK => self.blocks && (!self.only_lit || span.emissive),
+        match shadow_owner(program) {
+            Some(ENTITY) => self.entities && (!self.only_player || span.player),
+            Some(BLOCK) => self.blocks && (!self.only_lit || span.emissive),
             _ => false,
         }
     }
@@ -358,6 +358,69 @@ impl PackEntities {
         rest: &mut Vec<Vertex>,
         skin: Option<&super::entity_skin::SkinFrame>,
     ) {
+        let posed = DrawPlan {
+            scratch: &mut self.scratch,
+            uniforms: &mut self.uniforms,
+            draws: &mut self.draws,
+            stride: self.stride,
+        }
+        .prepare(entities, spans, drawn, crack, shadow, rest, skin);
+        if self.draws.is_empty() && posed == 0 {
+            return;
+        }
+        let vertex_size = std::mem::size_of::<Vertex>() as u64;
+        let (need_vertices, need_slots) = (
+            u64::from(posed) + self.scratch.len() as u64,
+            self.draws.len() as u64,
+        );
+        let have_vertices = self.vertices.size() / vertex_size;
+        let have_slots = self.slots.size() / self.stride;
+        if need_vertices > have_vertices {
+            (self.vertices, self.table_group) =
+                Self::vertex_buffer(device, &self.table, need_vertices.next_power_of_two());
+        }
+        if need_slots > have_slots {
+            (self.slots, self.group) =
+                Self::slot_buffer(device, layout, need_slots.next_power_of_two(), self.stride);
+        }
+        let quads = self.draws.iter().map(|d| d.quads).max().unwrap_or(0);
+        if quads > self.quads {
+            self.quads = quads.next_power_of_two();
+            self.indices = quad_indices(device, self.quads);
+        }
+        if !self.scratch.is_empty() {
+            queue.write_buffer(
+                &self.vertices,
+                u64::from(posed) * vertex_size,
+                bytemuck::cast_slice(&self.scratch),
+            );
+        }
+        if !self.uniforms.is_empty() {
+            queue.write_buffer(&self.slots, 0, &self.uniforms);
+        }
+    }
+}
+
+/// Adapter-independent draw preparation, shared by uploads and headless routing tests.
+struct DrawPlan<'a> {
+    scratch: &'a mut Vec<Vertex>,
+    uniforms: &'a mut Vec<u8>,
+    draws: &'a mut Vec<Draw>,
+    stride: u64,
+}
+
+impl DrawPlan<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        &mut self,
+        entities: &[Vertex],
+        spans: &[EntitySpan],
+        drawn: [bool; PROGRAMS],
+        crack: ([f32; 4], [u32; 2]),
+        shadow: Casters,
+        rest: &mut Vec<Vertex>,
+        skin: Option<&super::entity_skin::SkinFrame>,
+    ) -> u32 {
         self.draws.clear();
         self.scratch.clear();
         self.uniforms.clear();
@@ -365,7 +428,7 @@ impl PackEntities {
         let posed = skin.map_or(0, |s| s.vertices);
         if let Some(skin) = skin {
             for (span, range, overlay) in skin_runs(skin) {
-                let program = program_of(&span).expect("tagged skin stage");
+                let program = material_program(&span, overlay).expect("tagged skin stage");
                 let pack = drawn[program] && !span.hidden;
                 let casts = shadow.cast(&span, program);
                 if !pack && !casts {
@@ -392,7 +455,8 @@ impl PackEntities {
             // gateway: its cube and its beam): each goes to its own program.
             // Beacon beams come in a run of their own, at stage NONE (game.rs: no stage of 5.4
             // is theirs), for gbuffers_beaconbeam.
-            let split = (program_of(&span) == Some(BLOCK) || span.stage == render_stage("NONE"))
+            let split = (span.stage == render_stage("BLOCK_ENTITIES")
+                || span.stage == render_stage("NONE"))
                 && whole
                     .chunks(4)
                     .any(|q| matches!(q[0].layer & 0xffff, 6 | 9 | 10));
@@ -415,14 +479,17 @@ impl PackEntities {
             } else {
                 [(whole, Part::Plain), (&[], Part::Plain), (&[], Part::Plain)]
             };
-            for (run, part) in parts {
+            for (run, part) in parts
+                .into_iter()
+                .flat_map(|(run, part)| material_runs(run, span, part))
+            {
                 if run.is_empty() {
                     continue;
                 }
                 let program = match part {
                     Part::Portal => Some(BLOCK),
                     Part::Beam => Some(BEAM),
-                    Part::Plain => program_of(&span).filter(|&p| {
+                    Part::Plain => material_program(&span, run[0].layer).filter(|&p| {
                         plain(run)
                             || (p == DESTROY && run.iter().all(|v| matches!(v.layer, 11 | 12)))
                     }),
@@ -463,39 +530,7 @@ impl PackEntities {
                 );
             }
         }
-        if self.draws.is_empty() && posed == 0 {
-            return;
-        }
-        let vertex_size = std::mem::size_of::<Vertex>() as u64;
-        let (need_vertices, need_slots) = (
-            u64::from(posed) + self.scratch.len() as u64,
-            self.draws.len() as u64,
-        );
-        let have_vertices = self.vertices.size() / vertex_size;
-        let have_slots = self.slots.size() / self.stride;
-        if need_vertices > have_vertices {
-            (self.vertices, self.table_group) =
-                Self::vertex_buffer(device, &self.table, need_vertices.next_power_of_two());
-        }
-        if need_slots > have_slots {
-            (self.slots, self.group) =
-                Self::slot_buffer(device, layout, need_slots.next_power_of_two(), self.stride);
-        }
-        let quads = self.draws.iter().map(|d| d.quads).max().unwrap_or(0);
-        if quads > self.quads {
-            self.quads = quads.next_power_of_two();
-            self.indices = quad_indices(device, self.quads);
-        }
-        if !self.scratch.is_empty() {
-            queue.write_buffer(
-                &self.vertices,
-                u64::from(posed) * vertex_size,
-                bytemuck::cast_slice(&self.scratch),
-            );
-        }
-        if !self.uniforms.is_empty() {
-            queue.write_buffer(&self.slots, 0, &self.uniforms);
-        }
+        posed
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -511,7 +546,7 @@ impl PackEntities {
         portal: bool,
     ) {
         let (entity_id, block_id) = match program {
-            BLOCK => (0, span.id),
+            BLOCK | BLOCK_TRANSLUCENT => (0, span.id),
             _ => (span.id, 0),
         };
         let mut bytes = [0u8; SLOT as usize];
@@ -658,7 +693,28 @@ pub const PARTICLE: usize = 3;
 pub const DESTROY: usize = 4;
 /// Beacon and End gateway beams (`gbuffers_beaconbeam`).
 pub const BEAM: usize = 5;
-pub const PROGRAMS: usize = 6;
+pub const BLOCK_TRANSLUCENT: usize = 6;
+pub const PARTICLE_TRANSLUCENT: usize = 7;
+pub const PROGRAMS: usize = 8;
+pub(super) const DRAW_ORDER: [usize; PROGRAMS] = [
+    ENTITY,
+    BLOCK,
+    TRANSLUCENT,
+    BLOCK_TRANSLUCENT,
+    PARTICLE,
+    PARTICLE_TRANSLUCENT,
+    DESTROY,
+    BEAM,
+];
+
+/// Camera material routes keep the shadow program of their subject.
+pub(super) fn shadow_owner(program: usize) -> Option<usize> {
+    match program {
+        ENTITY => Some(ENTITY),
+        BLOCK | BLOCK_TRANSLUCENT => Some(BLOCK),
+        _ => None,
+    }
+}
 
 /// Which program draws `span`'s run, given which of them (or their fallbacks) the pack has;
 /// `None`: Horizon draws it.
@@ -676,13 +732,57 @@ pub fn program_of(span: &EntitySpan) -> Option<usize> {
             ENTITY
         }
     } else if span.stage == render_stage("BLOCK_ENTITIES") {
-        BLOCK
+        if span.translucent {
+            BLOCK_TRANSLUCENT
+        } else {
+            BLOCK
+        }
     } else if span.stage == render_stage("PARTICLES") {
-        PARTICLE
+        if span.translucent {
+            PARTICLE_TRANSLUCENT
+        } else {
+            PARTICLE
+        }
     } else if span.stage == render_stage("DESTROY") {
         DESTROY
     } else {
         return None;
+    })
+}
+
+fn material_program(span: &EntitySpan, layer: u32) -> Option<usize> {
+    let mut span = *span;
+    if span.stage == render_stage("BLOCK_ENTITIES") {
+        span.translucent |= layer & super::entity_batch::OIT_ENTITY != 0
+            || matches!(
+                layer & 0xffff,
+                super::TRANSLUCENT_ITEM_OVERLAY | super::TRANSLUCENT_GLINT_ITEM_OVERLAY
+            );
+    } else if span.stage == render_stage("PARTICLES") {
+        span.translucent |= layer & 0xffff == super::TRANSLUCENT_PARTICLE_OVERLAY;
+    }
+    program_of(&span)
+}
+
+/// Split only at material boundaries, preserving every quad's order within its route.
+fn material_runs(
+    mut run: &[Vertex],
+    span: EntitySpan,
+    part: Part,
+) -> impl Iterator<Item = (&[Vertex], Part)> {
+    std::iter::from_fn(move || {
+        let first = run.first()?;
+        let program = material_program(&span, first.layer);
+        let end = if part == Part::Plain {
+            run.chunks(4)
+                .position(|quad| material_program(&span, quad[0].layer) != program)
+                .map_or(run.len(), |q| q * 4)
+        } else {
+            run.len()
+        };
+        let (next, tail) = run.split_at(end);
+        run = tail;
+        Some((next, part))
     })
 }
 
@@ -734,14 +834,12 @@ mod tests {
         let all = [true; PROGRAMS];
         assert_eq!(drawn_by_pack(&spans[0], all), Some(ENTITY));
         assert_eq!(drawn_by_pack(&spans[1], all), Some(PARTICLE));
-        assert_eq!(
-            drawn_by_pack(&spans[1], [true, true, true, false, true, true]),
-            None
-        );
-        assert_eq!(
-            drawn_by_pack(&spans[2], [true, false, true, true, true, true]),
-            None
-        );
+        let mut without_particles = all;
+        without_particles[PARTICLE] = false;
+        assert_eq!(drawn_by_pack(&spans[1], without_particles), None);
+        let mut without_blocks = all;
+        without_blocks[BLOCK] = false;
+        assert_eq!(drawn_by_pack(&spans[2], without_blocks), None);
         assert_eq!(drawn_by_pack(&spans[2], all), Some(BLOCK));
         let shadow = EntitySpan {
             translucent: true,
@@ -780,6 +878,10 @@ mod tests {
         assert!(!some.cast(&spans[2], BLOCK) && some.cast(&lit, BLOCK));
     }
 }
+
+#[cfg(test)]
+#[path = "pack_entities/tests/material_routes.rs"]
+mod material_routes_test;
 
 /// Decode the destroy-stage origin stored in the light bytes and project one continuous
 /// sprite over each model face. Pack geometry uses ordinary atlas UVs, not Horizon's overlay codes.
@@ -965,6 +1067,27 @@ fn skin_runs(skin: &super::entity_skin::SkinFrame) -> Vec<(EntitySpan, Range<u32
 mod gpu_span_tests {
     use super::*;
     use crate::gfx::entity_skin::{SkinFrame, SkinJob};
+
+    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = crate::gfx::test_gpu::instance();
+        let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                eprintln!("MATERIAL_ROUTE_GPU_SETUP_ABSENT: {error}");
+                assert_ne!(
+                    std::env::var("HORIZON_REQUIRE_ROUTE_GPU").as_deref(),
+                    Ok("1"),
+                    "mandatory entity upload GPU control has no adapter"
+                );
+                return None;
+            }
+        };
+        eprintln!("MATERIAL_ROUTE_GPU_ADAPTER {:?}", adapter.get_info());
+        Some(
+            pollster::block_on(adapter.request_device(&Default::default()))
+                .expect("entity upload GPU device setup failed"),
+        )
+    }
     #[test]
     fn posed_draws_preserve_subject_ids_overlays_and_hidden_shadow_casters() {
         let mut skin = SkinFrame {
@@ -1038,14 +1161,7 @@ mod gpu_span_tests {
 
     #[test]
     fn end_portal_faces_reach_the_shadow_pass_with_their_block_entity() {
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
-            return;
-        };
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
-        else {
-            return;
-        };
+        let Some((device, queue)) = gpu() else { return };
         let layout = super::super::pack_draw::DrawUniforms::new(&device);
         let mut geometry = PackEntities::new(&device, &layout.layout);
         // One block entity: a plain face, then an End portal face (overlay layer 9).
@@ -1089,14 +1205,7 @@ mod gpu_span_tests {
 
     #[test]
     fn posed_and_cpu_draws_keep_offsets_uniforms_and_special_fallbacks() {
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
-            return;
-        };
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
-        else {
-            return;
-        };
+        let Some((device, queue)) = gpu() else { return };
         let layout = super::super::pack_draw::DrawUniforms::new(&device);
         let mut geometry = PackEntities::new(&device, &layout.layout);
         let entity = |start, id| EntitySpan {

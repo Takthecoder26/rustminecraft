@@ -154,6 +154,15 @@ const BLOCK: [&str; 5] = [
     "gbuffers_basic",
 ];
 
+const BLOCK_TRANSLUCENT: [&str; 6] = [
+    "gbuffers_block_translucent",
+    "gbuffers_block",
+    "gbuffers_terrain",
+    "gbuffers_textured_lit",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
 /// `gbuffers_clouds` and its fallbacks, as in Iris (its ShaderDoc's gbuffers table): without
 /// any of them the game draws its clouds.
 const CLOUDS: [&str; 3] = ["gbuffers_clouds", "gbuffers_textured", "gbuffers_basic"];
@@ -189,6 +198,14 @@ const BEACON_BEAM: [&str; 3] = ["gbuffers_beaconbeam", "gbuffers_textured", "gbu
 
 /// `gbuffers_particles` and its fallbacks (2.3).
 const PARTICLES: [&str; 4] = [
+    "gbuffers_particles",
+    "gbuffers_textured_lit",
+    "gbuffers_textured",
+    "gbuffers_basic",
+];
+
+const PARTICLES_TRANSLUCENT: [&str; 5] = [
+    "gbuffers_particles_translucent",
     "gbuffers_particles",
     "gbuffers_textured_lit",
     "gbuffers_textured",
@@ -409,10 +426,13 @@ pub struct Post {
     pub entities: Option<PostProgram>,
     /// What draws block entities, after terrain.
     pub block: Option<PostProgram>,
+    /// Translucent block-entity materials, with the block program as fallback.
+    pub block_translucent: Option<PostProgram>,
     /// What draws translucent entities (name tags, shadows), after the others.
     pub entities_translucent: Option<PostProgram>,
     /// What draws particles.
     pub particles: Option<PostProgram>,
+    pub particles_translucent: Option<PostProgram>,
     /// What draws beacon and End gateway beams (after deferred, blended).
     pub beacon_beam: Option<PostProgram>,
     pub damaged_block: Option<PostProgram>,
@@ -445,8 +465,10 @@ pub struct Post {
     pub shadow_comp: Vec<PostProgram>,
     /// Translucent entities draw after deferred (`separateEntityDraws`, 3.2).
     pub translucent_late: bool,
-    /// Particles draw after deferred (`particles.ordering`, `particles.before.deferred`, 3.2).
+    /// Opaque particles draw after deferred (`particles.ordering`, legacy before flag).
     pub particles_late: bool,
+    /// Translucent particles draw after deferred; `mixed` separates the two materials.
+    pub particles_translucent_late: bool,
     /// The custom uniforms of `shaders.properties` (3.4).
     pub custom: Custom,
     /// `texture.*`: the textures the pack binds to sampler names.
@@ -479,8 +501,10 @@ impl Post {
             &self.sky_textured,
             &self.entities,
             &self.block,
+            &self.block_translucent,
             &self.entities_translucent,
             &self.particles,
+            &self.particles_translucent,
             &self.damaged_block,
             &self.clouds,
             &self.weather,
@@ -610,8 +634,10 @@ pub fn load_post(
         sky_textured: None,
         entities: None,
         block: None,
+        block_translucent: None,
         entities_translucent: None,
         particles: None,
+        particles_translucent: None,
         beacon_beam: None,
         damaged_block: None,
         clouds: None,
@@ -629,6 +655,7 @@ pub fn load_post(
         shadow_comp: Vec::new(),
         translucent_late: false,
         particles_late: false,
+        particles_translucent_late: false,
         custom: Custom::parse(properties),
         textures: Vec::new(),
         sizes: [None; crate::BUFFERS],
@@ -787,7 +814,9 @@ pub fn load_post(
         };
     let mut gbuffers_dyn = |names: &[&str], i: &GbuffersInputs| gbuffers(names, Group::Gbuffers, i);
     let entities_translucent = translucent(&ENTITIES_TRANSLUCENT, 0.0, &mut gbuffers_dyn);
+    let block_translucent = translucent(&BLOCK_TRANSLUCENT, 0.0, &mut gbuffers_dyn);
     let particles = translucent(&PARTICLES, 0.1, &mut gbuffers_dyn);
+    let particles_translucent = translucent(&PARTICLES_TRANSLUCENT, 0.1, &mut gbuffers_dyn);
     let beacon_beam = translucent(&BEACON_BEAM, 0.0, &mut gbuffers_dyn);
     // Clouds blend, as vanilla's do (OQ-23).
     let clouds = inputs
@@ -849,8 +878,10 @@ pub fn load_post(
     loader.post.sky_textured = sky_textured;
     loader.post.entities = entities;
     loader.post.block = block;
+    loader.post.block_translucent = block_translucent;
     loader.post.entities_translucent = entities_translucent;
     loader.post.particles = particles;
+    loader.post.particles_translucent = particles_translucent;
     loader.post.beacon_beam = beacon_beam;
     loader.post.damaged_block = damaged_block;
     loader.post.clouds_off = properties.get("clouds").is_some_and(|v| v.trim() == "off");
@@ -860,13 +891,45 @@ pub fn load_post(
     loader.post.hand = hand;
     let flag = |key: &str| properties.get(key).map(|v| v.trim() == "true");
     loader.post.translucent_late = flag("separateEntityDraws").unwrap_or(false);
-    // `after` when the pack has a deferred program, else `mixed`; ours are all translucent, so
-    // `mixed` draws them after deferred too.
-    loader.post.particles_late = match properties.get("particles.ordering").map(str::trim) {
-        Some("before") => false,
-        Some(_) => true,
-        None => !flag("particles.before.deferred").unwrap_or(false),
+    let has_deferred = loader
+        .post
+        .programs
+        .iter()
+        .any(|p| p.group == Group::Deferred);
+    let ordering = match properties.get("particles.ordering").map(str::trim) {
+        Some("before") => [false, false],
+        Some("mixed") => [false, true],
+        Some("after") => [true, true],
+        _ => match flag("particles.before.deferred") {
+            Some(before) => [!before; 2],
+            None => [has_deferred, true],
+        },
     };
+    [
+        loader.post.particles_late,
+        loader.post.particles_translucent_late,
+    ] = ordering;
+    // Sampler routing uses the same phase as the actual geometry draw.
+    for (program, late) in [
+        (
+            &mut loader.post.entities_translucent,
+            loader.post.translucent_late,
+        ),
+        (
+            &mut loader.post.block_translucent,
+            loader.post.translucent_late,
+        ),
+        (&mut loader.post.particles, ordering[0]),
+        (&mut loader.post.particles_translucent, ordering[1]),
+    ] {
+        if let Some(program) = program {
+            program.group = if late {
+                Group::Translucent
+            } else {
+                Group::Gbuffers
+            };
+        }
+    }
     load_shadow(
         &mut loader,
         inputs.terrain.as_ref(),
@@ -895,8 +958,10 @@ fn load_shadow(
         &post.sky_textured,
         &post.entities,
         &post.block,
+        &post.block_translucent,
         &post.entities_translucent,
         &post.particles,
+        &post.particles_translucent,
         &post.beacon_beam,
         &post.damaged_block,
         &post.clouds,
@@ -2529,7 +2594,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             ("gbuffers_textured", Some(TRANSLUCENT_BLEND))
         );
         assert_eq!(particles.blend, Some(TRANSLUCENT_BLEND));
-        assert!(post.particles_late && !post.translucent_late);
+        assert!(!post.particles_late && post.particles_translucent_late && !post.translucent_late);
         // Clouds fall back to gbuffers_textured, blended.
         let clouds = post.clouds.as_ref().unwrap();
         assert_eq!(
@@ -2715,3 +2780,7 @@ mod buffer_blend_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "post/tests/material_routes.rs"]
+mod material_routes_test;
