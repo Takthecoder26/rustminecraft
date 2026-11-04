@@ -507,11 +507,7 @@ impl Launcher {
                 .id("launcher-version")
                 .px(px(8.))
                 .pt(px(8.))
-                .child(trf("Launcher {version}", &[("version", backend::VERSION)]))
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.version_clicked();
-                    cx.notify();
-                })),
+                .child(trf("Launcher {version}", &[("version", backend::VERSION)])),
         );
 
         crate::glass::plate(radius::PANEL)

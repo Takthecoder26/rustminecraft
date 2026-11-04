@@ -687,45 +687,48 @@ fn any_owner_opens_the_gate_and_the_one_who_plays_brings_the_session() {
 }
 
 #[test]
-fn offline_names_play_only_beside_an_owner() {
+fn offline_names_play_without_an_owner() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
-    let refused = accounts.play_as(&store, Player::Offline("Builder_1".into()));
-    assert_eq!(refused.unwrap_err(), OFFLINE_NEEDS_OWNER);
-    assert!(accounts.offline.is_empty());
+    accounts
+        .play_as(&store, Player::Offline("Builder_1".into()))
+        .unwrap();
+    assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
     accounts
         .play_as(&store, Player::Offline("Builder_1".into()))
         .unwrap();
-    // Signing the last owner out keeps the name, which no longer plays.
+    // Signing the last account out keeps the name and it remains playable.
     accounts.remove(&store, UUID).unwrap();
     assert_eq!(accounts.offline, ["Builder_1"]);
     assert_eq!(accounts.player(), Player::Offline("Builder_1".into()));
     assert!(!accounts.has_owner(&store));
     let (_, ep) = mock(|_| {});
-    assert!(launch(&ep, Some("test-client"), &store, &mut accounts).is_err());
+    assert!(launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false).is_ok());
     assert!(accounts
         .play_as(&store, Player::Offline("Builder_2".into()))
-        .is_err());
+        .is_ok());
 }
 
 #[test]
-fn the_developer_option_off_is_the_owner_gate() {
+fn starting_without_an_owner_is_offline_by_default() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
-    let refused = accounts.play_as_with(&store, Player::Offline("Builder_1".into()), false);
-    assert_eq!(refused.unwrap_err(), OFFLINE_NEEDS_OWNER);
-    assert_eq!(accounts, Accounts::default());
+    accounts
+        .play_as_with(&store, Player::Offline("Builder_1".into()), false)
+        .unwrap();
+    let (m, ep) = mock(|_| {});
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false).unwrap();
+    assert!(pass.session.is_none() && pass.owner.is_none());
+    assert!(m.lock().unwrap().log.is_empty());
     let (_, ep) = mock(|m| m.owns_game = false);
-    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
-    assert_eq!(refused.unwrap_err(), NoOwner);
     let mut accounts = signed_in(&store, &secrets("mc-token", true));
-    let refused = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false);
-    assert_eq!(refused.unwrap_err(), NoOwner);
+    let pass = launch_for_game(&ep, Some("test-client"), &store, &mut accounts, false).unwrap();
+    assert!(pass.session.is_none() && pass.owner.is_none());
 }
 
 #[test]
-fn the_developer_option_plays_offline_names_without_an_owner() {
+fn offline_names_stay_offline_without_an_owner() {
     let store = MemoryStore::default();
     let mut accounts = Accounts::default();
     accounts

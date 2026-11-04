@@ -243,7 +243,8 @@ impl Launcher {
             .child(label(
                 tr(if running { "Running" } else { "Play" }).to_string(),
             ));
-        match play_press(ready, self.owner, self.preparing || running) {
+        let can_prepare = self.owner == Some(true) || self.settings.minecraft_dir.is_some();
+        match play_press(ready, Some(can_prepare), self.preparing || running) {
             PlayPress::Nothing => play = disabled(play),
             PlayPress::Play => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {

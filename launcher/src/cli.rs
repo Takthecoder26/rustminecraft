@@ -1907,9 +1907,6 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                         "Playing offline as the game's own name (`account select NAME` to switch)."
                     );
                 }
-                if !accounts.has_owner(account::store()) {
-                    println!("{}.", account::NEEDS_OWNER);
-                }
             }
         }
         AccountCmd::Refresh { who } => {
